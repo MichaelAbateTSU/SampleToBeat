@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ChopLab
+data/
+node_modules/
+frontend/dist/
+test-results/
+playwright-report/
+# lock pins an internal package mirror; pyproject floors are the source of truth
+uv.lock
+
