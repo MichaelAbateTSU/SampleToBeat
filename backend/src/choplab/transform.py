@@ -19,6 +19,7 @@ DEFAULT_TRANSFORM = {
 DEFAULT_FX = {
     "highpass_hz": 0.0, "lowpass_hz": 0.0, "saturation": 0.0, "bitcrush_bits": 0, "reverb": 0.0,
     "delay": 0.0, "delay_beats": 0.75, "width": 1.0, "compress": False, "wobble": 0.0, "vinyl": 0.0,
+    "eq_low_db": 0.0, "eq_mid_db": 0.0, "eq_high_db": 0.0,
 }
 
 
@@ -68,13 +69,14 @@ def _pb(y: np.ndarray, board: pb.Pedalboard) -> np.ndarray:
 
 def pitch_stretch(y: np.ndarray, semitones: float, speed: float, mode: str = "stretch",
                   preserve_formants: bool = False) -> np.ndarray:
-    """speed >1 makes it shorter. 'tape' links pitch and speed like varispeed; 'stretch' keeps them independent."""
+    """speed >1 makes it shorter. 'tape' is varispeed: pitching up also shortens (on top of `speed`);
+    'stretch' keeps pitch and length independent. Grid-locked callers divide speed by tape_rate()."""
     if len(y) < 256:
         return y
     if mode == "tape" and abs(semitones) > 1e-3:
         rate = 2 ** (semitones / 12)
         y = _sresample(y, max(2, int(round(len(y) / rate))), axis=0).astype(np.float32)
-        semitones, speed = 0.0, speed / rate
+        semitones = 0.0
     if abs(speed - 1) < 1e-4 and abs(semitones) < 1e-3:
         return y
     out = pb.time_stretch(np.ascontiguousarray(y.T), SR, stretch_factor=float(speed),
@@ -97,6 +99,10 @@ def effects(y: np.ndarray, fx: dict, bpm: float = 90.0, seed: int = 0) -> np.nda
         chain.append(pb.LowpassFilter(cutoff_frequency_hz=float(fx["lowpass_hz"])))
     if fx["bitcrush_bits"]:
         chain.append(pb.Bitcrush(bit_depth=float(fx["bitcrush_bits"])))
+    for key, f in (("eq_low_db", pb.LowShelfFilter), ("eq_mid_db", pb.PeakFilter), ("eq_high_db", pb.HighShelfFilter)):
+        if fx[key]:
+            hz = {"eq_low_db": 120.0, "eq_mid_db": 1000.0, "eq_high_db": 6000.0}[key]
+            chain.append(f(cutoff_frequency_hz=hz, gain_db=float(fx[key])))
     if fx["compress"]:
         chain.append(pb.Compressor(threshold_db=-18, ratio=3, attack_ms=10, release_ms=120))
     if chain:
@@ -126,6 +132,12 @@ def effects(y: np.ndarray, fx: dict, bpm: float = 90.0, seed: int = 0) -> np.nda
     if tail:
         y = _pb(y, pb.Pedalboard(tail))
     return y
+
+
+def tape_rate(t: dict) -> float:
+    """How much faster a tape-mode transform plays the audio (1.0 in stretch mode)."""
+    t = {**DEFAULT_TRANSFORM, **(t or {})}
+    return 2 ** ((float(t["pitch_semitones"]) + float(t["pitch_cents"]) / 100) / 12) if t["stretch_mode"] == "tape" else 1.0
 
 
 def transform(y: np.ndarray, t: dict, speed: float = 1.0) -> np.ndarray:

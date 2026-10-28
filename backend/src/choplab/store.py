@@ -42,11 +42,18 @@ def put(kind: str, doc: dict, parent: str | None = None) -> dict:
     doc.setdefault("created_at", now())
     doc["updated_at"] = now()
     with _lock, _conn() as con:
+        raw = json.dumps(doc, default=_plain)
         con.execute(
             "INSERT INTO docs(id,kind,parent,created,updated,doc) VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET doc=excluded.doc, updated=excluded.updated, parent=excluded.parent",
-            (doc["id"], kind, parent, doc["created_at"], doc["updated_at"], json.dumps(doc)))
-    return doc
+            (doc["id"], kind, parent, doc["created_at"], doc["updated_at"], raw))
+    return json.loads(raw)  # what was stored, as plain JSON types
+
+
+def _plain(o):
+    if hasattr(o, "tolist"):  # numpy scalars and arrays from the DSP code
+        return o.tolist()
+    raise TypeError(f"{type(o).__name__} is not JSON serializable")
 
 
 def get(kind: str, id: str) -> dict | None:

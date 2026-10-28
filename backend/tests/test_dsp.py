@@ -1,0 +1,99 @@
+"""DSP tests: pitch, stretch, reverse, fades, 808 tuning, drums (spec 30)."""
+import numpy as np
+import pytest
+
+from choplab import bass, drums, transform
+from choplab.core import SR, TICKS_PER_BAR, midi_to_hz, ticks_to_samples
+from conftest import dominant_hz
+
+
+def sine(hz, sec=1.0, amp=0.5):
+    t = np.arange(int(SR * sec)) / SR
+    y = (amp * np.sin(2 * np.pi * hz * t)).astype(np.float32)
+    return np.stack([y, y], 1)
+
+
+@pytest.mark.parametrize("semis", [-5, 3, 12])
+def test_pitch_shift_changes_frequency_not_length(semis):
+    y = transform.pitch_stretch(sine(440), semis, 1.0)
+    assert abs(len(y) - SR) < SR * 0.01
+    assert dominant_hz(y[SR // 10: -SR // 10]) == pytest.approx(440 * 2 ** (semis / 12), rel=0.01)
+
+
+@pytest.mark.parametrize("speed", [0.75, 1.25, 2.0])
+def test_stretch_changes_length_not_pitch(speed):
+    y = transform.pitch_stretch(sine(440, 2.0), 0, speed)
+    assert len(y) == pytest.approx(2 * SR / speed, rel=0.01)
+    assert dominant_hz(y[SR // 10: -SR // 10]) == pytest.approx(440, rel=0.01)
+
+
+def test_tape_mode_links_pitch_and_speed():
+    y = transform.pitch_stretch(sine(440, 2.0), 12, 1.0, mode="tape")
+    assert len(y) == pytest.approx(SR, rel=0.01)  # an octave up on a tape plays twice as fast
+    assert dominant_hz(y) == pytest.approx(880, rel=0.01)
+    t = {"pitch_semitones": 12, "stretch_mode": "tape"}
+    locked = transform.transform(sine(440, 2.0), t, 1.0 / transform.tape_rate(t))  # grid-locked caller
+    assert len(locked) == pytest.approx(2 * SR, rel=0.01) and dominant_hz(locked) == pytest.approx(880, rel=0.01)
+
+
+def test_reverse_fades_gain_and_output_shape():
+    ramp = np.stack([np.linspace(0, 1, SR, dtype=np.float32)] * 2, 1)
+    y = transform.transform(ramp, {"reverse": True, "fade_in_ms": 10, "fade_out_ms": 10, "gain_db": -6})
+    assert y.shape == ramp.shape and y.dtype == np.float32
+    assert y[0, 0] == 0 and y[-1, 0] == 0  # fades reach silence at both ends
+    mid = SR // 2
+    assert y[mid - 100, 0] > y[mid + 100, 0]  # reversed ramp descends
+    assert y[mid, 0] == pytest.approx(ramp[mid, 0] * 10 ** (-6 / 20), rel=0.01)
+
+
+def test_effects_are_finite_stereo_and_bounded_length():
+    y = sine(220, 1.0)
+    fx = {**transform.DEFAULT_FX, "highpass_hz": 150, "lowpass_hz": 6000, "saturation": 0.5, "bitcrush_bits": 10,
+          "reverb": 0.4, "delay": 0.3, "width": 1.3, "compress": True, "wobble": 0.5, "vinyl": 0.5,
+          "eq_low_db": -3, "eq_mid_db": 2, "eq_high_db": -4}
+    out = transform.effects(y, fx, 90)
+    assert out.shape == y.shape and np.isfinite(out).all()
+
+
+def test_eq_shelves_move_the_right_band():
+    lows = transform.effects(sine(60), {"eq_low_db": -12})
+    highs = transform.effects(sine(10000), {"eq_low_db": -12})
+    assert np.abs(lows).max() < 0.5 * 10 ** (-9 / 20)
+    assert np.abs(highs).max() == pytest.approx(0.5, rel=0.05)
+
+
+@pytest.mark.parametrize("midi", [28, 33, 40])
+def test_808_is_tuned_to_its_note(midi):
+    y = bass.render([{"tick": 0, "dur": TICKS_PER_BAR, "midi": midi}], 90, SR * 3)
+    assert y.ndim == 1 and np.isfinite(y).all() and np.abs(y).max() <= 1.0
+    body = y[int(0.15 * SR): int(1.0 * SR)]  # after the pitch-envelope drop
+    assert dominant_hz(body) == pytest.approx(midi_to_hz(midi), abs=1.5)
+
+
+def test_808_slide_glides_to_target_without_retrigger():
+    notes = [{"tick": 0, "dur": 960, "midi": 33}, {"tick": 480, "dur": 480, "midi": 45, "slide": True}]
+    y = bass.render(notes, 120, SR * 2, {"drive": 0, "harmonics": 0})
+    s = ticks_to_samples(480, 120)
+    tail = y[s + int(0.12 * SR): s + int(0.45 * SR)]
+    assert dominant_hz(tail) == pytest.approx(midi_to_hz(45), abs=3)
+    assert len(bass._chains(notes, 120, SR * 2)) == 1  # one voice: legato, not a second attack
+
+
+@pytest.mark.parametrize("genre", list(drums.GENRES))
+def test_drum_patterns_are_deterministic_and_on_grid(genre):
+    a = drums.generate(genre, 0.6, seed=7, bars=2)
+    assert a == drums.generate(genre, 0.6, seed=7, bars=2)
+    assert a != drums.generate(genre, 0.6, seed=8, bars=2)
+    assert set(a) == {"main", "alt", "sparse", "fill"}
+    hits = [h for lane in a.values() for h in lane]
+    assert hits and all(0 <= h["tick"] < 2 * TICKS_PER_BAR + 40 for h in hits)
+    assert any(h["inst"] == "kick" and h["tick"] < 20 for h in a["main"])  # kick on the one
+    assert {h["inst"] for h in a["main"]} <= set(drums.INSTRUMENTS)
+
+
+@pytest.mark.parametrize("kit", list(drums.KITS))
+def test_kit_sounds_are_valid(kit):
+    for inst in drums.INSTRUMENTS:
+        y = drums.sound(kit, inst)
+        assert y.ndim == 2 and y.shape[1] == 2 and len(y) > 100
+        assert np.isfinite(y).all() and 0.05 < np.abs(y).max() <= 1.0

@@ -32,7 +32,8 @@ def resolve(source: dict, stems: list[str]) -> tuple[tuple[str, ...], tuple[str,
     for f in files:
         if not Path(f).exists():
             raise FileNotFoundError(f"Missing audio for sample source: {f}")
-    return tuple(files), tuple(f"{source['content_hash']}:{s}" for s in stems)
+    return tuple(files), tuple(f"{source['content_hash']}:{s}" if s == "mix" else
+                               f"{source['content_hash']}:{source.get('stem_model', '')}:{s}" for s in stems)
 
 
 def _beat_rms(paths: tuple[str, ...], beat_times: np.ndarray) -> np.ndarray:
@@ -124,7 +125,7 @@ def discover(source: dict, analysis: dict, f: dict, count: int = 16, diversity: 
     period = 60 / analysis["bpm"]
     cands = []
 
-    def add(kind, stem, a, b, start, end, bars, beats):
+    def add(kind, stem, a, b, start, end, bars, beats, pickup=0.0):
         bleed = vocals + drums if stem == "melodic" else (drums if stem == "vocals" else rms_perc + vocals * 0.5)
         m, v = _candidate_metrics(f, a, b, rms[stem], rms["mix"], bleed, peaky, rep_vecs, onsets_t, bt)
         if kind == "chop":  # chops care about a clean attack, not loop restarts
@@ -137,6 +138,7 @@ def discover(source: dict, analysis: dict, f: dict, count: int = 16, diversity: 
             score += 0.04  # producers' favourite loop lengths
         cands.append({"kind": kind, "stem": stem, "stems": sets[stem], "start": round(float(start), 4),
                       "end": round(float(min(end, duration)), 4), "bars": bars, "beats": beats,
+                      "pickup": round(float(pickup), 4),
                       "metrics": {k: round(x, 3) for k, x in m.items()}, "score": round(float(score), 4), "_v": v})
 
     for stem in sets:
@@ -148,7 +150,7 @@ def discover(source: dict, analysis: dict, f: dict, count: int = 16, diversity: 
                 pre = onsets_t[(onsets_t < start) & (onsets_t > start - 0.06)]
                 start = float(pre[0]) if len(pre) else start
                 end = bt[b] if b < n else start + bars * 4 * period
-                add("loop", stem, a, b, start, end, bars, 4 * bars)
+                add("loop", stem, a, b, start, end, bars, 4 * bars, bt[a] - start)
         # chops: onset-aligned (note/transient) and beat-aligned half/one/two-beat slices
         src = rms[stem]
         for i in range(n - 2):
@@ -175,10 +177,19 @@ def discover(source: dict, analysis: dict, f: dict, count: int = 16, diversity: 
         out.append({**c, "id": store.new_id("smp"), "source_id": source["id"], "origin": "auto",
                     "duration": round(c["end"] - c["start"], 4), "source_bpm": analysis["bpm"],
                     "key": analysis["key"], "dominant_pitch": NOTE_NAMES[pc] if pc is not None else None,
-                    "rms_db": round(20 * np.log10(np.sqrt(np.mean(y ** 2)) + 1e-9), 1),
-                    "explanation": _explain(c["metrics"], c["kind"]), "tags": _tags(c),
+                    "rms_db": round(20 * np.log10(np.sqrt(np.mean(y ** 2)) + 1e-9), 1), "chroma": chroma(y),
+                    "transform": {}, "explanation": _explain(c["metrics"], c["kind"]), "tags": _tags(c),
                     "peaks": audio_io.peaks(y, 120), "name": _name(c)})
     return sorted(out, key=lambda s: -s["score"])
+
+
+def chroma(y: np.ndarray) -> list[float]:
+    """Pitch-class profile of a region, used to avoid layering clashing tonal material (spec 27.2)."""
+    import librosa
+
+    m = librosa.resample(y.mean(axis=1), orig_sr=SR, target_sr=22050)
+    c = librosa.feature.chroma_stft(y=m, sr=22050).mean(axis=1) if len(m) > 2048 else np.zeros(12)
+    return [round(float(x), 3) for x in c / (c.max() + 1e-9)]
 
 
 def _tags(c):
@@ -209,6 +220,7 @@ def manual(source: dict, analysis: dict, start: float, end: float, stems: list[s
     return {"id": store.new_id("smp"), "source_id": source["id"], "origin": "manual", "kind": "loop" if beats >= 4 else "chop",
             "stem": "+".join(stems), "stems": stems, "start": round(start, 4), "end": round(end, 4),
             "duration": round(end - start, 4), "bars": int(beats // 4) if beats >= 4 else 0, "beats": beats,
+            "pickup": 0.0, "chroma": chroma(y), "transform": {},
             "source_bpm": analysis["bpm"], "key": analysis["key"], "score": None, "metrics": {}, "explanation": ["manual selection"],
             "tags": ["manual"], "peaks": audio_io.peaks(y, 120), "name": name or f"Manual {start:.2f}-{end:.2f}s",
             "rms_db": round(20 * np.log10(np.sqrt(np.mean(y ** 2)) + 1e-9), 1)}

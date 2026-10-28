@@ -17,6 +17,9 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
 ]
 
+[project.scripts]
+choplab = "choplab.api:main"
+
 [project.optional-dependencies]
 separation = [
     "audio-separator[cpu]>=0.47",

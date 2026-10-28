@@ -7,7 +7,7 @@ import librosa
 import pyloudnorm
 
 from .audio_io import AudioError
-from .core import NOTE_NAMES, SR
+from .core import NOTE_NAMES, SR, parse_key
 
 ASR = 22050  # analysis rate
 HOP = 512
@@ -101,8 +101,9 @@ def _sync(m: np.ndarray, idx: np.ndarray) -> np.ndarray:
     return np.stack([m[:, a:max(b, a + 1)].mean(axis=1) for a, b in zip(bounds[:-1], bounds[1:])], axis=1)
 
 
-def analyze(y48: np.ndarray, progress=lambda s, f=None: None) -> tuple[dict, dict]:
-    """Returns (analysis document, per-beat feature arrays)."""
+def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | None = None) -> tuple[dict, dict]:
+    """Returns (analysis document, per-beat feature arrays). `override` = user corrections
+    {bpm, grid_offset (a downbeat time), downbeat_phase, key}."""
     duration = len(y48) / SR
     mono = librosa.resample(y48.mean(axis=1), orig_sr=SR, target_sr=ASR)
     if np.sqrt(np.mean(mono ** 2)) < 1e-4:
@@ -125,17 +126,40 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None) -> tuple[dict, dic
     stability = float(1.0 - min(1.0, np.std(ibi) / (np.mean(ibi) + 1e-9))) if len(ibi) > 2 else 0.0
     # least-squares fit over all beats: sub-frame tempo precision (frame-quantized IBIs are ~2% off at 140)
     n_idx = np.round((beat_times - beat_times[0]) / period)
-    if len(beat_times) > 3:
-        period = float(np.polyfit(n_idx, beat_times, 1)[0])
+    if not weak_grid:
+        # onset-flux peaks lag the attack by ~20 ms: re-anchor on backtracked onsets (constant shift)
+        ons = librosa.onset.onset_detect(onset_envelope=oenv_f, sr=ASR, hop_length=BHOP, units="time", backtrack=True)
+        if len(ons) >= 4:
+            d = ons[np.argmin(np.abs(ons[None, :] - beat_times[:, None]), axis=1)] - beat_times
+            d = d[np.abs(d) < 0.07]
+            if len(d) >= 4:
+                beat_times = beat_times + float(np.median(d))
+        # robust line fit; drop tracker outliers (e.g. beats invented in a fade-out) before refitting
+        coef = np.polyfit(n_idx, beat_times, 1)
+        keep = np.abs(beat_times - np.polyval(coef, n_idx)) < 0.05
+        if keep.sum() > 3:
+            coef = np.polyfit(n_idx[keep], beat_times[keep], 1)
+        period = float(coef[0])
+        if np.median(np.abs(beat_times - np.polyval(coef, n_idx))) < 0.012:  # metronomic (programmed/quantized)
+            beat_times = np.unique(np.polyval(coef, n_idx))
     bpm = round(60.0 / period, 2)
     # extend the grid over quiet intro/outro parts the tracker skipped
     pre = beat_times[0] - period * np.arange(int(beat_times[0] / period), 0, -1)
     post = beat_times[-1] + period * np.arange(1, int((duration - beat_times[-1]) / period) + 1)
     beat_times = np.concatenate([pre, beat_times, post])
     beat_times = beat_times[(beat_times >= 0) & (beat_times < duration)]
+    if override and (override.get("bpm") or override.get("grid_offset") is not None):
+        # user-corrected grid: a strict metronomic grid through the given downbeat
+        period = 60.0 / float(override.get("bpm") or bpm)
+        bpm = round(60.0 / period, 2)
+        off = float(override["grid_offset"]) if override.get("grid_offset") is not None else float(beat_times[0])
+        k0 = int(np.floor(off / period))
+        beat_times = off + period * np.arange(-k0, int((duration - off) / period) + 1)
+        beat_times = beat_times[(beat_times >= 0) & (beat_times < duration)]
+        weak_grid = False
     n_frames = len(oenv)
-    beats = np.unique(np.clip(librosa.time_to_frames(beat_times, sr=ASR, hop_length=HOP), 0, n_frames - 1))
-    beat_times = librosa.frames_to_time(beats, sr=ASR, hop_length=HOP)
+    # frame indices are only for feature syncing; beat_times stay sub-frame precise (HOP is ~23 ms)
+    beats = np.clip(librosa.time_to_frames(beat_times, sr=ASR, hop_length=HOP), 0, n_frames - 1)
 
     progress("key", 0.25)
     harm = librosa.effects.harmonic(mono)
@@ -155,6 +179,10 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None) -> tuple[dict, dic
     phase = int(np.argmax(phase_scores))
     srt = sorted(phase_scores, reverse=True)
     downbeat_conf = round((srt[0] - srt[1]) / (srt[0] + 1e-9), 3)
+    if override and override.get("grid_offset") is not None:
+        phase, downbeat_conf = k0 % 4, 1.0
+    if override and override.get("downbeat_phase") is not None:
+        phase, downbeat_conf = int(override["downbeat_phase"]), 1.0
     downbeats = beat_times[phase::4]
 
     progress("onsets", 0.55)
@@ -202,5 +230,10 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None) -> tuple[dict, dic
         "loudness_lufs": None if lufs is None or not np.isfinite(lufs) else round(lufs, 2),
         "peak_dbfs": round(20 * np.log10(max(peak, 1e-9)), 2),
     }
+    if override and override.get("key"):
+        if parse_key(override["key"]) is None:
+            raise ValueError(f"Unknown key {override['key']!r}; use e.g. 'A minor'.")
+        doc.update(key=override["key"], key_confidence=1.0)
+    doc["override"] = {k: v for k, v in (override or {}).items() if v is not None}
     features = {"beat_times": bt, "chroma": chroma_b, "mfcc": mfcc_b, "rms": rms_b, "rms_perc": rmsp_b, "onset": oenv_b}
     return doc, features

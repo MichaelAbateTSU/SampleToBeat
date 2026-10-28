@@ -13,7 +13,7 @@ BEATS_PER_BAR = 4
 TICKS_PER_BAR = PPQ * BEATS_PER_BAR
 STEP_TICKS = PPQ // 4  # one 16th note
 SCHEMA_VERSION = 1
-ENGINE_VERSION = "1"  # bump to invalidate render/transform caches
+ENGINE_VERSION = "2"  # bump to invalidate render/transform caches
 
 DATA_DIR = Path(os.environ.get("CHOPLAB_DATA", Path(__file__).resolve().parents[3] / "data"))
 
