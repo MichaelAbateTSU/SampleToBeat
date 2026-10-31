@@ -25,6 +25,8 @@ class OwnershipLost(StorageError):
 _settings: S3Settings | None = None
 _owner: str | None = None
 _fence: int | None = None
+_ready = False
+_runtime_error: str | None = None
 _stop = threading.Event()
 _cache_lock = threading.RLock()
 _transfer_lock = threading.RLock()
@@ -79,7 +81,20 @@ def guard(con):
         raise OwnershipLost("This instance no longer owns processing. Reload after the replacement instance starts; no stale result was committed.")
 
 
+def readiness_error():
+    if not enabled() or _ready:
+        return None
+    return _runtime_error or "Processing is waiting for exclusive storage ownership/reconciliation. Health remains available; reload the studio after the old instance releases its lease."
+
+
 def check():
+    error = readiness_error()
+    if error:
+        raise OwnershipLost(error)
+    _check_ownership()
+
+
+def _check_ownership():
     from . import store
     with store._conn() as con:
         guard(con)
@@ -99,7 +114,10 @@ def migrate_local():
     """Explicitly enabling storage publishes the existing volume before replacement."""
     from . import store
     for kind in ("source", "project", "variation", "export", "preview", "sound", "kit", "job"):
-        for doc in store.list_(kind):
+        with store._conn() as con:
+            rows = con.execute("SELECT doc FROM docs WHERE kind=?", (kind,)).fetchall()
+        for row in rows:
+            doc = json.loads(row[0])
             if doc.get("_assets") is not None:
                 continue
             if kind == "source" and doc.get("analysis"):
@@ -129,25 +147,80 @@ def portable(doc):
     return doc
 
 
+def portable_project(doc):
+    from . import store
+    catalog = {}
+    def collect(value):
+        if isinstance(value, dict):
+            for relative, id in value.get("_assets", {}).items():
+                with store._conn() as con:
+                    row = _asset(con, id)
+                catalog[id] = {"relative": relative, "object": json.loads(row[3])}
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+    collect(doc)
+    result = portable(doc)
+    result["durable_assets"] = catalog
+    return result
+
+
 @contextmanager
-def runtime():
-    global _owner, _fence
+def runtime(*, on_acquired=None):
+    # Cache files are mutable DSP working files, private to one process even
+    # though authoritative metadata and immutable objects are shared.
+    with open(core.data_path("durable-cache.lock"), "a+b") as lock:
+        lock.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise OwnershipLost("Another process owns this local audio cache. Use a private cache directory per instance.") from None
+        try:
+            if lock.seek(0, os.SEEK_END) == 0:
+                lock.write(b"0")
+                lock.flush()
+            with _runtime(on_acquired=on_acquired):
+                yield
+        finally:
+            lock.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _runtime(*, on_acquired=None):
+    global _owner, _fence, _ready, _runtime_error
     from . import store
     owner = uuid.uuid4().hex
-    with store._conn() as con:
-        _schema(con)
-        con.execute("INSERT INTO choplab_runtime(id,owner,fence,expires) VALUES(1,'',0,0) ON CONFLICT(id) DO NOTHING")
-        row = con.execute("SELECT fence,expires,EXTRACT(EPOCH FROM clock_timestamp()) "
-                          "FROM choplab_runtime WHERE id=1 FOR UPDATE").fetchone()
-        if row[1] > row[2]:
-            raise OwnershipLost("Another instance still owns processing. Retry startup after its 60-second lease expires; overlapping workers were not interrupted.")
-        highest = con.execute("SELECT COALESCE(MAX(owner_fence),0) FROM choplab_assets").fetchone()[0]
-        _owner, _fence = owner, max(row[0], highest) + 1
-        con.execute("UPDATE choplab_runtime SET owner=?,fence=?,expires=EXTRACT(EPOCH FROM clock_timestamp())+? WHERE id=1",
-                    (owner, _fence, LEASE_SECONDS))
+    def acquire():
+        global _owner, _fence
+        with store._conn() as con:
+            _schema(con)
+            con.execute("INSERT INTO choplab_runtime(id,owner,fence,expires) VALUES(1,'',0,0) ON CONFLICT(id) DO NOTHING")
+            row = con.execute("SELECT fence,expires,EXTRACT(EPOCH FROM clock_timestamp()) "
+                              "FROM choplab_runtime WHERE id=1 FOR UPDATE").fetchone()
+            if row[1] > row[2]:
+                return False
+            highest = con.execute("SELECT COALESCE(MAX(owner_fence),0) FROM choplab_assets").fetchone()[0]
+            _owner, _fence = owner, max(row[0], highest) + 1
+            con.execute("UPDATE choplab_runtime SET owner=?,fence=?,expires=EXTRACT(EPOCH FROM clock_timestamp())+? WHERE id=1",
+                        (owner, _fence, LEASE_SECONDS))
+            return True
+    _ready = False
+    _runtime_error = None
     _stop.clear()
 
     def heartbeat():
+        global _ready, _runtime_error
         while not _stop.wait(10):
             try:
                 with store._conn() as con:
@@ -156,22 +229,58 @@ def runtime():
                                 (LEASE_SECONDS,))
             except (StorageError, store.StoreUnavailable) as error:
                 core.log.error("Runtime ownership renewal failed: %s", error)
+                _ready = False
+                _runtime_error = f"Runtime ownership renewal failed: {error} Processing is read-only; resolve the database/storage error and restart this instance."
                 return
 
-    thread = threading.Thread(target=heartbeat, name="storage-lease", daemon=True)
-    thread.start()
-    try:
-        # Exclusive DB ownership proves previous cooperative workers cannot commit.
+    renewal = None
+    def activate():
+        nonlocal renewal
+        global _ready
+        renewal = threading.Thread(target=heartbeat, name="storage-lease", daemon=True)
+        renewal.start()
         migrate_local()
         reconcile()
         restore_kits()
+        if on_acquired:
+            on_acquired()
+        if _runtime_error:
+            raise OwnershipLost(_runtime_error)
+        with store._conn() as con:
+            guard(con)
+        _ready = True
+    def supervise():
+        global _runtime_error
+        while not _stop.wait(5):
+            try:
+                if acquire():
+                    activate()
+                    return
+            except (StorageError, store.StoreUnavailable) as error:
+                core.log.error("Replacement ownership/reconciliation failed: %s", error)
+                _runtime_error = f"Replacement ownership/reconciliation failed: {error} Processing is read-only; resolve the database/storage error and restart this instance."
+                # A partially reconciled owner must not admit API mutations.
+                return
+    supervisor = None
+    try:
+        if acquire():
+            activate()
+        else:
+            core.log.warning("Waiting as health-ready/read-only replacement; current owner was not interrupted.")
+            supervisor = threading.Thread(target=supervise, name="storage-takeover", daemon=True)
+            supervisor.start()
         yield
     finally:
         _stop.set()
-        thread.join(timeout=15)
-        with store._conn() as con:
-            con.execute("UPDATE choplab_runtime SET expires=0 WHERE id=1 AND owner=? AND fence=?",
-                        (owner, _fence))
+        if supervisor:
+            supervisor.join()
+        if renewal:
+            renewal.join()
+        if _owner == owner:
+            with store._conn() as con:
+                con.execute("UPDATE choplab_runtime SET expires=0 WHERE id=1 AND owner=? AND fence=?",
+                            (owner, _fence))
+        _ready = False
         _owner, _fence = None, None
 
 
@@ -301,11 +410,12 @@ def materialize(id: str) -> Path:
             raise StorageError(f"{error}. Check quota, private branch credentials, 503 SlowDown and local disk reserve; no incomplete audio was served.") from None
 
 
-def restore(doc: dict) -> dict:
+def restore(doc: dict, *, hydrate: bool = True) -> dict:
     assets = doc.get("_assets", {})
     # Restore before exposing paths to existing DSP and authenticated FileResponse.
-    for id in set(assets.values()):
-        materialize(id)
+    if hydrate:
+        for id in set(assets.values()):
+            materialize(id)
 
     def decode(value):
         if isinstance(value, dict):
@@ -350,7 +460,7 @@ def reconcile():
         retire_unlinked(con)
         rows = con.execute("SELECT id,namespace,ref,upload_id FROM choplab_assets WHERE state IN ('retired','deleted')").fetchall()
     for id, namespace, raw, upload in rows:
-        check()
+        _check_ownership()
         adapter = _adapter(namespace)
         if raw:
             adapter.delete(ObjectRef(**json.loads(raw)))
@@ -362,10 +472,10 @@ def reconcile():
                     Bucket=adapter.settings.bucket, Prefix=namespace + "/objects/")
                 for page in pages:
                     for item in page.get("Contents", []):
-                        check()
+                        _check_ownership()
                         adapter.client.delete_object(Bucket=adapter.settings.bucket, Key=item["Key"])
             for item in adapter.incomplete_uploads():
-                check()
+                _check_ownership()
                 adapter.abort_upload(item["Key"], item["UploadId"])
         with store._conn() as con:
             guard(con)

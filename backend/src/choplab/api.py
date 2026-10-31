@@ -47,7 +47,7 @@ app = FastAPI(title="ChopLab AI", version="0.1.0", lifespan=lifespan,
 @app.middleware("http")
 async def recovery_boundary(request: Request, call_next):
     path = request.url.path
-    if durable.enabled() and path.startswith("/api/") and path != "/api/health":
+    if durable.enabled() and path.startswith("/api/") and path not in ("/api/health", "/api/system/recovery", "/api/system/capabilities"):
         try:
             await asyncio.to_thread(durable.check)
         except (durable.StorageError, store.StoreUnavailable) as e:
@@ -303,7 +303,7 @@ def job_export(ctx, project_id: str, export_id: str, request: dict):
           "arrangement": arr, "samples": [samples[i] for i in sorted(used) if i in samples]} if request["project_json"] else None
     if pj and durable.enabled():
         pj["sources"] = list(sources.values())
-        pj = durable.portable(pj)
+        pj = durable.portable_project(pj)
     try:
         out = render.export(arr, samples, sources, _dir(project_id, "exports", export_id), request["filename"], request["format"],
                             request["scope"], request["loop_start_bar"], request["loop_bars"], request["stems"], pj, ctx.progress)
@@ -797,7 +797,7 @@ async def kit_upload(kit: str, inst: str, file: UploadFile = File(...)):
     finally:
         tmp.unlink(missing_ok=True)
     if durable.enabled():
-        await asyncio.to_thread(store.put, "kit", {"id": f"kit-{kit}-{inst}", "audio_path": str(drums.kit_path(kit, inst))})
+        await asyncio.to_thread(store.put, "kit", {"id": f"kit-{kit}-{inst}", "audio_path": str(data_path("kits", kit, "custom", f"{inst}.wav"))})
     return {"kit": kit, "inst": inst, "custom": True}
 
 
@@ -869,6 +869,8 @@ def database_ready():
 
 @app.get("/api/system/recovery")
 def recovery_status():
+    if durable.readiness_error():
+        return JSONResponse({"ok": False, "read_only": True, "detail": durable.readiness_error()}, 409)
     if jobs.recovery_error:
         return JSONResponse({"ok": False, "read_only": True, "detail": jobs.recovery_error}, 409)
     return {"ok": True, "read_only": False}
@@ -888,7 +890,7 @@ def capabilities():
     free = shutil.disk_usage(DATA_DIR).free
     return {"ffmpeg": audio_io.ffmpeg_exe() is not None, "sample_rate": SR, "data_dir": str(DATA_DIR),
             "hosted": HOSTING is not None, "max_upload_mb": MAX_UPLOAD // (1 << 20),
-            "job_recovery_error": jobs.recovery_error,
+            "job_recovery_error": jobs.recovery_error or durable.readiness_error(),
             "metadata_store": store.backend_name(),
             "max_audio_seconds": audio_io.MAX_SECONDS,
             "disk_free_gb": round(free / 1e9, 1), "schema_version": SCHEMA_VERSION,

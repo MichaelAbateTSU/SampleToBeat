@@ -272,8 +272,16 @@ def list_(kind: str, parent: str | None = None) -> list[dict]:
 
 
 def update(kind: str, id: str, **fields) -> dict:
+    from . import durable
     with _lock:  # read-modify-write under one lock: no lost updates between job threads
-        doc = get(kind, id)
+        if durable.enabled():
+            # Hydrating old paths here would overwrite freshly rendered output
+            # before prepare() can fingerprint and publish the replacement.
+            with _conn() as con:
+                row = con.execute("SELECT doc FROM docs WHERE kind=? AND id=?", (kind, id)).fetchone()
+            doc = durable.restore(json.loads(row[0]), hydrate=False) if row else None
+        else:
+            doc = get(kind, id)
         if doc is None:
             raise KeyError(id)
         doc.update(fields)

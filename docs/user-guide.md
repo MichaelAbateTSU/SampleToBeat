@@ -174,8 +174,12 @@ Back up metadata **including its durable asset catalog** and the matching privat
 Do not switch branches or restore metadata alone into a different bucket.
 
 A PostgreSQL lease permits one writer, with a monotonically increasing fencing token on every
-authoritative document/asset-reference mutation. Live overlapping instances refuse processing;
-after a stopped instance's 60-second lease expires a replacement may recover interrupted work.
+authoritative document/asset-reference mutation. Live overlapping instances serve health and
+read-only ownership feedback without admitting processing; this allows a zero-downtime host to
+stop its old instance rather than deadlocking startup on the new instance's health check.
+The replacement checks ownership every five seconds, then reconciles and admits processing after
+the old instance releases ownership or its 60-second lease expires. Each instance's local cache
+is exclusively locked; instances sharing metadata must use separate private cache directories.
 An old worker that wakes after expiry cannot commit metadata or attach assets. Objects are published
 under unique, never-reused namespaces before metadata references them. Retired keys cannot gain
 references; cleanup retries exact retired keys, including ambiguous upload orphans, so delayed old

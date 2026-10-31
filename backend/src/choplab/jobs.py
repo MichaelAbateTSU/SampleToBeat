@@ -46,11 +46,10 @@ def runtime(*, offline_recovery: bool = False):
     """Hold the audio-volume lock until even gracefully draining workers exit."""
     global _volume_id, recovery_error
     if durable.enabled():
-        with durable.runtime():
-            _volume_id = "durable"
-            recovery_error = None
+        _volume_id = "durable"
+        recovery_error = None
+        with durable.runtime(on_acquired=lambda: recover_interrupted(confirmed_stopped=True)):
             try:
-                recover_interrupted(confirmed_stopped=True)
                 yield
             finally:
                 with _state:
@@ -152,6 +151,8 @@ def _target(job_type: str, params: dict) -> tuple[str, str, str, str, str] | Non
 
 
 def _submit(job_type: str, project_id: str | None, params: dict) -> dict:
+    if durable.enabled():
+        durable.check()
     if recovery_error:
         raise Busy(recovery_error)
     target = _target(job_type, params)

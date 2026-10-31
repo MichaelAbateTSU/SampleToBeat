@@ -88,6 +88,12 @@ def synth(kit: str, inst: str) -> np.ndarray:
 
 def kit_path(kit: str, inst: str) -> Path:
     custom = data_path("kits", kit, "custom", f"{inst}.wav")
+    from . import durable, store
+    if durable.enabled():
+        doc = store.get("kit", f"kit-{kit}-{inst}")
+        if doc:
+            return Path(doc["audio_path"])
+        custom.unlink(missing_ok=True)
     return custom if custom.exists() else data_path("kits", kit, f"{inst}.wav")
 
 

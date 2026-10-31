@@ -9,9 +9,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+import numpy as np
 from fastapi.testclient import TestClient
 
-from choplab import api, core, drums, durable, jobs, schemas, store
+from choplab import api, audio_io, core, drums, durable, jobs, schemas, store
 from choplab.object_storage import ObjectRef, S3ByteStorage, S3Settings, StorageError
 
 
@@ -135,6 +136,20 @@ def test_shared_references_retirement_and_non_reusable_keys(remote):
         assert durable.materialize(second).read_bytes() == b"identical-audio-bytes"
 
 
+def test_same_path_new_output_is_published_not_overwritten_by_old_cache_hydration(remote):
+    root, _, _ = remote
+    with jobs.runtime():
+        file = write(root, "features.npz", b"old-feature-data")
+        first = store.put("source", {"id": "analysis", "features_path": file})
+        Path(file).write_bytes(b"new-feature-data")
+        second = store.update("source", "analysis", analysis={"bpm": 100})
+        assert first["_assets"] != second["_assets"]
+        assert Path(second["features_path"]).read_bytes() == b"new-feature-data"
+        assert store.get("source", "analysis")["analysis"] == {"bpm": 100}
+        durable.reconcile()
+        assert Path(second["features_path"]).read_bytes() == b"new-feature-data"
+
+
 def test_failed_publication_never_commits_success_and_orphans_reconcile(remote, monkeypatch):
     root, _, _ = remote
     with jobs.runtime():
@@ -246,9 +261,126 @@ def test_live_overlap_refuses_takeover_and_metadata_snapshot_contains_asset_cata
     with jobs.runtime():
         store.put("sound", {"id": "saved", "sample_path": write(root, "a.wav")})
         env = worker_env(remote, root.parent / "other")
-        process = subprocess.run([sys.executable, "-c", "from choplab import durable,jobs; durable.configure()\nwith jobs.runtime(): pass"],
+        process = subprocess.run([sys.executable, "-c", "from choplab import durable,jobs; durable.configure()\nwith jobs.runtime():\n assert not durable._ready\n print('health-ready read-only follower')"],
                                  env=env, capture_output=True, text=True, timeout=20)
-        assert process.returncode != 0 and "Another instance still owns" in process.stderr
+        assert process.returncode == 0 and "read-only follower" in process.stdout
         snapshot = store.export_snapshot()
         assert snapshot["durable_audio"]["assets"] and snapshot["durable_audio"]["links"]
         durable.validate_snapshot(snapshot["durable_audio"], [json.loads(row[5]) for row in snapshot["rows"]])
+        same_cache = subprocess.run(
+            [sys.executable, "-c", "from choplab import durable,jobs; durable.configure()\nwith jobs.runtime(): pass"],
+            env=worker_env(remote, root), capture_output=True, text=True, timeout=20)
+        assert same_cache.returncode != 0
+        assert "Another process owns this local audio cache" in same_cache.stderr
+
+
+@pytest.mark.parametrize("reconcile_failure", [False, True])
+def test_health_ready_read_only_overlap_automatically_takes_over_after_expiry(remote, reconcile_failure):
+    root, _, _ = remote
+    follower = root.parent / "follower"
+    signals = root.parent / "follower-signals"
+    signals.mkdir()
+    code = """
+import os,time
+from pathlib import Path
+from fastapi.testclient import TestClient
+from choplab import api,durable
+signal=Path(os.environ['SIGNAL_DIR'])
+if os.environ['RECONCILE_FAILURE'] == 'yes':
+    def fail(): raise durable.StorageError('Synthetic storage throttle 503 SlowDown')
+    durable.reconcile=fail
+with TestClient(api.app) as client:
+    assert client.get('/api/health').status_code == 200
+    assert client.post('/api/projects',json={'name':'blocked'}).status_code == 503
+    (signal/'ready').write_text('health-ready and read-only')
+    until=time.monotonic()+20
+    while not durable._ready and not durable._runtime_error and time.monotonic()<until: time.sleep(.05)
+    if os.environ['RECONCILE_FAILURE'] == 'yes':
+        status=client.get('/api/system/recovery')
+        assert status.status_code == 409
+        assert '503 SlowDown' in status.json()['detail'] and 'restart' in status.json()['detail']
+        assert '503 SlowDown' in client.get('/api/system/capabilities').json()['job_recovery_error']
+        assert client.post('/api/projects',json={'name':'still-blocked'}).status_code == 503
+        (signal/'acquired').write_text('explicit reconciliation failure')
+    else:
+        assert durable._ready
+        result=client.post('/api/projects',json={'name':'successor'})
+        assert result.status_code==201, result.text
+        (signal/'acquired').write_text(result.json()['id'])
+"""
+    with jobs.runtime():
+        worker = subprocess.Popen([sys.executable, "-c", code], env={**worker_env(remote, follower), "SIGNAL_DIR": str(signals),
+                                  "RECONCILE_FAILURE": "yes" if reconcile_failure else "no"},
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            wait_file(signals / "ready", worker)
+            with store._conn() as con:
+                con.execute("UPDATE choplab_runtime SET expires=0 WHERE id=1")
+            wait_file(signals / "acquired", worker)
+            out, err = worker.communicate(timeout=15)
+            assert worker.returncode == 0, (out, err)
+            if not reconcile_failure:
+                assert store.get("project", (signals / "acquired").read_text())["name"] == "successor"
+            with pytest.raises(durable.OwnershipLost):
+                store.put("project", {"id": "stale", "name": "must not commit"})
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+                worker.communicate(timeout=10)
+
+
+def test_studio_audio_workflow_survives_replacement_with_custom_sounds(remote, monkeypatch):
+    if os.environ.get("CHOPLAB_FULL_DURABLE_AUDIO") != "yes":
+        pytest.skip("Full DSP acceptance runs separately from the small capped race tests")
+    root, _, _ = remote
+    monkeypatch.setattr(api, "MIN_FREE", 0)
+    monkeypatch.setattr(audio_io, "MAX_SECONDS", 300)
+    with TestClient(api.app) as client:
+        project = client.post("/api/projects", json={"name": "durable-audio"}).json()["id"]
+        imported = client.post(f"/api/projects/{project}/demo").json()
+        job = jobs.wait(imported["job"]["id"], timeout=300)
+        assert job["status"] == "completed", job.get("error_message")
+        source = imported["source"]["id"]
+        separated = client.post(f"/api/sources/{source}/separate", json={"model_id": "builtin-hpss"}).json()
+        assert jobs.wait(separated["id"], timeout=300)["status"] == "completed"
+        # Custom sounds enter the same durable catalog as source/render output.
+        sound = root / "one-shot.wav"
+        tone = np.sin(2 * np.pi * 65.4 * np.arange(4800) / 48000).astype(np.float32) * 0.2
+        audio_io.write_wav(sound, np.stack([tone, tone], axis=1))
+        wav = sound.read_bytes()
+        kit = client.post("/api/kits/trap/kick", files={"file": ("kick.wav", wav, "audio/wav")})
+        assert kit.status_code == 201, kit.text
+        bass = client.post(f"/api/projects/{project}/bass-sample", files={"file": ("808.wav", wav, "audio/wav")})
+        assert bass.status_code == 201, bass.text
+        generated = client.post(f"/api/projects/{project}/generate", json={"variations": 1, "bars": 4}).json()
+        finished = jobs.wait(generated["id"], timeout=300)
+        assert finished["status"] == "completed", finished.get("error_message")
+        variation = finished["result"]["variation_ids"][0]
+        opened = client.post(f"/api/variations/{variation}/open-in-studio")
+        assert opened.status_code == 200, opened.text
+        arr = opened.json()["arrangement"]
+        # Reference the uploaded sound in the saved arrangement without changing render quality.
+        arr["bass"]["sample_path"] = bass.json()["sample_path"]
+        arr["bass"]["mode"] = "sample"
+        assert client.put(f"/api/projects/{project}/arrangement", json=arr).status_code == 200
+        preview = client.post(f"/api/projects/{project}/preview", json={"scope": "loop", "loop_bars": 1})
+        assert preview.status_code == 200, preview.text
+        exported = client.post(f"/api/projects/{project}/export", json={"filename": "durable", "project_json": True}).json()
+        finished = jobs.wait(exported["job"]["id"], timeout=300)
+        assert finished["status"] == "completed", finished.get("error_message")
+        export = exported["export_id"]
+        original_audio = client.get(f"/api/sources/{source}/audio").content
+        original_mix = client.get(f"/api/exports/{export}/download").content
+        analysis = client.get(f"/api/sources/{source}/analysis").json()
+    replace_volume(remote, monkeypatch)
+    with TestClient(api.app) as client:
+        assert client.get(f"/api/sources/{source}/audio").content == original_audio
+        assert client.get(f"/api/exports/{export}/download").content == original_mix
+        assert client.get(f"/api/sources/{source}/analysis").json() == analysis
+        assert client.get(f"/api/variations/{variation}/audio").status_code == 200
+        assert client.get(preview.json()["url"]).status_code == 200
+        assert client.get("/api/kits/trap/kick/audio").status_code == 200
+        assert client.get(f"/api/projects/{project}").json()["arrangement"]["tracks"] == store.get("project", project)["arrangement"]["tracks"]
+        reanalyze = client.post(f"/api/sources/{source}/analyze").json()
+        finished = jobs.wait(reanalyze["id"], timeout=300)
+        assert finished["status"] == "completed", finished.get("error_message")
