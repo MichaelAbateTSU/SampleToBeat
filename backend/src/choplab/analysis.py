@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import librosa
 
-from .audio_io import AudioError
+from .audio_io import AudioError, sample_peak
 from .core import NOTE_NAMES, SR, parse_key
 from .render import loudness
 from .hpss import blocks
@@ -292,7 +292,7 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
 
     progress("loudness", 0.85)
     lufs = loudness(y48)
-    peak = float(np.abs(y48).max())
+    peak = sample_peak(y48)
 
     # per-bar chroma summary (used for key-aware bass generation)
     bar_chroma = [[round(float(x), 3) for x in chroma_b[:, i:i + 4].mean(axis=1)] for i in range(phase, len(bt), 4)]

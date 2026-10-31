@@ -64,7 +64,7 @@ def resample(y: np.ndarray, sr_in: int, sr_out: int = SR) -> np.ndarray:
     if sr_in == sr_out:
         return y
     g = np.gcd(int(sr_in), int(sr_out))
-    return resample_poly(y, sr_out // g, sr_in // g, axis=0).astype(np.float32)
+    return resample_poly(y, sr_out // g, sr_in // g, axis=0).astype(np.float32, copy=False)
 
 
 def probe(path: Path) -> dict:
@@ -200,10 +200,16 @@ def write_mp3(path: Path, y: np.ndarray, sr: int = SR, bitrate: str = "320k") ->
     return path
 
 
+def sample_peak(y: np.ndarray) -> float:
+    peak = 0.0
+    for start in range(0, len(y), 65536):
+        peak = float(np.maximum(peak, np.abs(y[start:start + 65536]).max()))
+    return peak
+
+
 def peaks(y: np.ndarray, n: int = 2000) -> list[float]:
-    mono = np.abs(y).max(axis=1) if y.ndim == 2 else np.abs(y)
-    if len(mono) == 0:
+    if len(y) == 0:
         return []
-    n = min(n, len(mono))
-    edges = np.linspace(0, len(mono), n + 1).astype(int)
-    return [round(float(mono[a:b].max()), 4) if b > a else 0.0 for a, b in zip(edges[:-1], edges[1:])]
+    n = min(n, len(y))
+    edges = np.linspace(0, len(y), n + 1).astype(int)
+    return [round(sample_peak(y[a:b]), 4) if b > a else 0.0 for a, b in zip(edges[:-1], edges[1:])]

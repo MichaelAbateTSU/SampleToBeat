@@ -68,7 +68,7 @@ def zero_cross(y: np.ndarray, max_ms: float = 2.0) -> int:
 
 
 def _pb(y: np.ndarray, board: pb.Pedalboard) -> np.ndarray:
-    return board(np.ascontiguousarray(y.T, dtype=np.float32), SR).T.astype(np.float32)
+    return board(np.ascontiguousarray(y.T, dtype=np.float32), SR).T.astype(np.float32, copy=False)
 
 
 def pitch_stretch(y: np.ndarray, semitones: float, speed: float, mode: str = "stretch",
@@ -86,7 +86,7 @@ def pitch_stretch(y: np.ndarray, semitones: float, speed: float, mode: str = "st
     out = pb.time_stretch(np.ascontiguousarray(y.T), SR, stretch_factor=float(speed),
                           pitch_shift_in_semitones=float(semitones), high_quality=True,
                           preserve_formants=preserve_formants)
-    return out.T.astype(np.float32)
+    return out.T.astype(np.float32, copy=False)
 
 
 def pan(y: np.ndarray, p: float) -> np.ndarray:

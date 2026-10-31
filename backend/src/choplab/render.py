@@ -154,7 +154,8 @@ def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_st
             y = y.copy()
             y[:tail] += y[body:body + tail]
             y = y[:body]
-        bufs[tr["id"]] = np.nan_to_num(y.astype(np.float32))
+        bufs[tr["id"]] = np.nan_to_num(y.astype(np.float32, copy=False), copy=False)
+        release_unused()
     length = body if scope == "loop" else n
     mix = np.zeros((length, 2), np.float32)
     for buf in bufs.values():
@@ -223,7 +224,7 @@ def limit(y: np.ndarray, ceiling: float, window_ms: float = 10.0) -> np.ndarray:
     w = max(1, int(window_ms * SR / 1000))
     need = np.minimum(1.0, ceiling / np.maximum(np.abs(y).max(axis=1), 1e-9))
     g = uniform_filter1d(minimum_filter1d(need, 2 * w + 1), w + 1 - (w % 2))  # odd size keeps the window centred
-    return (y * g[:, None]).astype(np.float32)
+    return (y * g[:, None]).astype(np.float32, copy=False)
 
 
 def _master(mix: np.ndarray, bufs: dict, target_lufs: float) -> dict:
@@ -241,11 +242,11 @@ def _master(mix: np.ndarray, bufs: dict, target_lufs: float) -> dict:
     stems = bufs
     for v in stems.values():
         v *= np.float32(db_to_gain(g_db))
-    sp = max((float(np.abs(v).max()) for v in stems.values()), default=0.0)
+    sp = max((audio_io.sample_peak(v) for v in stems.values()), default=0.0)
     stem_trim = min(1.0, 0.98 / sp) if sp > 0 else 1.0  # stems are unlimited: one common trim keeps balance
     for v in stems.values():
         v *= np.float32(stem_trim)
-    peak = float(np.abs(out).max()) if len(out) else 0.0
+    peak = audio_io.sample_peak(out)
     lufs_out = loudness(out)
     metrics = {"duration_s": round(len(out) / SR, 3), "lufs_in": None if lufs_in is None else round(lufs_in, 2),
                "lufs": None if lufs_out is None else round(lufs_out, 2), "master_gain_db": round(g_db, 2),
@@ -290,7 +291,7 @@ def write_preview(path: Path, y: np.ndarray) -> Path:
 def verify(path: Path) -> dict:
     """Read the written file back (spec 36): duration, peak, silence."""
     y = audio_io.decode(path)
-    peak = float(np.abs(y).max())
+    peak = audio_io.sample_peak(y)
     return {"file": path.name, "duration_s": round(len(y) / SR, 3), "peak_dbfs": round(20 * np.log10(max(peak, 1e-9)), 2),
             "silent": bool(np.sqrt(np.mean(y ** 2)) < 1e-4), "channels": int(y.shape[1]), "bytes": path.stat().st_size}
 

@@ -126,6 +126,83 @@ def test_partial_region_reads_match_aligned_stem_sum_without_source_cache(tmp_pa
         transform.region(paths, 0, 3)
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("rate", [22050, 44100, 96000])
+def test_resample_preserves_original_polyphase_samples(dtype, rate):
+    from scipy.signal import resample_poly
+
+    y = np.random.default_rng(715).normal(0, 0.2, (7001, 2)).astype(dtype)
+    original = y.copy()
+    divisor = np.gcd(rate, SR)
+    expected = resample_poly(y, SR // divisor, rate // divisor, axis=0).astype(np.float32)
+    actual = audio_io.resample(y, rate)
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(y, original)
+    assert actual.dtype == np.float32 and actual.flags.c_contiguous
+
+
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize("bins", [1, 2000, 2400])
+def test_bounded_waveform_and_sample_peaks_are_exact(channels, bins, monkeypatch):
+    y = np.random.default_rng(716).normal(0, 0.2, (180003, channels)).astype(np.float32)
+    if channels == 1:
+        y = y[:, 0]
+    y[65536] = -0.99
+    mono = np.abs(y).max(axis=1) if channels == 2 else np.abs(y)
+    edges = np.linspace(0, len(y), bins + 1).astype(int)
+    expected = [round(float(mono[a:b].max()), 4) for a, b in zip(edges[:-1], edges[1:])]
+    original_abs = np.abs
+
+    def bounded_abs(chunk):
+        assert len(chunk) <= 65536
+        return original_abs(chunk)
+
+    monkeypatch.setattr(np, "abs", bounded_abs)
+    assert audio_io.sample_peak(y) == float(mono.max())
+    assert audio_io.peaks(y, bins) == expected
+    assert audio_io.sample_peak(y[:0]) == 0
+    assert audio_io.peaks(y[:0]) == []
+
+
+def test_pedalboard_output_views_preserve_samples_and_input():
+    import pedalboard as pb
+
+    y = sine(220, 0.51, amp=0.2)
+    original = y.copy()
+    expected = pb.Pedalboard([pb.HighpassFilter(180)])(np.ascontiguousarray(y.T), SR).T.astype(np.float32)
+    actual = transform._pb(y, pb.Pedalboard([pb.HighpassFilter(180)]))
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(y, original)
+    assert not np.shares_memory(actual, y)
+    expected_stretch = pb.time_stretch(np.ascontiguousarray(y.T), SR, stretch_factor=1.1,
+                                      pitch_shift_in_semitones=0.3, high_quality=True,
+                                      preserve_formants=False).T.astype(np.float32)
+    actual_stretch = transform.pitch_stretch(y, 0.3, 1.1)
+    np.testing.assert_array_equal(actual_stretch, expected_stretch)
+    np.testing.assert_array_equal(y, original)
+    assert not np.shares_memory(actual_stretch, y)
+
+
+def test_render_owned_buffer_cleanup_matches_copying_reference(monkeypatch):
+    body = ticks_to_samples(TICKS_PER_BAR, 120)
+    raw = sine(220, (body + int(render.TAIL_S * SR)) / SR, amp=0.2)
+    raw[123] = np.nan
+    original = raw.copy()
+    monkeypatch.setattr(render, "_sample_track", lambda *_: raw)
+    arr = {"bars": 1, "bpm": 120, "tracks": [
+        {"id": "sample", "kind": "sample", "pan": 0.2, "volume_db": -3,
+         "clips": [{"pattern_id": "p", "start_bar": 0, "bars": 1}]}],
+        "patterns": {"p": {"length_ticks": TICKS_PER_BAR, "events": [{"tick": 0}]}}}
+    actual = render.render(arr, {}, {})
+    original_nan_to_num = np.nan_to_num
+    monkeypatch.setattr(np, "nan_to_num", lambda y, **_: original_nan_to_num(y, copy=True))
+    expected = render.render(arr, {}, {})
+    np.testing.assert_array_equal(actual["master"], expected["master"])
+    np.testing.assert_array_equal(actual["stems"]["sample"], expected["stems"]["sample"])
+    np.testing.assert_array_equal(raw, original)
+    assert actual["metrics"] == expected["metrics"]
+
+
 def test_master_stem_gain_and_metrics_preserve_dsp(tmp_path):
     y = sine(220, 2.1, amp=0.2)
     original = {"left": y.copy(), "right": y * np.float32(0.4)}
