@@ -103,6 +103,12 @@ open-unlinked/outside-cache files are missed. Kernel `memory.peak` is lifetime
 per container, not reset per stage. OOM/exit observations are independent of the
 client/workflow status. Intentional final SIGKILL/exit 137 is labeled by the
 before-stop running state and `OOMKilled` rather than called a workload OOM.
+Disk is shared cache/TMPDIR occupancy, not exclusively application writes:
+inventory initialization and the optional separate original verifier can write
+to the mounted cache. Separate phase timestamps and the original-read traffic
+identify that overhead; only cgroup/CPU figures are app-container-only. An
+original verification may reuse an already hydrated exact cache file; observed
+admin GET payload, not the verification marker alone, establishes a new read.
 
 Each job/download/upload remains bounded at 1,800 seconds, HTTP at 120 seconds,
 startup at 180 seconds, client phase at 5,400 seconds, outer run at 6,600 seconds
