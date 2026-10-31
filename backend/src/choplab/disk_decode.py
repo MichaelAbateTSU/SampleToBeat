@@ -155,8 +155,10 @@ def _read_resampled(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: i
     # upfirdn also allocates the convolution tail before resample_poly slices
     # it away. Include filter padding, row copies and the trimmed float32 copy.
     filtered = ((max(frames, 1) - 1) * up + taps + 2 * down - 1) // down + 1
-    phase_only = up != down and (taps * 16 + 32 * (frames + max(expanded, filtered))
-                                  + READ_BYTES > 384 << 20)
+    phase_only = up != down and (
+        taps * 16 > 192 << 20
+        or taps * 16 + 32 * (frames + max(expanded, filtered)) + READ_BYTES > 384 << 20
+    )
     if inp.channels * 4 > READ_BYTES:
         raise audio_io.AudioError("One audio frame exceeds the bounded decoder's channel-read budget.")
     coefficients = None
@@ -216,7 +218,7 @@ def _phase_blocks(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int
     while ((inp.frames - 1) * up + length - 1) // down + 1 < count + remove:
         length += 1
     per_phase = (length + up - 1) // up
-    size = max(1, min(BLOCK_FRAMES, BLOCK_FRAMES * up // down))
+    size = max(1, min(BLOCK_FRAMES, (1 << 20) * up // down))
     buffered = np.empty((0, 2), np.float32)
     buffer_start = 0
     for start in range(0, count, size):
@@ -249,9 +251,12 @@ def _phase_blocks(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int
             valid_filter = (filter_indices >= 0) & (filter_indices < len(coefficients))
             weights[valid_filter] = coefficients[filter_indices[valid_filter]]
             weights *= up
-            valid_input = (indices >= 0) & (indices < inp.frames)
-            positions = indices[valid_input] - left
-            result[valid_input] += buffered[positions] * weights[valid_input, None]
+            if indices[0] >= 0 and indices[-1] < inp.frames:
+                result += buffered[indices - left] * weights[:, None]
+            else:
+                valid_input = (indices >= 0) & (indices < inp.frames)
+                positions = indices[valid_input] - left
+                result[valid_input] += buffered[positions] * weights[valid_input, None]
         _write(out, result, fd, audio_io.MAX_SECONDS * sr)
         _discard_cache(source.fileno())
 
