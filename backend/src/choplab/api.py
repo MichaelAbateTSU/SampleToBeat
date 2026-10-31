@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from . import analysis, audio_io, bass, compose, drums, durable, jobs, render, sampling, schemas, separation, store, transform
 from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, TICKS_PER_BAR, cache_key, data_path, log, parse_key
 from .hosting import HOSTING, OwnerAccess, listening_port
+from .uploads import upload_route
 
 MAX_UPLOAD = int(os.environ.get("CHOPLAB_MAX_UPLOAD_MB", "100" if HOSTING else "1024")) * (1 << 20)
 MIN_FREE = int(os.environ.get("CHOPLAB_MIN_FREE_MB", "2048" if HOSTING else "0")) * (1 << 20)
@@ -45,6 +46,8 @@ async def lifespan(app):
 
 app = FastAPI(title="ChopLab AI", version="0.1.0", lifespan=lifespan,
               description="Single-owner sample-based beat generator.")
+if HOSTING:
+    app.router.route_class = upload_route(MAX_UPLOAD)
 @app.middleware("http")
 async def recovery_boundary(request: Request, call_next):
     path = request.url.path
