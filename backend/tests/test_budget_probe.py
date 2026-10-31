@@ -26,18 +26,18 @@ def test_summary_counts_retries_failed_operations_and_disk_separately():
         {"category": "s3_call", "operation": "UploadPart", "call": "a", "outcome": "started"},
         {"category": "s3_attempt", "operation": "UploadPart", "call": "a", "attempt": "1",
          "outcome": "started", "declared_request_bytes": 10},
-        {"category": "s3_upload_read", "operation": "UploadPart", "bytes": 4},
+        {"category": "s3_upload_read", "operation": "UploadPart", "attempt": "1", "bytes": 4},
         {"category": "s3_attempt", "operation": "UploadPart", "call": "a", "attempt": "1",
          "outcome": "response", "status": 503},
         {"category": "s3_attempt", "operation": "UploadPart", "call": "a", "attempt": "2",
          "outcome": "started", "declared_request_bytes": 10},
-        {"category": "s3_upload_read", "operation": "UploadPart", "bytes": 10},
-        {"category": "s3_attempt", "operation": "UploadPart", "outcome": "response", "status": 200},
+        {"category": "s3_upload_read", "operation": "UploadPart", "attempt": "2", "bytes": 10},
+        {"category": "s3_attempt", "operation": "UploadPart", "attempt": "2", "outcome": "response", "status": 200},
         {"category": "s3_call", "operation": "UploadPart", "outcome": "success"},
         {"category": "s3_call", "operation": "DeleteObject", "call": "b", "outcome": "started"},
         {"category": "s3_attempt", "operation": "DeleteObject", "call": "b",
-         "outcome": "started", "declared_request_bytes": 0},
-        {"category": "s3_attempt", "operation": "DeleteObject", "outcome": "transport_failed"},
+         "attempt": "3", "outcome": "started", "declared_request_bytes": 0},
+        {"category": "s3_attempt", "operation": "DeleteObject", "attempt": "3", "outcome": "transport_failed"},
         {"category": "s3_call", "operation": "DeleteObject", "outcome": "failed"},
         {"category": "disk_sample", "logical_bytes": 100, "allocated_bytes": 4096, "sample_errors": 0},
         {"category": "disk_sample", "logical_bytes": 50, "allocated_bytes": 8192, "sample_errors": 1},
@@ -50,6 +50,9 @@ def test_summary_counts_retries_failed_operations_and_disk_separately():
     assert result["operations"]["DeleteObject"]["failed_calls"] == 1
     assert result["disk_sampled_peak_allocated_bytes"] == 8192
     assert result["disk_sample_errors"] == 1
+    assert result["http_attempts"][0]["body_bytes_read_or_buffered"] == 4
+    assert result["http_attempts"][1]["body_bytes_read_or_buffered"] == 10
+    assert result["http_attempts"][2]["outcome"] == "transport_failed"
 
 
 def test_disk_sampling_deduplicates_hardlinked_synthetic_files(tmp_path):

@@ -71,6 +71,8 @@ def inventory(remote):
             item["objects"] += 1
             item["bytes"] += size
     return {"catalog_states": states, "artifact_classes": classes,
+            "provider_conservative_recorded_bytes_without_reclamation": sum(item["declared_object_bytes"] for item in states.values()),
+            "catalog_objects_without_recorded_size": sum(not raw for _, raw in rows),
             "physical_listed_objects": len(objects),
             "physical_listed_object_bytes": sum(item["Size"] for item in objects),
             "limits": "Observer LIST/SQL traffic excluded from application budget. MinIO bucket is isolated; no Neon soft-retention assumption."}
@@ -320,6 +322,11 @@ else: raise RuntimeError('Synthetic missing-object expectation failed')
         uploads = sum(item["upload_body_bytes_read_or_buffered"] for operation, item in operations.items()
                       if operation in ("PutObject", "UploadPart"))
         downloads = sum(item["object_body_bytes_consumed"] for item in operations.values())
+        report["original_object_verification_optional_requested"] = os.environ.get("CHOPLAB_BUDGET_ORIGINAL_READ") == "yes"
+        report["object_call_outcomes"] = [
+            {key: event[key] for key in ("call", "operation", "object_sha256", "outcome", "code", "declared_object_bytes")
+             if key in event}
+            for event in events(server_ledger) if event["category"] == "s3_call" and event["outcome"] != "started"]
         report["accounting"] = {
             "render_to_neon_object_upload_payload_observed": uploads,
             "neon_to_render_object_download_payload_consumed": downloads,
@@ -333,6 +340,25 @@ else: raise RuntimeError('Synthetic missing-object expectation failed')
                            "MinIO/DB disk and memory; container writable files outside app cache/temp"],
             "note": "Only app body consumption/buffering is observable here. Inbound fixture upload is not Render outbound. Object GET payload is Neon-to-Render, distinct from Render-to-client response. Sampled peaks are lower bounds, not exact maxima."}
         report["accounting"]["note"] += " Optional direct original-object GET is counted in Neon-to-Render object reads, not as an application HTTP download."
+        if report["success"]:
+            try:
+                prepared = report["phases"][0]["object_inventory"]
+                assert uploads >= prepared["physical_listed_object_bytes"]
+                if report["application_object_traffic"]["retry_attempts"] == 0:
+                    assert uploads == prepared["physical_listed_object_bytes"]
+                assert downloads > 0 and report["application_http"]["response_body_bytes_consumed"] > downloads
+                assert operations["GetObject"]["failed_calls"] == 1
+                assert report["application_object_traffic"]["disk_samples"] > 0
+                retired = next(phase["object_inventory"] for phase in report["phases"] if phase["name"] == "retired-before-reconciliation")
+                final = report["phases"][-1]["object_inventory"]
+                assert retired["catalog_states"]["retired"]["objects"] == 1
+                assert final["physical_listed_objects"] == prepared["physical_listed_objects"] - 1
+                assert final["provider_conservative_recorded_bytes_without_reclamation"] == prepared["physical_listed_object_bytes"]
+                if report["original_object_verification_optional_requested"]:
+                    assert report["original_object_verified"]["bytes"] == prepared["artifact_classes"]["original"]["bytes"]
+            except (AssertionError, KeyError, StopIteration):
+                report["success"] = False
+                report["failure"] = "Measured payload/inventory/original verification accounting did not agree."
         output = Path(os.environ.get("CHOPLAB_BUDGET_REPORT", directory / "budget-report.json"))
         output.write_text(json.dumps(report, indent=2))
         auth.unlink(missing_ok=True)

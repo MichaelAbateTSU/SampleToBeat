@@ -117,6 +117,17 @@ Neon immediately releases storage quota. No Neon retention duration or quota
 reclamation can be inferred. Cached files may remain after metadata retirement;
 sampled occupancy explicitly includes them.
 
+`provider_conservative_recorded_bytes_without_reclamation` adds every recorded
+object size across live, retired and deleted tombstones rather than subtracting
+deleted objects. This is not an upper bound if there are unknown-size in-flight
+uploads, multipart parts, historical objects absent from the catalog, other
+branches or outside consumers. The unknown-size catalog count is reported.
+An empty provider S3 listing cannot establish reclaimed capacity, and delayed
+Overview storage/network counters cannot establish exact transfer usage. Budget
+from observed payloads and retained-recorded bytes conservatively until provider
+metering/retention settles; do not prescribe redundant full downloads merely
+because a dashboard has not caught up.
+
 Disk peaks are lower bounds: between-sample transients, open-unlinked files and
 files outside cache/TMPDIR are unobserved. Cgroup memory includes the Python
 measurement process and application child; it excludes the separate DB/MinIO
