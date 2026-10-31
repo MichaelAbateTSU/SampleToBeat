@@ -13,10 +13,17 @@ import time
 
 import pytest
 
-from test_durable import remote, worker_env
+from test_durable import remote as disposable_remote, worker_env
 from choplab import store
 from choplab.object_storage import S3ByteStorage
 from budget_probe import Ledger, MeasuredBody, cgroup, summarize
+
+
+@pytest.fixture
+def remote(request):
+    if os.environ.get("CHOPLAB_SYNTHETIC_BUDGET") != "yes":
+        pytest.skip("Requires explicit isolated synthetic budget opt-in before service initialization")
+    return request.getfixturevalue("disposable_remote")
 
 
 def load(path, name):
