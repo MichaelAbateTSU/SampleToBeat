@@ -1,0 +1,19 @@
+name: spool-probe-selftest
+on:
+  push:
+    branches: [michaelabatetsu-render-spool-preflight]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tools/render-spool-probe/ci.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spool-probe-results
+          path: spool-results
