@@ -30,4 +30,4 @@ def test_audio_ranges_release_open_inode_after_background_cleanup(tmp_path, monk
     assert response.status_code == 206
     assert response.content == b"2345"
     assert response.headers["content-range"] == "bytes 2-5/10"
-    assert calls == [("sync", 10), ("release", 10)]
+    assert calls == [("release", 10), ("sync", 10), ("release", 10)]

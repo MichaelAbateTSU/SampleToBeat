@@ -19,7 +19,7 @@ from .responses import AudioFileResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
-from . import analysis, audio_io, bass, compose, drums, durable, jobs, render, sampling, schemas, separation, store, transform
+from . import analysis, audio_io, bass, compose, disk_decode, drums, durable, jobs, memory, render, sampling, schemas, separation, store, transform
 from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, TICKS_PER_BAR, cache_key, data_path, log, parse_key
 from .hosting import HOSTING, OwnerAccess, listening_port
 
@@ -191,9 +191,10 @@ def job_import(ctx, source_id: str):
         ctx.progress("decoding", 0.02)
         orig = durable.ensure_path(src["original_file_path"], src)
         meta = audio_io.probe(orig)
-        y = audio_io.decode(orig)
         internal_name = f"audio-{ctx.id}.wav" if durable.enabled() else "audio.wav"
-        internal = audio_io.write_wav(Path(src["original_file_path"]).with_name(internal_name), y)
+        memory.require_space(orig.parent, int(np.ceil((meta["duration"] or audio_io.MAX_SECONDS) * SR)) * 8 + 128)
+        internal = disk_decode.decode_to_wav(orig, Path(src["original_file_path"]).with_name(internal_name))
+        y = audio_io.load(internal)
         src = store.update("source", source_id, internal_audio_path=str(internal), content_hash=audio_io.file_hash(orig),
                            duration_seconds=round(len(y) / SR, 3), sample_rate=meta["sample_rate"],
                            channel_count=meta["channels"], metadata=meta, peaks=audio_io.peaks(y, 2400),

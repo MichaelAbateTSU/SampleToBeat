@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import librosa
+import soxr
 
 from .audio_io import AudioError, sample_peak
 from .core import NOTE_NAMES, SR, parse_key
@@ -11,6 +12,7 @@ from .render import loudness
 from .hpss import blocks
 from .cqt import chroma as _chroma
 from .memory import release_unused
+from . import memory
 
 ASR = 22050  # analysis rate
 HOP = 512
@@ -120,7 +122,7 @@ def _tempo(oenv: np.ndarray) -> float:
 def _mel_spectrogram(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
     """Keep the identical centered mel frames/global dB floor, with a bounded STFT workspace."""
     n_fft, frames = 2048, 1 + len(mono) // hop
-    mel = np.empty((kwargs.get("n_mels", 128), frames), dtype=mono.dtype)
+    mel = memory.empty((kwargs.get("n_mels", 128), frames), mono.dtype)
     for start in range(0, frames, 256):
         end = min(frames, start + 256)
         lo, hi = start * hop - n_fft // 2, (end - 1) * hop + n_fft // 2
@@ -129,6 +131,8 @@ def _mel_spectrogram(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
             audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
         mel[:, start:end] = librosa.feature.melspectrogram(
             y=audio, sr=ASR, n_fft=n_fft, hop_length=hop, center=False, **kwargs)
+        memory.release_pages(mono)
+        memory.release_pages(mel)
     return mel
 
 
@@ -142,6 +146,7 @@ def _onset_strength(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
         novelty = mel[:, start + 1:end + 1] - mel[:, start:end]
         np.maximum(novelty, 0, out=novelty)
         output[start + shift:end + shift] = novelty.mean(axis=0)
+        memory.release_pages(mel)
     del mel
     release_unused()
     return output
@@ -155,7 +160,13 @@ def _power_to_db(mel: np.ndarray) -> None:
         np.maximum(block, 1e-10, out=block)
         np.log10(block, out=block)
         block *= 10.0
-    np.maximum(mel, mel.max() - 80.0, out=mel)
+        memory.release_pages(mel)
+    floor = mel.max() - 80.0
+    memory.release_pages(mel)
+    for start in range(0, len(flat), 65536):
+        block = flat[start:start + 65536]
+        np.maximum(block, floor, out=block)
+        memory.release_pages(mel)
 
 
 def _mfcc(mono: np.ndarray) -> np.ndarray:
@@ -165,17 +176,20 @@ def _mfcc(mono: np.ndarray) -> np.ndarray:
     for start in range(0, mel.shape[1], 256):
         end = min(start + 256, mel.shape[1])
         output[:, start:end] = librosa.feature.mfcc(S=mel[:, start:end], sr=ASR, hop_length=HOP, n_mfcc=13)
+        memory.release_pages(mel)
     del mel
     release_unused()
     return output
 
 
 def _harmonic(mono: np.ndarray) -> np.ndarray:
-    output = np.empty_like(mono)
+    output = memory.empty(mono.shape, mono.dtype)
     position = 0
     for chunk in blocks(lambda a, b: mono[a:b], len(mono), mono.dtype):
         output[position:position + len(chunk)] = chunk
         position += len(chunk)
+        memory.release_pages(mono)
+        memory.release_pages(output)
     return output
 
 
@@ -190,6 +204,9 @@ def _rms(mono: np.ndarray, other: np.ndarray | None = None) -> np.ndarray:
             audio = audio - other[max(0, lo):min(len(mono), hi)]
         audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
         output[start:end] = librosa.feature.rms(y=audio, hop_length=hop, center=False)[0]
+        memory.release_pages(mono)
+        if other is not None:
+            memory.release_pages(other)
     return output
 
 
@@ -207,17 +224,47 @@ def _tuning(mono: np.ndarray) -> float:
         active = pitch > 0
         pitches.append(pitch[active])
         magnitudes.append(mag[active])
+        memory.release_pages(mono)
     pitch, mag = np.concatenate(pitches), np.concatenate(magnitudes)
     threshold = np.median(mag) if len(mag) else 0.0
     return librosa.pitch_tuning(pitch[mag >= threshold], bins_per_octave=36)
+
+
+def _mono(y48: np.ndarray, output: np.ndarray | None = None) -> np.ndarray:
+    length = int(np.ceil(len(y48) * (ASR / SR)))
+    if output is None:
+        output = memory.empty(length, y48.dtype)
+    elif output.shape != (length,) or output.dtype != y48.dtype:
+        raise ValueError("Mono output must have the exact resampled shape and input dtype.")
+    stream = soxr.ResampleStream(SR, ASR, 1, dtype=y48.dtype, quality="HQ")
+    position = 0
+    for start in range(0, len(y48), 65536):
+        end = min(start + 65536, len(y48))
+        chunk = stream.resample_chunk(y48[start:end].mean(axis=1), last=end == len(y48))
+        count = min(len(chunk), length - position)
+        output[position:position + count] = chunk[:count]
+        position += count
+        memory.release_pages(y48)
+        memory.release_pages(output)
+    output[position:] = 0
+    return output
+
+
+def _mean_square(mono: np.ndarray):
+    squared = memory.empty(mono.shape, mono.dtype)
+    for start in range(0, len(mono), 65536):
+        np.square(mono[start:start + 65536], out=squared[start:start + 65536])
+        memory.release_pages(mono)
+        memory.release_pages(squared)
+    return np.mean(squared)
 
 
 def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | None = None) -> tuple[dict, dict]:
     """Returns (analysis document, per-beat feature arrays). `override` = user corrections
     {bpm, grid_offset (a downbeat time), downbeat_phase, key}."""
     duration = len(y48) / SR
-    mono = librosa.resample(y48.mean(axis=1), orig_sr=SR, target_sr=ASR)
-    if np.sqrt(np.mean(mono ** 2)) < 1e-4:
+    mono = _mono(y48)
+    if np.sqrt(_mean_square(mono)) < 1e-4:
         raise AudioError("The recording is silent; nothing to analyze.")
 
     progress("tempo", 0.1)
@@ -281,6 +328,7 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     release_unused()
     progress("key_chroma", 0.25)
     tuning = _tuning(harm)
+    release_unused()
     progress("key_cqt", 0.25)
     chroma = _chroma(harm, ASR, HOP, tuning)[:, :n_frames]
     del harm

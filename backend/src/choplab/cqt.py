@@ -4,6 +4,7 @@ from __future__ import annotations
 import librosa
 import numpy as np
 from librosa.core import constantq
+from . import memory
 
 
 def chroma(y, sr, hop, tuning):
@@ -18,7 +19,7 @@ def chroma(y, sr, hop, tuning):
     y, sr, hop = constantq.__early_downsample(y, sr, hop, "soxr_hq", octaves, sr / 2, cutoff, True)
     audio, rate, stride = y, sr, hop
     frames = 1 + len(y) // hop
-    response = np.empty((bins * octaves, frames), dtype=dtype, order="F")
+    response = memory.empty((bins * octaves, frames), dtype, order="F")
     for octave in range(octaves):
         band = slice(-bins * (octave + 1), -bins * octave if octave else None)
         basis, n_fft, _ = constantq.__vqt_filter_fft(rate, frequencies[band], 1, 1, 0.01,
@@ -34,12 +35,17 @@ def chroma(y, sr, hop, tuning):
             spectrum = librosa.stft(block, n_fft=n_fft, hop_length=stride, window="ones",
                                     center=False, dtype=dtype)
             response[band, start:end] = basis.dot(spectrum)
+            memory.release_pages(audio)
+            memory.release_pages(response)
         if octave < octaves - 1 and stride % 2 == 0 and frequencies[band.start - 1] <= rate / 5:
-            audio = librosa.resample(audio, orig_sr=2, target_sr=1, res_type="soxr_hq", scale=True)
+            previous = audio
+            audio = librosa.resample(previous, orig_sr=2, target_sr=1, res_type="soxr_hq", scale=True)
+            memory.release_pages(previous)
             rate /= 2
             stride //= 2
     response = response[:, :frames]
     lengths, _ = librosa.filters.wavelet_lengths(freqs=frequencies, sr=sr, window="hann",
                                                 filter_scale=1, gamma=0, alpha=alpha)
     response /= np.sqrt(lengths[:, None])
+    memory.release_pages(response)
     return librosa.feature.chroma_cqt(C=np.abs(response), sr=sr, hop_length=hop)

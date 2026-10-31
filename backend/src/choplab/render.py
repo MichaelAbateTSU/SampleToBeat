@@ -13,7 +13,7 @@ from scipy.ndimage import minimum_filter1d, uniform_filter1d
 from scipy.signal import lfilter, resample_poly
 
 from . import audio_io, bass, drums, sampling, transform
-from .memory import release_unused
+from .memory import release_pages, release_unused
 from .core import PPQ, SR, TICKS_PER_BAR, db_to_gain, swing_offset_ticks, ticks_to_samples
 
 TAIL_S = 2.0  # reverb/808 ring-out after the last bar (full renders); wrapped to the start for loops
@@ -203,6 +203,8 @@ def loudness(y: np.ndarray) -> float | None:
             weighted = np.concatenate([weighted[lo - previous_lo:], new])
             energy[channel, block] = np.sum(np.square(weighted)) / (meter.block_size * SR)
             previous_lo, end = lo, stop
+            if block % 16 == 15 or block == count - 1:
+                release_pages(y)
         del weighted
     gains = np.asarray([1.0, 1.0, 1.0, 1.41, 1.41])[:y.shape[1]]
     with np.errstate(divide="ignore", invalid="ignore"):

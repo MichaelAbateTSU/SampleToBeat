@@ -15,8 +15,12 @@ class AudioFileResponse(FileResponse):
             return
         # Keep the inode open through existing response/background cleanup, even if it unlinks the path.
         with open(self.path, "rb") as file:
+            async def bounded_send(message):
+                await send(message)
+                if message["type"] == "http.response.body" and message.get("body"):
+                    await run_in_threadpool(os.posix_fadvise, file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
             try:
-                await super().__call__(scope, receive, send)
+                await super().__call__(scope, receive, bounded_send)
             finally:
                 def release():
                     os.fsync(file.fileno())

@@ -256,6 +256,25 @@ passwordless SQL role as a sufficient provisioning step.
 
 ### Integrated durable-runtime gates
 
+An independent Render parser/`_save_upload` preflight compared against `d5f4115` saved
+1,073,741,824 synthetic bytes in 93 seconds with matching digests, 129 cache releases and a maintained
+2 GiB reserve. It nevertheless peaked at **537,137,152 bytes against a 536,870,912-byte limit**,
+with 6,806 `memory.events:max` events and no OOM/kill: heavy reclaim, not safe headroom.
+It used a disposable probe with a test-only storage predicate and no database, S3, app lifespan or jobs;
+function/parser equality is not production image/runtime equivalence. A bounded multipart follow-up is
+being investigated separately. This does not establish full-app 1 GiB upload readiness.
+
+The next audio pipeline uses the independent `e42630a` disk decoder for import and bounded reads for
+analysis/reanalysis and other decode/load callers. Large mono, harmonic, mel and CQT buffers use private
+disk-backed arrays with last-view ownership, cache release and the existing hosted free-space reserve.
+Global resampling, dB floors, centered frames and reductions retain independent numerical references.
+Local backend regressions passed (379 tests / nine platform/network skips), but final native and capped
+runtime checks are pending. The prerequisite's 1,200s **48 kHz stereo PCM16 decode-only** test took
+11.004 seconds and peaked at 70.92 MiB under 512 MiB/no swap/0.1 CPU; it is not full app/DSP evidence.
+Its expansion/channel/coprime-rate edge correction is still pending; no all-rate readiness or limit
+increase is claimed. Temporary arrays add working disk and I/O; after a forced process kill, stop all
+workers before inspecting/removing orphaned private `.scratch` files. They are not durable assets.
+
 The complete recovery/storage final tree `240f23f` was integrated atomically at `fd53e2a`, not deployed
 as a recovery-only intermediate. Its combined hosted x64/ARM, secret permissions, isolated recovery,
 full PostgreSQL/S3 integration and live TLS object-storage boundary checks passed. Durable mode requires PostgreSQL and a private

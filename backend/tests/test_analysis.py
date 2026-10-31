@@ -140,6 +140,31 @@ def test_bounded_difference_rms_matches_full_difference_without_mutation(dtype, 
     np.testing.assert_array_equal(other, original_other)
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("length", [513, 4097, 130561, 1440007])
+def test_streamed_stereo_mean_and_global_resampling_are_exact(dtype, length):
+    import librosa
+
+    stereo = np.random.default_rng(66).normal(0, 0.1, (length, 2)).astype(dtype)
+    original = stereo.copy()
+    expected = librosa.resample(stereo.mean(axis=1), orig_sr=analysis.SR, target_sr=analysis.ASR)
+    np.testing.assert_array_equal(analysis._mono(stereo), expected)
+    np.testing.assert_array_equal(stereo, original)
+
+
+def test_streamed_mono_can_fill_an_owned_file_backed_output(tmp_path):
+    import librosa
+
+    stereo = np.random.default_rng(67).normal(0, 0.1, (130561, 2)).astype(np.float32)
+    expected = librosa.resample(stereo.mean(axis=1), orig_sr=analysis.SR, target_sr=analysis.ASR)
+    output = np.memmap(tmp_path / "mono.pcm", dtype=stereo.dtype, mode="w+", shape=expected.shape)
+    try:
+        assert analysis._mono(stereo, output) is output
+        np.testing.assert_array_equal(output, expected)
+    finally:
+        output._mmap.close()
+
+
 def test_demo_tempo_key_and_downbeat(demo_analysis):
     doc, feats = demo_analysis
     assert doc["bpm"] == pytest.approx(92, abs=0.5)
