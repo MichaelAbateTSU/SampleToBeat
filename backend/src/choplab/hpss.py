@@ -7,6 +7,8 @@ from numba import njit
 from scipy.ndimage import median_filter
 from scipy.fft import irfft
 from scipy.signal import get_window
+from librosa.core.spectrum import __overlap_add as _overlap_add
+from librosa.filters import __window_ss_fill as _window_fill
 
 
 @njit(cache=True)
@@ -66,8 +68,7 @@ def blocks(read, length, dtype, margin=1.0, both=False):
         size = (end - start - 1) * hop + n_fft
         norm = np.zeros(size, dtype=dtype)
         norm[:len(norm_tail)] = norm_tail
-        for i in range(end - start):
-            norm[i * hop:i * hop + n_fft] += squared
+        _window_fill(norm, squared, end - start, hop)
         emit = (end - start) * hop if end < frames else size
         left = max(0, n_fft // 2 - start * hop)
         right = min(emit, length + n_fft // 2 - start * hop)
@@ -77,8 +78,7 @@ def blocks(read, length, dtype, margin=1.0, both=False):
             output = np.zeros(size, dtype=dtype)
             output[:len(tail)] = tail
             inverse = window[:, None] * irfft(component[:, start - a:end - a], n=n_fft, axis=0)
-            for i in range(end - start):
-                output[i * hop:i * hop + n_fft] += inverse[:, i]
+            _overlap_add(output, inverse, hop)
             results.append(output)
         tails = [output[emit:].copy() for output in results]
         norm_tail = norm[emit:].copy()
