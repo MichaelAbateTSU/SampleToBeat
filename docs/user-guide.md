@@ -148,3 +148,10 @@ architecture, not automatic recovery based on job age.
 
 Retrying an older analysis, separation, or export is rejected if newer work owns its target.
 Wait for active source work to finish, then retry the latest job or start a new operation.
+
+While tracking a pending job, a visible browser tab keeps live SSE progress and resynchronizes its
+status every 30 seconds. If SSE disconnects (or is unavailable), it polls every second instead.
+Refresh failures are shown without changing the job's status; terminal jobs stop both mechanisms.
+Hidden tabs do not poll, and browsers can suspend or throttle timers. This helps observation only
+while the browser is active: it is not an idle keep-alive, an uptime guarantee, or a guarantee that
+processing continues after the tab closes or the hosting provider stops the instance.

@@ -39,23 +39,36 @@ function invalidateFor(job: Job) {
 
 interface JobState {
   jobs: Record<string, Job>;
+  trackingErrors: Record<string, string | undefined>;
   track: (job: Job) => void;
   update: (job: Job) => void;
 }
 
-const streams = new Map<string, EventSource | number>();
+interface Tracking {
+  stream?: EventSource;
+  timer: number;
+  pending: boolean;
+}
+const streams = new Map<string, Tracking>();
+const RESYNC_MS = 30_000;
+const FALLBACK_MS = 1_000;
 
-/** Live job progress over SSE (falls back to polling where EventSource is unavailable). */
+/** SSE plus visible-tab resynchronization; this is observation, not an uptime guarantee. */
 export const useJobs = create<JobState>((set, get) => ({
   jobs: {},
+  trackingErrors: {},
   update: (job) => {
     const prev = get().jobs[job.id];
+    if (prev && TERMINAL.has(prev.status)) return;
     set((s) => ({ jobs: { ...s.jobs, [job.id]: job } }));
-    if (TERMINAL.has(job.status) && !(prev && TERMINAL.has(prev.status))) {
+    if (TERMINAL.has(job.status)) {
       const st = streams.get(job.id);
-      if (typeof st === "number") clearInterval(st);
-      else st?.close();
+      if (st) {
+        clearInterval(st.timer);
+        st.stream?.close();
+      }
       streams.delete(job.id);
+      set((s) => ({ trackingErrors: { ...s.trackingErrors, [job.id]: undefined } }));
       invalidateFor(job);
     }
   },
@@ -63,27 +76,42 @@ export const useJobs = create<JobState>((set, get) => ({
     const first = !get().jobs[job.id];
     get().update(job);
     if (first && !TERMINAL.has(job.status)) invalidateFor(job);
-    if (TERMINAL.has(job.status) || streams.has(job.id)) return;
+    if (TERMINAL.has(get().jobs[job.id].status) || streams.has(job.id)) return;
+    const tracking: Tracking = { timer: 0, pending: false };
+    streams.set(job.id, tracking);
+    const poll = async () => {
+      if (streams.get(job.id) !== tracking || tracking.pending || document.visibilityState !== "visible") return;
+      tracking.pending = true;
+      const before = get().jobs[job.id];
+      try {
+        const fresh = await api.job(job.id);
+        if (streams.get(job.id) !== tracking) return;
+        // Don't replace a newer SSE update with a snapshot fetched earlier.
+        if (get().jobs[job.id] === before || TERMINAL.has(fresh.status)) get().update(fresh);
+        set((s) => ({ trackingErrors: { ...s.trackingErrors, [job.id]: undefined } }));
+      } catch (error) {
+        if (streams.get(job.id) === tracking) {
+          const detail = error instanceof Error ? error.message : String(error);
+          set((s) => ({ trackingErrors: { ...s.trackingErrors, [job.id]: `Job status could not be refreshed: ${detail}. Observation will retry while this tab is visible.` } }));
+        }
+      } finally {
+        tracking.pending = false;
+      }
+    };
+    tracking.timer = window.setInterval(poll, typeof EventSource !== "undefined" ? RESYNC_MS : FALLBACK_MS);
     if (typeof EventSource !== "undefined") {
       const es = new EventSource(urls.jobEvents(job.id));
-      es.onmessage = (e) => get().update(JSON.parse(e.data) as Job);
-      es.onerror = () => {
-        es.close();
-        streams.delete(job.id);
-        // reconnect by polling; the server is the source of truth
-        const t = window.setInterval(async () => {
-          try {
-            get().update(await api.job(job.id));
-          } catch {
-            /* keep trying */
-          }
-        }, 1000);
-        streams.set(job.id, t);
+      tracking.stream = es;
+      es.onmessage = (e) => {
+        if (streams.get(job.id) === tracking) get().update(JSON.parse(e.data) as Job);
       };
-      streams.set(job.id, es);
-    } else {
-      const t = window.setInterval(async () => get().update(await api.job(job.id)), 1000);
-      streams.set(job.id, t);
+      es.onerror = () => {
+        if (streams.get(job.id) !== tracking || tracking.stream !== es) return;
+        es.close();
+        tracking.stream = undefined;
+        clearInterval(tracking.timer);
+        tracking.timer = window.setInterval(poll, FALLBACK_MS);
+      };
     }
   },
 }));

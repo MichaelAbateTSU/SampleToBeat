@@ -11,6 +11,7 @@ const LABEL: Record<string, string> = {
 
 export function JobRow({ job, compact }: { job: Job; compact?: boolean }) {
   const track = useJobs((s) => s.track);
+  const trackingError = useJobs((s) => s.trackingErrors[job.id]);
   const retry = useMutation({ mutationFn: () => api.retryJob(job.id), onSuccess: track });
   const cancel = useMutation({ mutationFn: () => api.cancelJob(job.id), onSuccess: track });
   const active = job.status === "queued" || job.status === "running";
@@ -38,6 +39,7 @@ export function JobRow({ job, compact }: { job: Job; compact?: boolean }) {
         <ErrorBanner error={job.error_message ?? (job.status === "interrupted" ? "Application stopped before this job finished. Retry to run it again; saved results were retained." : "Job failed.")} />
       )}
       <ErrorBanner error={retry.error ?? cancel.error} />
+      {active && <ErrorBanner error={trackingError} />}
     </div>
   );
 }

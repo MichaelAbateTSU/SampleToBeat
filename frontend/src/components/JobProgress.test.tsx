@@ -48,3 +48,12 @@ it("provides feedback for interrupted legacy jobs without an error message", () 
   show({ ...job, error_message: null });
   expect(screen.getByText(/Application stopped before/)).toBeInTheDocument();
 });
+
+it("shows status refresh failures only while the job is active", () => {
+  useJobs.setState({ trackingErrors: { [job.id]: "Job status could not be refreshed: Network unavailable." } });
+  const { unmount } = show({ ...job, status: "running" });
+  expect(screen.getByText(/Job status could not be refreshed/)).toBeInTheDocument();
+  unmount();
+  show();
+  expect(screen.queryByText(/Job status could not be refreshed/)).not.toBeInTheDocument();
+});
