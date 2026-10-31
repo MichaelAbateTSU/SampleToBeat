@@ -34,7 +34,8 @@ jobs:
             "https://github.com/minio/minio/releases/download/$release/$binary" -o "$service/$binary"
           curl --fail --silent --show-error --location \
             "https://github.com/minio/minio/releases/download/$release/$binary.sha256sum" -o "$service/checksum"
-          (cd "$service"; sha256sum --check checksum)
+          expected=$(awk '{print $1}' "$service/checksum")
+          printf '%s  %s\n' "$expected" "$service/$binary" | sha256sum --check
           chmod 755 "$service/$binary"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=s3' \
             -addext 'subjectAltName=DNS:s3,DNS:localhost' \
