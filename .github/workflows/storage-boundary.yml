@@ -41,10 +41,13 @@ jobs:
             -addext 'subjectAltName=DNS:s3,DNS:localhost' \
             -keyout "$certs/private.key" -out "$certs/public.crt" 2>/dev/null
           docker network create storage-boundary
+          docker volume create storage-working
+          df -T "$RUNNER_TEMP" "$(docker info -f '{{.DockerRootDir}}')" > "$evidence/filesystems.log"
           cleanup() {
             docker logs storage-s3 > "$evidence/service.log" 2>&1 || true
             docker rm -f storage-transfer storage-oom storage-s3 || true
             docker network rm storage-boundary || true
+            docker volume rm storage-working || true
           }
           trap cleanup EXIT
           docker run -d --name storage-s3 --network storage-boundary --network-alias s3 \
@@ -60,11 +63,13 @@ jobs:
           done
           curl --fail --silent --cacert "$certs/public.crt" https://localhost:9000/minio/health/ready
           # /working must be disk-backed; tmpfs would charge the whole object to memory.
-          mkdir -p "$RUNNER_TEMP/storage-working"
+          docker run --rm -v storage-working:/working storage-boundary \
+            sh -c 'stat -f -c %T /working; test "$(stat -f -c %T /working)" != tmpfs' \
+            | tee "$evidence/working-filesystem.log"
           docker create --name storage-transfer --network storage-boundary \
             --memory=512m --memory-swap=512m --cpus=1 --read-only --tmpfs /tmp:size=16m \
             -v "$certs/public.crt:/certs/public.crt:ro" -v "$evidence:/evidence" \
-            -v "$RUNNER_TEMP/storage-working:/working" storage-boundary
+            -v storage-working:/working storage-boundary
           set +e
           docker start -a storage-transfer 2>&1 | tee "$evidence/transfer.log"
           transfer_code=${PIPESTATUS[0]}
