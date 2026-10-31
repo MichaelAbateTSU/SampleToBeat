@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       cases:
-        description: Remaining import and export cases, or export-only follow-up
+        description: Audio diagnostics; original asserts 1200-second and 1024-MiB settings
         type: choice
-        options: [remaining, export, repeated, cold]
+        options: [remaining, export, repeated, cold, original]
         default: remaining
 permissions:
   contents: read
@@ -20,6 +20,7 @@ jobs:
           CASES: ${{ inputs.cases }}
         run: |
           set -euo pipefail
+          python3 .github/benchmarks/test_render_metrics.py
           docker build -t choplab:render-free .
           git fetch --depth=1 origin 504e97584d2b5992e2e48cedfb7067c8bd877691
           git show 504e97584d2b5992e2e48cedfb7067c8bd877691:.github/benchmarks/render_free.py \
@@ -28,7 +29,7 @@ jobs:
           import os, pathlib
           path = pathlib.Path(os.environ["RUNNER_TEMP"], "render-memory.py")
           source = path.read_text()
-          source = source.replace('import base64', 'import pathlib\nimport base64')
+          source = source.replace('import base64', 'from render_metrics import sample_disk\nimport pathlib\nimport base64')
           source = source.replace('REVISION = "4d62d58a6ba64f2f8efe642777ba3c057fcc8e64"',
                                   f'REVISION = "{os.environ["GITHUB_SHA"]}"')
           source = source.replace('short_passed = run_case(16)\n        if not short_passed:\n            run_case(4)',
@@ -38,7 +39,13 @@ jobs:
           elif os.environ["CASES"] in ("repeated", "cold"):
               source = source.replace('        run_case(16)\n        run_case(300)',
                                       '        for repeat in range(2):\n            run_case(16)\n            run_case(300)')
-          if os.environ["CASES"] == "cold":
+          elif os.environ["CASES"] == "original":
+              source = source.replace('        run_case(16)\n        run_case(300)', '        run_case(1200)')
+              source = source.replace('"--env", "CHOPLAB_MODE=hosted",',
+                                      '"--env", "CHOPLAB_MAX_AUDIO_SECONDS=1200", "--env", "CHOPLAB_MAX_UPLOAD_MB=1024", "--env", "CHOPLAB_MODE=hosted",')
+              source = source.replace('caps["max_audio_seconds"] == 300', 'caps["max_audio_seconds"] == 1200 and caps["max_upload_mb"] == 1024')
+              source = source.replace('"job_envelope": JOB_ENVELOPE,', '"job_envelope": JOB_ENVELOPE,\n    "test_only_original_limit_overrides": True,')
+          if os.environ["CASES"] in ("cold", "original"):
               source = source.replace('source = create_input(seconds)', '''source = create_input(seconds)
               code = "import os; paths = (os.path.join(root, name) for root, dirs, files in os.walk('/opt/venv') for name in files if '.so' in name or name.endswith('.pyc')); count = 0\\nfor path in paths:\\n with open(path, 'rb') as file: os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)\\n count += 1\\nprint('Released scientific code cache for', count, 'files')"
               command("docker", "run", "--rm", "--entrypoint", "/usr/local/bin/python", IMAGE, "-c", code)''')
@@ -73,13 +80,19 @@ jobs:
                                   'samples.append(int((self.group / "memory.current").read_text()))\n                        stat = dict(line.split() for line in (self.group / "memory.stat").read_text().splitlines())\n                        cpu = dict(line.split() for line in (self.group / "cpu.stat").read_text().splitlines())\n                        rss = 0\n                        for pid in (self.group / "cgroup.procs").read_text().split():\n                            try:\n                                rss += int(next(line.split()[1] for line in pathlib.Path("/proc", pid, "status").read_text().splitlines() if line.startswith("VmRSS:"))) * 1024\n                            except (FileNotFoundError, StopIteration, ProcessLookupError):\n                                pass\n                        memory_profile.append({"monotonic": time.monotonic(), "cpu_usage_usec": int(cpu["usage_usec"]), "rss_bytes": rss, "stage": RESULTS.get("profile_stage"), "current": samples[-1], **{k: int(stat.get(k, 0)) for k in ("anon", "file", "kernel")}})')
           source = source.replace('"duration_seconds": round(time.monotonic() - before, 3),',
                                   '"last_job": RESULTS.get("last_job"),\n                "memory_profile": memory_profile,\n                "http_liveness": http_liveness,\n                "duration_seconds": round(time.monotonic() - before, 3),')
+          source = source.replace('self.name, self.case, self.group = name, case, None',
+                                  'self.name, self.case, self.group = name, case, None\n        self.pid = None')
+          source = source.replace('pid = state(self.name)["State"]["Pid"]',
+                                  'pid = state(self.name)["State"]["Pid"]\n        self.pid = pid')
+          source = source.replace('"current": samples[-1], **{', '"current": samples[-1], "disk": sample_disk(self.pid), **{')
+          source = source.replace('("anon", "file", "kernel")', '("anon", "file", "kernel", "file_mapped", "file_dirty", "file_writeback", "inactive_file", "active_file")')
           path.write_text(source)
           PY
           python3 -m py_compile "$RUNNER_TEMP/render-memory.py"
       - name: Measure full audio at 512 MiB no swap and 0.1 CPU
         timeout-minutes: 35
         run: |
-          sudo timeout --signal=TERM --kill-after=15s 2000s \
+          sudo env PYTHONPATH="$GITHUB_WORKSPACE/.github/benchmarks" timeout --signal=TERM --kill-after=15s 2000s \
             python3 -u "$RUNNER_TEMP/render-memory.py" "$RUNNER_TEMP/render-memory-results"
       - name: Make evidence readable and summarize every measured outcome
         if: always()
@@ -95,17 +108,23 @@ jobs:
           data = json.loads(path.read_text())
           lines = ["## Capped audio measurements (not a Render deployment)",
                    f"Revision: `{data['revision']}`; limits: `{data['limits']}`",
-                   "| Input | Stage | Outcome | Seconds | Sampled peak MiB | Lifetime peak MiB | OOM killed | 64 MiB headroom |",
-                   "|---|---|---|---|---|---|---|---|"]
+                   "| Input | Stage | Outcome | Seconds | Sampled peak MiB | Lifetime peak MiB | OOM killed | 64 MiB headroom | Sampled working disk MiB |",
+                   "|---|---|---|---|---|---|---|---|---|"]
           for case in data["cases"]:
               for row in case["operations"]:
+                  disk = [sample["disk"]["observed_allocated_bytes"]
+                          for sample in row.get("memory_profile", [])
+                          if sample.get("disk", {}).get("outcome") == "sampled"
+                          and sample["disk"]["observed_allocated_bytes"] is not None]
+                  disk_peak = f"{max(disk)/1048576:.2f}" if disk else "Unknown"
                   lines.append(f"| {case['input_seconds']}s | {row['operation']} | {row['outcome']} | "
                                f"{row['duration_seconds']} | {row['sampled_peak_memory_bytes']/1048576:.2f} | "
                                f"{row['cgroup_lifetime_peak_memory_bytes']/1048576:.2f} | "
                                f"{row['container_state']['OOMKilled']} | "
-                               f"{row['outcome'] == 'passed' and not row['container_state']['OOMKilled'] and 0 < max(row['sampled_peak_memory_bytes'], row['cgroup_lifetime_peak_memory_bytes']) <= 448 * 1048576} |")
+                               f"{row['outcome'] == 'passed' and not row['container_state']['OOMKilled'] and 0 < max(row['sampled_peak_memory_bytes'], row['cgroup_lifetime_peak_memory_bytes']) <= 448 * 1048576} | {disk_peak} |")
               if case.get("skipped"):
                   lines.append(f"\n{case['input_seconds']}s untested: {case['skipped']}\n")
+          lines.append("\nDisk is sampled app data/tmp plus parent-process unlinked regular FDs, not an exact peak; child-only FDs and short-lived files may be missed. Object GET/PUT, live/retired inventory and PostgreSQL bytes are unmeasured in this local-storage diagnostic, not zero. No real-provider quota is used.")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write("\n".join(lines))
           PY

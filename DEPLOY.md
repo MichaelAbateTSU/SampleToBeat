@@ -264,6 +264,16 @@ It used a disposable probe with a test-only storage predicate and no database, S
 function/parser equality is not production image/runtime equivalence. A bounded multipart follow-up is
 being investigated separately. This does not establish full-app 1 GiB upload readiness.
 
+The unsaved production Render draft explicitly sets `CHOPLAB_MAX_AUDIO_SECONDS=1200` and
+`CHOPLAB_MAX_UPLOAD_MB=1024`; both differ from the current hosted defaults of 300 seconds / 100 MiB.
+Final combined acceptance must exercise **those exact overrides**, including configured PostgreSQL/S3,
+before deployment. A local-storage `original` diagnostic now uses both settings for a cold 1,200-second
+workflow at 512 MiB/no swap/0.1 CPU, retaining existing operation deadlines and recording sampled working
+disk. This diagnostic is not the full durable/upload acceptance: app data/tmp and parent-process unlinked
+files are sampled, so short-lived or child-only temporary files may be missed. Object transfer/inventory
+and PostgreSQL bytes remain unmeasured in it, not zero; no real Neon quota is consumed. The 1,200-second
+PCM16 fixture also does not prove acceptance of a 1,024-MiB payload or full-length compressed formats.
+
 The next audio pipeline uses the independent `e42630a` disk decoder for import and bounded reads for
 analysis/reanalysis and other decode/load callers. Large mono, harmonic, mel and CQT buffers use private
 disk-backed arrays with last-view ownership, cache release and the existing hosted free-space reserve.
