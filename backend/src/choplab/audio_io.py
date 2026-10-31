@@ -143,7 +143,9 @@ def load_region(path: Path, start: int, end: int) -> np.ndarray:
         if not 0 <= start < end <= len(f) + 1:
             raise ValueError("Invalid sample bounds for audio.")
         f.seek(start)
-        return _to_stereo(f.read(end - start, dtype="float32", always_2d=True))
+        result = _to_stereo(f.read(end - start, dtype="float32", always_2d=True))
+    _release_file_cache(path)
+    return result
 
 
 def write_wav(path: Path, y: np.ndarray, sr: int = SR, subtype: str = "FLOAT") -> Path:

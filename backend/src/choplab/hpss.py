@@ -61,13 +61,14 @@ def blocks(read, length, dtype, margin=1.0, both=False):
     squared = window ** 2
     tails = [np.empty(0, dtype=dtype) for _ in range(2 if both else 1)]
     norm_tail = np.empty(0, dtype=dtype)
-    for start in range(0, frames, 256):
-        end = min(start + 256, frames)
-        a, b = max(0, start - 15), min(frames, end + 15)
-        lo, hi = a * hop - n_fft // 2, (b - 1) * hop + n_fft // 2
-        audio = read(max(0, lo), min(length, hi))
-        audio = np.pad(audio, (max(0, -lo), max(0, hi - length)))
-        spectrum = librosa.stft(audio, n_fft=n_fft, hop_length=hop, center=False)
+    columns = max(1, librosa.util.MAX_MEM_BLOCK // (1025 * np.dtype(librosa.util.dtype_r2c(dtype)).itemsize))
+    starts = [0, *range(2 + columns * 8, frames, columns * 8)]
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else frames
+        # Align the library's centered forward FFT batches, keeping artificial local padding outside the halo.
+        a = max(0, (start - 17) // 32 * 32)
+        audio = read(a * hop, min(length, (end + 47) * hop))
+        spectrum = librosa.stft(audio, n_fft=n_fft, hop_length=hop)
         separated = spectra(spectrum, margin, both)
         separated = separated if both else (separated,)
         size = (end - start - 1) * hop + n_fft
@@ -82,8 +83,17 @@ def blocks(read, length, dtype, margin=1.0, both=False):
         for component, tail in zip(separated, tails):
             output = np.zeros(size, dtype=dtype)
             output[:len(tail)] = tail
-            inverse = window[:, None] * irfft(component[:, start - a:end - a], n=n_fft, axis=0)
-            _overlap_add(output, inverse, hop)
+            positions = [0]
+            if not start and end > 2:
+                positions.append(2)
+            positions.extend(range(positions[-1] + columns, end - start, columns))
+            for j, position in enumerate(positions):
+                stop = positions[j + 1] if j + 1 < len(positions) else end - start
+                if stop == position:
+                    continue
+                inverse = window[:, None] * irfft(
+                    component[:, start - a + position:start - a + stop], n=n_fft, axis=0)
+                _overlap_add(output[position * hop:], inverse, hop)
             results.append(output)
         tails = [output[emit:].copy() for output in results]
         norm_tail = norm[emit:].copy()

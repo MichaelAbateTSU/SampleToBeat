@@ -55,7 +55,9 @@ class HPSSAdapter(Adapter):
             else:
                 def read(channel, a, b):
                     source.seek(a)
-                    return source.read(b - a, dtype="float32", always_2d=True)[:, channel]
+                    chunk = source.read(b - a, dtype="float32", always_2d=True)[:, channel]
+                    audio_io._release_file_cache(wav)
+                    return chunk
                 length = len(source)
             streams = [blocks(lambda a, b, ch=ch: read(ch, a, b), length, np.float32,
                               margin=2.0, both=True) for ch in range(2)]
@@ -67,6 +69,10 @@ class HPSSAdapter(Adapter):
                     for left, right in zip(*streams, strict=True):
                         h.write(np.stack([left[0], right[0]], axis=1))
                         p.write(np.stack([left[1], right[1]], axis=1))
+                        h.flush()
+                        p.flush()
+                        for path in paths.values():
+                            audio_io._release_file_cache(path)
                 for name, path in paths.items():
                     audio_io._release_file_cache(path)
                     os.replace(path, out_dir / path.name)

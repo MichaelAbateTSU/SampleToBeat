@@ -18,7 +18,7 @@ def chroma(y, sr, hop, tuning):
     y, sr, hop = constantq.__early_downsample(y, sr, hop, "soxr_hq", octaves, sr / 2, cutoff, True)
     audio, rate, stride = y, sr, hop
     frames = 1 + len(y) // hop
-    response = np.empty((bins * octaves, frames), dtype=dtype)
+    response = np.empty((bins * octaves, frames), dtype=dtype, order="F")
     for octave in range(octaves):
         band = slice(-bins * (octave + 1), -bins * octave if octave else None)
         basis, n_fft, _ = constantq.__vqt_filter_fft(rate, frequencies[band], 1, 1, 0.01,
