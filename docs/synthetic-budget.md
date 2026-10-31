@@ -94,8 +94,9 @@ successful uncapped run is not 512-MiB feasibility evidence.
 | Disk | Cache plus dedicated TMPDIR logical/allocated bytes sampled every 100 ms, de-duplicated by inode |
 | Resource/health | Shared-container cgroup current/peak/max/swap/events where available; observed health responses including intentional replacement downtime |
 
-`render_outbound_observed_payload_floor` is object upload consumption/buffering
-plus application response consumption. The two directions of object payload are
+`render_outbound_observed_payload_sum_not_wire_floor` is object upload
+consumption/buffering plus application response consumption, not a proven lower
+bound on network bytes when attempts fail. The two directions of object payload are
 also reported as a **directional sum, not a Neon billing claim**. Uploaded
 original + decoded objects and two served decoded downloads belong to distinct
 directions; do not multiply object GET bytes into Render outbound a second time.

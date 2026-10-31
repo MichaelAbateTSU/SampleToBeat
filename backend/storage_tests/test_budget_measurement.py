@@ -331,7 +331,7 @@ else: raise RuntimeError('Synthetic missing-object expectation failed')
             "render_to_neon_object_upload_payload_observed": uploads,
             "neon_to_render_object_download_payload_consumed": downloads,
             "render_to_acceptance_client_response_payload_consumed": report["application_http"]["response_body_bytes_consumed"],
-            "render_outbound_observed_payload_floor": uploads + report["application_http"]["response_body_bytes_consumed"],
+            "render_outbound_observed_payload_sum_not_wire_floor": uploads + report["application_http"]["response_body_bytes_consumed"],
             "neon_public_object_payload_directional_sum_not_billing_claim": uploads + downloads,
             "unobserved": ["PostgreSQL/TLS/network overhead/retransmissions and actual peer acknowledgment",
                            "health probe and observer LIST/SQL bytes; object error-response body bytes",
