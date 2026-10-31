@@ -104,6 +104,19 @@ class FixtureTests(unittest.TestCase):
                 fixture.write(path, 1)
             self.assertEqual(partial.read_bytes(), b"user work")
 
+    def test_disk_preflight_and_wrong_generator_length_cleanup(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "fixture.wav"
+            with patch.object(fixture.shutil, "disk_usage", return_value=type("Disk", (), {"free":0})()):
+                with self.assertRaises(OSError):
+                    fixture.write(path, 1001)
+            self.assertFalse(path.exists())
+            with patch.object(fixture, "chunks", lambda _: iter([b"RIFF"])):
+                with self.assertRaises(ValueError):
+                    fixture.write(path, 1001)
+            self.assertFalse(path.exists())
+            self.assertFalse(path.with_name(path.name + ".part").exists())
+
     def test_explicit_cli_optin_and_no_network_default(self):
         run = subprocess.run([sys.executable, "client.py"], capture_output=True, text=True)
         self.assertEqual(run.returncode, 0)
@@ -219,6 +232,32 @@ class ClientTests(unittest.TestCase):
     def test_unknown_creation_never_guessed_or_deleted(self):
         state = self.state()
         self.assertEqual(client.cleanup_owned(FakeTransport(), state)["outcome"], "unknown_create_retained")
+
+    def test_accepted_active_jobs_not_deleted_even_with_known_id(self):
+        transport, state = FakeTransport(active=True), self.state()
+        client.execute(transport, state, lambda:None, "digest", max_polls=1, sleep=lambda _:None)
+        self.assertEqual(state["outcome"], "poll_limit_unknown_retained")
+        self.assertEqual(state["cleanup"]["outcome"], "active_or_unknown_jobs_retained")
+        self.assertFalse(transport.deleted)
+
+    def test_unknown_upload_confirmation_keeps_active_job_guard(self):
+        transport = FakeTransport(active=True)
+        state = {"project_id":"prj_test","project_name":"valid-gib-preflight-test",
+                 "upload_attempted":True,"unknown_upload_confirmed_ended":True}
+        self.assertEqual(client.cleanup_owned(transport, state)["outcome"], "active_or_unknown_jobs_retained")
+        self.assertFalse(transport.deleted)
+
+    def test_cli_no_approval_causes_zero_connects(self):
+        with tempfile.TemporaryDirectory() as d:
+            bp = Path(d) / "budget.json"
+            b = budget(); b["approved"] = False
+            bp.write_text(json.dumps(b))
+            with patch.object(sys, "argv", ["client.py", "--execute", "--budget", str(bp),
+                 "--origin", b["origin"], "--final-source-sha", b["final_source_sha"],
+                 "--out", str(Path(d) / "receipt.json")]), patch.object(client.Transport, "connect") as connect:
+                with self.assertRaises(ValueError):
+                    client.main()
+                connect.assert_not_called()
 
     def test_http_only_offline_loopback(self):
         with self.assertRaises(ValueError):

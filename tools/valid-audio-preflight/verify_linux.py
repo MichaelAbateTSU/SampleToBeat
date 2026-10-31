@@ -77,6 +77,9 @@ def main():
         assert meta["decoder"] == "libsndfile"
         assert meta["sample_rate"] == fixture.RATE and meta["channels"] == 4
         assert meta["duration"] == fixture.FRAMES / fixture.RATE
+        small_internal = Path(work) / "internal-small.wav"
+        audio_io.write_wav(small_internal, np.zeros((1001, 2), dtype=np.float32))
+        internal_header_bytes = small_internal.stat().st_size - (1001 * 2 * 4)
 
         observed = {}
         class Handler(BaseHTTPRequestHandler):
@@ -121,6 +124,8 @@ def main():
                   "ffprobe":stream,"ffmpeg_full_decode_exit":0,
                   "soundfile_version":sf.__version__,"libsndfile_version":sf.__libsndfile_version__,
                   "production_audio_io_sha256":hashlib.sha256(Path(audio_io.__file__).read_bytes()).hexdigest(),
+                  "actual_small_production_internal_wav_header_bytes":internal_header_bytes,
+                  "inferred_full_internal_wav_bytes":client.INTERNAL_PCM_BYTES + internal_header_bytes,
                   "non_silent_peak":maximum,"rms":(sumsquares/values)**0.5,
                   "full_loopback_stream":observed,"rss_max_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
     report["temporary_fixture_removed"] = not path.exists()

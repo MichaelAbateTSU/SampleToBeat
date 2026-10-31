@@ -76,7 +76,7 @@ expiration must cover the bounded test/polling. Never approve guessed quota.
   "input_ingress_bytes": 1073742002,
   "available_local_bytes": 5368709120,
   "tmp_available_bytes": 1082130432,
-  "data_available_bytes": 3646242752,
+  "data_available_bytes": 3646248256,
   "object_storage_available_bytes": 1431659840,
   "app_egress_available_bytes": 1431659840,
   "max_http_requests": 260,

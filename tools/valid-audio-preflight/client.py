@@ -134,7 +134,7 @@ class Transport:
         if len(raw) > MAX_RESPONSE_BYTES:
             raise RuntimeError("response exceeded cap")
         result = {"status": response.status}
-        if self.password and self.password.encode() in raw:
+        if self.password and (self.password.encode() in raw or self.auth.encode() in raw):
             raise RuntimeError("refusing credential-bearing response")
         try:
             result["body"] = json.loads(raw) if raw else {}
@@ -216,6 +216,7 @@ def cleanup_owned(transport, state):
 def execute(transport, state, persist, expected_digest, *, max_polls=120, sleep=time.sleep):
     """Never retry writes; journal identities before upload and retain unknown jobs."""
     try:
+        state["phase"] = "capabilities"
         capabilities = require(transport.request("GET", "/api/system/capabilities"), 200)
         if capabilities.get("max_upload_mb") != 1024 or capabilities.get("max_audio_seconds", 0) < FRAMES / RATE:
             raise RuntimeError("actual app caps differ from approved fixture preflight")
@@ -223,6 +224,7 @@ def execute(transport, state, persist, expected_digest, *, max_polls=120, sleep=
         if capabilities.get("disk_free_gb", 0) * 1e9 < MIN_LOCAL_BYTES:
             raise RuntimeError("app reports insufficient local disk space")
         state["create_attempted"] = True
+        state["phase"] = "create"
         persist()
         created = require(transport.request("POST", "/api/projects", {"name": state["project_name"]}), 201)
         if not isinstance(created.get("id"), str) or not created["id"]:
@@ -230,6 +232,7 @@ def execute(transport, state, persist, expected_digest, *, max_polls=120, sleep=
         state["project_id"] = created["id"]
         persist()
         state["upload_attempted"] = True
+        state["phase"] = "upload"
         persist()
         upload = transport.upload(state["project_id"], expected_digest)
         state["upload_status"] = upload["status"]
@@ -237,12 +240,14 @@ def execute(transport, state, persist, expected_digest, *, max_polls=120, sleep=
         result = require(upload, 202)
         state["source_id"], state["job_id"] = result["source"]["id"], result["job"]["id"]
         state["outcome"] = "accepted_not_completed"
+        state["phase"] = "job_poll"
         persist()
         for _ in range(max_polls):
             job = require(transport.request("GET", "/api/jobs/" + quote(state["job_id"], safe="")), 200)
             state["job_status"] = job.get("status")
             if state["job_status"] in TERMINAL:
                 source = require(transport.request("GET", "/api/sources/" + quote(state["source_id"], safe="")), 200)
+                state["phase"] = "verify_import"
                 state["server_original_sha256"] = source.get("content_hash")
                 state["metadata"] = source.get("metadata")
                 state["duration_seconds"] = source.get("duration_seconds")
@@ -325,7 +330,18 @@ def main():
         text = json.dumps(state, indent=2)
         if password in text:
             raise RuntimeError("refusing credential-bearing receipt")
-        args.out.write_text(text, encoding="utf-8")
+        partial = args.out.with_name(args.out.name + "." + secrets.token_hex(16) + ".tmp")
+        created = False
+        try:
+            with partial.open("x", encoding="utf-8") as receipt:
+                created = True
+                receipt.write(text)
+                receipt.flush()
+                os.fsync(receipt.fileno())
+            os.replace(partial, args.out)
+        finally:
+            if created:
+                partial.unlink(missing_ok=True)
     with args.out.open("x", encoding="utf-8") as receipt:
         receipt.write(json.dumps(state, indent=2))
     transport = Transport(args.origin, args.username, password, budget)
