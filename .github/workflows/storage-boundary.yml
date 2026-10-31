@@ -71,6 +71,7 @@ jobs:
           set -e
           docker inspect storage-transfer > "$evidence/transfer-inspect.json"
           docker inspect storage-s3 > "$evidence/service-inspect.json"
+          docker logs storage-transfer > "$evidence/transfer.log" 2>&1
           test "$transfer_code" -eq 0
           docker create --name storage-oom --network none --memory=512m --memory-swap=512m \
             storage-boundary python -c \
