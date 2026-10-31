@@ -36,11 +36,19 @@ def ffmpeg_exe() -> str | None:
         return None
 
 
+def _release_file_cache(path: Path) -> None:
+    if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+        with open(path, "rb") as f:
+            os.fsync(f.fileno())
+            os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+
+
 def file_hash(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
+    _release_file_cache(path)
     return h.hexdigest()
 
 
@@ -113,6 +121,7 @@ def decode(path: Path, sr: int = SR) -> np.ndarray:
         raise AudioError(f"Recording is longer than {MAX_SECONDS} seconds; trim it before importing.")
     if not np.isfinite(y).all():
         y = np.nan_to_num(y)
+    _release_file_cache(path)
     return y
 
 
@@ -143,6 +152,7 @@ def write_wav(path: Path, y: np.ndarray, sr: int = SR, subtype: str = "FLOAT") -
     os.close(fd)
     try:
         sf.write(tmp, y, sr, subtype=subtype)
+        _release_file_cache(Path(tmp))
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
@@ -156,20 +166,32 @@ def write_mp3(path: Path, y: np.ndarray, sr: int = SR, bitrate: str = "320k") ->
         raise AudioError("MP3 export requires FFmpeg.")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp.mp3")
-    # Preserve the exact float32 PCM sent to ffmpeg without a full clipped array + bytes copy.
-    fd, pcm = tempfile.mkstemp(suffix=".pcm", dir=path.parent)
+    # Stream exact float32 PCM; a temporary PCM file would also count against cgroup page-cache RAM.
     try:
-        with os.fdopen(fd, "wb") as output:
-            for start in range(0, len(y), 65536):
-                output.write(np.clip(y[start:start + 65536], -1, 1).astype(np.float32).tobytes())
-        r = subprocess.run([exe, "-v", "error", "-y", "-f", "f32le", "-ar", str(sr), "-ac", "2",
-                            "-i", pcm, "-codec:a", "libmp3lame", "-b:a", bitrate, str(tmp)],
-                           capture_output=True)
-        if r.returncode != 0:
-            raise AudioError(f"MP3 encoding failed: {r.stderr.decode(errors='replace')[-300:]}")
+        with tempfile.TemporaryFile() as errors:
+            with subprocess.Popen([exe, "-v", "error", "-y", "-f", "f32le", "-ar", str(sr), "-ac", "2",
+                                   "-i", "-", "-codec:a", "libmp3lame", "-b:a", bitrate, str(tmp)],
+                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=errors) as encoder:
+                broken = None
+                try:
+                    for start in range(0, len(y), 65536):
+                        encoder.stdin.write(np.clip(y[start:start + 65536], -1, 1).astype(np.float32).tobytes())
+                except BrokenPipeError as exc:
+                    broken = exc
+                finally:
+                    try:
+                        encoder.stdin.close()
+                    except BrokenPipeError as exc:
+                        broken = exc
+                code = encoder.wait()
+            if code != 0 or broken is not None:
+                errors.seek(0, os.SEEK_END)
+                errors.seek(max(0, errors.tell() - 300))
+                detail = errors.read().decode(errors="replace")
+                raise AudioError(f"MP3 encoding failed: {detail or broken}") from broken
+        _release_file_cache(tmp)
         os.replace(tmp, path)
     finally:
-        os.remove(pcm)
         tmp.unlink(missing_ok=True)
     return path
 

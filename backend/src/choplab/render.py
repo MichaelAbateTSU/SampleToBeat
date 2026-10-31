@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pyloudnorm
 from scipy.ndimage import minimum_filter1d, uniform_filter1d
-from scipy.signal import resample_poly
+from scipy.signal import lfilter, resample_poly
 
 from . import audio_io, bass, drums, sampling, transform
 from .core import PPQ, SR, TICKS_PER_BAR, db_to_gain, swing_offset_ticks, ticks_to_samples
@@ -184,13 +184,22 @@ def loudness(y: np.ndarray) -> float | None:
     # BS.1770 weighting/gating is channel-independent up to the final channel sum.
     # Filter one channel at a time rather than copying/filtering full stereo buffers.
     for channel in range(y.shape[1]):
-        weighted = y[:, channel].astype(np.float64)
-        for stage in meter._filters.values():
-            weighted = stage.apply_filter(weighted)
+        stages = list(meter._filters.values())
+        states = [np.zeros(max(len(stage.a), len(stage.b)) - 1, np.float64) for stage in stages]
+        weighted = np.empty(0, np.float64)
+        previous_lo, end = 0, 0
         for block in range(count):
-            lo = int(meter.block_size * block * step * SR)
+            lo = int(meter.block_size * (block * step) * SR)
             hi = int(meter.block_size * (block * step + 1) * SR)
-            energy[channel, block] = np.sum(np.square(weighted[lo:hi])) / (meter.block_size * SR)
+            stop = min(hi, len(y))
+            new = y[end:stop, channel].astype(np.float64)
+            if len(new):
+                for i, stage in enumerate(stages):
+                    new, states[i] = lfilter(stage.b, stage.a, new, zi=states[i])
+                    new *= stage.passband_gain
+            weighted = np.concatenate([weighted[lo - previous_lo:], new])
+            energy[channel, block] = np.sum(np.square(weighted)) / (meter.block_size * SR)
+            previous_lo, end = lo, stop
         del weighted
     gains = np.asarray([1.0, 1.0, 1.0, 1.41, 1.41])[:y.shape[1]]
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -295,7 +304,10 @@ def export(arr: dict, samples: dict, sources: dict, out_dir: Path, filename: str
     out_dir.mkdir(parents=True, exist_ok=True)
     files = []
     progress("writing", 0.6)
+    if not stems:
+        res["stems"].clear()
     main = write_audio(out_dir / f"{name}.{FORMATS[fmt][0]}", res["master"], fmt)
+    del res["master"]
     files.append({"kind": "mix", "name": main.name, "path": str(main), "check": verify(main)})
     if stems:
         progress("writing stems", 0.75)

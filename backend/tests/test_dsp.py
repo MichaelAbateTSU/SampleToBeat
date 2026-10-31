@@ -171,22 +171,43 @@ def test_streamed_beat_rms_matches_full_source_reduceat(tmp_path, monkeypatch):
     np.testing.assert_allclose(sampling._beat_rms((path,), beats), expected, atol=1e-14)
 
 
-@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("fail", [False, True, "pipe"])
 def test_mp3_uses_exact_bounded_pcm_and_cleans_partial_files(tmp_path, monkeypatch, fail):
-    from types import SimpleNamespace
+    from io import BytesIO
+    from pathlib import Path
 
     y = sine(220, 2.1, amp=1.2)
     expected = np.clip(y, -1, 1).astype(np.float32).tobytes()
     original = y.copy()
     monkeypatch.setattr(audio_io, "ffmpeg_exe", lambda: "synthetic-ffmpeg")
-    def encode(args, **kwargs):
-        assert "input" not in kwargs
-        pcm_path = Path(args[args.index("-i") + 1])
-        assert pcm_path.read_bytes() == expected
-        Path(args[-1]).write_bytes(b"synthetic mp3")
-        return SimpleNamespace(returncode=int(fail), stderr=b"synthetic encoding error")
-    from pathlib import Path
-    monkeypatch.setattr(audio_io.subprocess, "run", encode)
+    class Input(BytesIO):
+        def write(self, block):
+            assert len(block) <= 65536 * 2 * 4
+            if fail == "pipe":
+                raise BrokenPipeError("synthetic closed encoder")
+            return super().write(block)
+
+        def close(self):
+            if fail != "pipe":
+                assert self.getvalue() == expected
+
+    class Encoder:
+        def __init__(self, args, **kwargs):
+            assert args[args.index("-i") + 1] == "-"
+            self.stdin = Input()
+            Path(args[-1]).write_bytes(b"synthetic mp3")
+            kwargs["stderr"].write(b"synthetic encoding error")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def wait(self):
+            return int(fail is True)
+
+    monkeypatch.setattr(audio_io.subprocess, "Popen", Encoder)
     target = tmp_path / "out.mp3"
     if fail:
         with pytest.raises(audio_io.AudioError, match="encoding failed"):
@@ -196,3 +217,56 @@ def test_mp3_uses_exact_bounded_pcm_and_cleans_partial_files(tmp_path, monkeypat
         assert audio_io.write_mp3(target, y).read_bytes() == b"synthetic mp3"
     np.testing.assert_array_equal(y, original)
     assert sorted(p.name for p in tmp_path.iterdir()) == ([] if fail else ["out.mp3"])
+
+
+def test_export_releases_unused_buffers_before_encoding_and_verification(tmp_path, monkeypatch):
+    import weakref
+    from choplab import render
+
+    references = []
+    def render_audio(*args):
+        master = np.zeros((1000, 2), np.float32)
+        stem = master.copy()
+        references.extend([weakref.ref(master), weakref.ref(stem)])
+        return {"master": master, "stems": {"track": stem}, "metrics": {"sentinel": 1}}
+
+    def write(path, audio, fmt):
+        assert references[1]() is None
+        assert references[0]() is audio
+        return path
+
+    def verify(path):
+        assert references[0]() is None
+        return {"verified": True}
+
+    monkeypatch.setattr(render, "render", render_audio)
+    monkeypatch.setattr(render, "write_audio", write)
+    monkeypatch.setattr(render, "verify", verify)
+    result = render.export({}, {}, {}, tmp_path, fmt="mp3")
+    assert result["metrics"] == {"sentinel": 1}
+    assert result["files"][0]["check"] == {"verified": True}
+
+
+def test_long_streamed_loudness_preserves_iir_state_and_gates():
+    import pyloudnorm
+    from choplab import render
+
+    y = sine(443, 60.137, amp=0.1)
+    y[:48000 * 20] *= 0.001
+    y[48000 * 40:] *= 0.3
+    expected = pyloudnorm.Meter(48000).integrated_loudness(y.astype(np.float64))
+    assert render.loudness(y) == pytest.approx(expected, abs=1e-10)
+
+
+def test_cache_release_syncs_before_kernel_advice(tmp_path, monkeypatch):
+    path = tmp_path / "written.wav"
+    path.write_bytes(b"synthetic")
+    calls = []
+    monkeypatch.setattr(audio_io.os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    monkeypatch.setattr(audio_io.os, "fsync", lambda fd: calls.append(("sync", fd)))
+    monkeypatch.setattr(audio_io.os, "posix_fadvise",
+                        lambda fd, offset, length, advice: calls.append(("advice", fd, offset, length, advice)),
+                        raising=False)
+    audio_io._release_file_cache(path)
+    assert calls == [("sync", calls[0][1]), ("advice", calls[0][1], 0, 0, 4)]
+    assert path.read_bytes() == b"synthetic"

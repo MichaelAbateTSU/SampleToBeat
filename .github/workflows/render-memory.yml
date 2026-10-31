@@ -1,10 +1,12 @@
 name: Render Free memory measurements
 on:
   workflow_dispatch:
-  push:
-    branches: [michaelabatetsu-choplab-production-hosting]
-    paths:
-      - ".github/workflows/render-memory.yml"
+    inputs:
+      cases:
+        description: Remaining import and export cases, or export-only follow-up
+        type: choice
+        options: [remaining, export, repeated]
+        default: remaining
 permissions:
   contents: read
 jobs:
@@ -14,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Build current audio engine and reuse pinned baseline harness
+        env:
+          CASES: ${{ inputs.cases }}
         run: |
           set -euo pipefail
           docker build -t choplab:render-free .
@@ -28,10 +32,18 @@ jobs:
                                   f'REVISION = "{os.environ["GITHUB_SHA"]}"')
           source = source.replace('short_passed = run_case(16)\n        if not short_passed:\n            run_case(4)',
                                   'run_case(16)')
+          if os.environ["CASES"] == "export":
+              source = source.replace('        run_case(300)', '')
+          elif os.environ["CASES"] == "repeated":
+              source = source.replace('        run_case(16)\n        run_case(300)',
+                                      '        for repeat in range(2):\n            run_case(16)\n            run_case(300)')
           source = source.replace('if result["status"] == "completed":',
-                                  'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "current_stage", "progress", "error_message")}\n        if result["status"] == "completed":')
+                                  'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "current_stage", "progress", "error_message")}\n        stage = result.get("current_stage")\n        if stage != RESULTS.get("profile_stage"):\n            RESULTS["profile_stage"] = stage\n            print(json.dumps({"profile_stage": stage, "monotonic": time.monotonic()}), flush=True)\n        if result["status"] == "completed":')
+          source = source.replace('samples = []', 'samples = []\n        memory_profile = []')
+          source = source.replace('samples.append(int((self.group / "memory.current").read_text()))',
+                                  'samples.append(int((self.group / "memory.current").read_text()))\n                        stat = dict(line.split() for line in (self.group / "memory.stat").read_text().splitlines())\n                        memory_profile.append({"monotonic": time.monotonic(), "stage": RESULTS.get("profile_stage"), "current": samples[-1], **{k: int(stat.get(k, 0)) for k in ("anon", "file", "kernel")}})')
           source = source.replace('"duration_seconds": round(time.monotonic() - before, 3),',
-                                  '"last_job": RESULTS.get("last_job"),\n                "duration_seconds": round(time.monotonic() - before, 3),')
+                                  '"last_job": RESULTS.get("last_job"),\n                "memory_profile": memory_profile,\n                "duration_seconds": round(time.monotonic() - before, 3),')
           path.write_text(source)
           PY
           python3 -m py_compile "$RUNNER_TEMP/render-memory.py"
@@ -54,13 +66,14 @@ jobs:
           data = json.loads(path.read_text())
           lines = ["## Capped audio measurements (not a Render deployment)",
                    f"Revision: `{data['revision']}`; limits: `{data['limits']}`",
-                   "| Input | Stage | Outcome | Seconds | Peak MiB | OOM killed |",
-                   "|---|---|---|---|---|---|"]
+                   "| Input | Stage | Outcome | Seconds | Peak MiB | OOM killed | 64 MiB headroom |",
+                   "|---|---|---|---|---|---|---|"]
           for case in data["cases"]:
               for row in case["operations"]:
                   lines.append(f"| {case['input_seconds']}s | {row['operation']} | {row['outcome']} | "
                                f"{row['duration_seconds']} | {row['sampled_peak_memory_bytes']/1048576:.2f} | "
-                               f"{row['container_state']['OOMKilled']} |")
+                               f"{row['container_state']['OOMKilled']} | "
+                               f"{row['outcome'] == 'passed' and row['sampled_peak_memory_bytes'] <= 448 * 1048576} |")
               if case.get("skipped"):
                   lines.append(f"\n{case['input_seconds']}s untested: {case['skipped']}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:

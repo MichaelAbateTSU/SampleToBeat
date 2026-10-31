@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 import librosa
+from scipy.fft import irfft
+from scipy.signal import get_window
 
 from .audio_io import AudioError
 from .core import NOTE_NAMES, SR, parse_key
@@ -135,17 +137,48 @@ def _onset_strength(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
 
 
 def _harmonic(mono: np.ndarray) -> np.ndarray:
-    spectrum = librosa.stft(mono)
-    # Default 31-frame median filter needs 15 original frames on either side.
-    previous = spectrum[:, :0].copy()
-    for start in range(0, spectrum.shape[1], 256):
-        end = min(start + 256, spectrum.shape[1])
-        block = np.concatenate([previous, spectrum[:, start:min(end + 15, spectrum.shape[1])]], axis=1)
-        left = previous.shape[1]
-        previous = spectrum[:, max(start, end - 15):end].copy()
-        harmonic = librosa.decompose.hpss(block)[0]
-        spectrum[:, start:end] = harmonic[:, left:left + end - start]
-    return librosa.istft(spectrum, dtype=mono.dtype, length=len(mono))
+    n_fft, hop = 2048, 512
+    frames = 1 + len(mono) // hop
+    output = np.zeros(len(mono) + n_fft, dtype=mono.dtype)
+    window = get_window("hann", n_fft, fftbins=True)
+    for start in range(0, frames, 256):
+        end = min(start + 256, frames)
+        a, b = max(0, start - 15), min(frames, end + 15)
+        lo, hi = a * hop - n_fft // 2, (b - 1) * hop + n_fft // 2
+        audio = mono[max(0, lo):min(len(mono), hi)]
+        audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
+        spectrum = librosa.stft(audio, n_fft=n_fft, hop_length=hop, center=False)
+        harmonic = librosa.decompose.hpss(spectrum)[0][:, start - a:end - a]
+        inverse = window[:, None] * irfft(harmonic, n=n_fft, axis=0)
+        for i in range(end - start):
+            pos = (start + i) * hop
+            output[pos:pos + n_fft] += inverse[:, i]
+    normalizer = librosa.filters.window_sumsquare(window="hann", n_frames=frames,
+                                                hop_length=hop, n_fft=n_fft, dtype=mono.dtype)
+    output = output[n_fft // 2:n_fft // 2 + len(mono)]
+    normalizer = normalizer[n_fft // 2:n_fft // 2 + len(mono)]
+    nonzero = normalizer > librosa.util.tiny(normalizer)
+    output[nonzero] /= normalizer[nonzero]
+    return output
+
+
+def _tuning(mono: np.ndarray) -> float:
+    pitches, magnitudes = [], []
+    hop, n_fft = 512, 2048
+    frames = 1 + len(mono) // hop
+    for start in range(0, frames, 256):
+        end = min(frames, start + 256)
+        lo, hi = start * hop - n_fft // 2, (end - 1) * hop + n_fft // 2
+        audio = mono[max(0, lo):min(len(mono), hi)]
+        audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
+        spectrum = np.abs(librosa.stft(audio, center=False))
+        pitch, mag = librosa.piptrack(S=spectrum, sr=ASR)
+        active = pitch > 0
+        pitches.append(pitch[active])
+        magnitudes.append(mag[active])
+    pitch, mag = np.concatenate(pitches), np.concatenate(magnitudes)
+    threshold = np.median(mag) if len(mag) else 0.0
+    return librosa.pitch_tuning(pitch[mag >= threshold], bins_per_octave=36)
 
 
 def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | None = None) -> tuple[dict, dict]:
@@ -207,9 +240,12 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     # frame indices are only for feature syncing; beat_times stay sub-frame precise (HOP is ~23 ms)
     beats = np.clip(librosa.time_to_frames(beat_times, sr=ASR, hop_length=HOP), 0, n_frames - 1)
 
-    progress("key", 0.25)
+    progress("key_harmonic", 0.25)
     harm = _harmonic(mono)
-    chroma = librosa.feature.chroma_cqt(y=harm, sr=ASR, hop_length=HOP)[:, :n_frames]
+    progress("key_chroma", 0.25)
+    tuning = _tuning(harm)
+    progress("key_cqt", 0.25)
+    chroma = librosa.feature.chroma_cqt(y=harm, sr=ASR, hop_length=HOP, tuning=tuning)[:, :n_frames]
     keys = estimate_key(chroma.sum(axis=1))
     key_conf = round(max(0.0, keys[0]["score"] - keys[1]["score"]) * 5 + max(0.0, keys[0]["score"]) * 0.5, 3)
     chroma_b = _sync(chroma, beats)
