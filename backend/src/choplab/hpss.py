@@ -43,10 +43,15 @@ def spectra(spectrum, margin=1.0, both=False):
     harmonic, percussive = _median(magnitude, 1), _median(magnitude, 0)
     mask = librosa.util.softmask(harmonic, percussive * margin, power=2.0, split_zeros=margin == 1)
     h = (magnitude * mask) * phase
+    if spectrum.flags.f_contiguous:
+        h = np.asfortranarray(h)
     if not both:
         return h
     mask = librosa.util.softmask(percussive, harmonic * margin, power=2.0, split_zeros=margin == 1)
-    return h, (magnitude * mask) * phase
+    p = (magnitude * mask) * phase
+    if spectrum.flags.f_contiguous:
+        p = np.asfortranarray(p)
+    return h, p
 
 
 def blocks(read, length, dtype, margin=1.0, both=False):

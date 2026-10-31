@@ -26,6 +26,8 @@ def test_streamed_two_stem_centered_istft_is_exact(length):
     mono[-100:] = 0
     actual = list(hpss.blocks(lambda a, b: mono[a:b], length, mono.dtype, margin=2, both=True))
     expected = librosa.decompose.hpss(librosa.stft(mono), margin=2)
+    bounded = hpss.spectra(librosa.stft(mono), margin=2, both=True)
+    assert all(a.flags.f_contiguous == b.flags.f_contiguous for a, b in zip(bounded, expected))
     for channel in range(2):
         np.testing.assert_array_equal(np.concatenate([pair[channel] for pair in actual]),
                                       librosa.istft(expected[channel], length=length))
