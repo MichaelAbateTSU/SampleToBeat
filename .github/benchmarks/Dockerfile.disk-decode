@@ -1,0 +1,9 @@
+FROM choplab:decode-base
+USER root
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv
+RUN python -m pytest --version || uv pip install --python /opt/venv/bin/python pytest
+COPY backend/src/choplab/disk_decode.py /opt/venv/lib/python3.12/site-packages/choplab/disk_decode.py
+COPY backend/tests/test_disk_decode.py /checks/test_disk_decode.py
+COPY .github/benchmarks/check_disk_decode.py /checks/check_disk_decode.py
+USER choplab
+ENTRYPOINT ["python"]
