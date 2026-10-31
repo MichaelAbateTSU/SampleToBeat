@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 import librosa
-from scipy.fft import irfft
-from scipy.signal import get_window
 
 from .audio_io import AudioError
 from .core import NOTE_NAMES, SR, parse_key
 from .render import loudness
+from .hpss import blocks
 
 ASR = 22050  # analysis rate
 HOP = 512
@@ -137,28 +136,23 @@ def _onset_strength(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
 
 
 def _harmonic(mono: np.ndarray) -> np.ndarray:
-    n_fft, hop = 2048, 512
-    frames = 1 + len(mono) // hop
-    output = np.zeros(len(mono) + n_fft, dtype=mono.dtype)
-    window = get_window("hann", n_fft, fftbins=True)
+    output = np.empty_like(mono)
+    position = 0
+    for chunk in blocks(lambda a, b: mono[a:b], len(mono), mono.dtype):
+        output[position:position + len(chunk)] = chunk
+        position += len(chunk)
+    return output
+
+
+def _rms(mono: np.ndarray) -> np.ndarray:
+    frames, hop, n_fft = 1 + len(mono) // HOP, HOP, 2048
+    output = np.empty(frames, np.float32)
     for start in range(0, frames, 256):
         end = min(start + 256, frames)
-        a, b = max(0, start - 15), min(frames, end + 15)
-        lo, hi = a * hop - n_fft // 2, (b - 1) * hop + n_fft // 2
+        lo, hi = start * hop - n_fft // 2, (end - 1) * hop + n_fft // 2
         audio = mono[max(0, lo):min(len(mono), hi)]
         audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
-        spectrum = librosa.stft(audio, n_fft=n_fft, hop_length=hop, center=False)
-        harmonic = librosa.decompose.hpss(spectrum)[0][:, start - a:end - a]
-        inverse = window[:, None] * irfft(harmonic, n=n_fft, axis=0)
-        for i in range(end - start):
-            pos = (start + i) * hop
-            output[pos:pos + n_fft] += inverse[:, i]
-    normalizer = librosa.filters.window_sumsquare(window="hann", n_frames=frames,
-                                                hop_length=hop, n_fft=n_fft, dtype=mono.dtype)
-    output = output[n_fft // 2:n_fft // 2 + len(mono)]
-    normalizer = normalizer[n_fft // 2:n_fft // 2 + len(mono)]
-    nonzero = normalizer > librosa.util.tiny(normalizer)
-    output[nonzero] /= normalizer[nonzero]
+        output[start:end] = librosa.feature.rms(y=audio, hop_length=hop, center=False)[0]
     return output
 
 
@@ -240,12 +234,19 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     # frame indices are only for feature syncing; beat_times stay sub-frame precise (HOP is ~23 ms)
     beats = np.clip(librosa.time_to_frames(beat_times, sr=ASR, hop_length=HOP), 0, n_frames - 1)
 
+    progress("structure_features", 0.25)
+    mfcc = librosa.feature.mfcc(S=librosa.power_to_db(_mel_spectrogram(mono, HOP)),
+                               sr=ASR, hop_length=HOP, n_mfcc=13)[:, :n_frames]
+    rms = _rms(mono)[:n_frames]
     progress("key_harmonic", 0.25)
     harm = _harmonic(mono)
+    rms_p = _rms(mono - harm)[:n_frames]
+    del mono
     progress("key_chroma", 0.25)
     tuning = _tuning(harm)
     progress("key_cqt", 0.25)
     chroma = librosa.feature.chroma_cqt(y=harm, sr=ASR, hop_length=HOP, tuning=tuning)[:, :n_frames]
+    del harm
     keys = estimate_key(chroma.sum(axis=1))
     key_conf = round(max(0.0, keys[0]["score"] - keys[1]["score"]) * 5 + max(0.0, keys[0]["score"]) * 0.5, 3)
     chroma_b = _sync(chroma, beats)
@@ -271,10 +272,6 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     onsets = librosa.onset.onset_detect(onset_envelope=oenv, sr=ASR, hop_length=HOP, units="time", backtrack=True)
 
     progress("structure", 0.7)
-    mfcc = librosa.feature.mfcc(S=librosa.power_to_db(_mel_spectrogram(mono, HOP)),
-                               sr=ASR, hop_length=HOP, n_mfcc=13)[:, :n_frames]
-    rms = librosa.feature.rms(y=mono, hop_length=HOP)[0][:n_frames]
-    rms_p = librosa.feature.rms(y=mono - harm, hop_length=HOP)[0][:n_frames]
     mfcc_b = _sync(mfcc, beats)
     rms_b, rmsp_b, oenv_b = _sync(rms, beats)[0], _sync(rms_p, beats)[0], _sync(oenv, beats)[0]
     bt = beat_times
@@ -290,7 +287,6 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         s["tonal_stability"] = round(float(1 - np.mean(np.std(seg_chroma, axis=1))), 3)
 
     progress("loudness", 0.85)
-    del mono, harm
     lufs = loudness(y48)
     peak = float(np.abs(y48).max())
 

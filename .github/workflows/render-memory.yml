@@ -28,6 +28,7 @@ jobs:
           import os, pathlib
           path = pathlib.Path(os.environ["RUNNER_TEMP"], "render-memory.py")
           source = path.read_text()
+          source = source.replace('import base64', 'import pathlib\nimport base64')
           source = source.replace('REVISION = "4d62d58a6ba64f2f8efe642777ba3c057fcc8e64"',
                                   f'REVISION = "{os.environ["GITHUB_SHA"]}"')
           source = source.replace('short_passed = run_case(16)\n        if not short_passed:\n            run_case(4)',
@@ -41,7 +42,7 @@ jobs:
                                   'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "current_stage", "progress", "error_message")}\n        stage = result.get("current_stage")\n        if stage != RESULTS.get("profile_stage"):\n            RESULTS["profile_stage"] = stage\n            print(json.dumps({"profile_stage": stage, "monotonic": time.monotonic()}), flush=True)\n        if result["status"] == "completed":')
           source = source.replace('samples = []', 'samples = []\n        memory_profile = []')
           source = source.replace('samples.append(int((self.group / "memory.current").read_text()))',
-                                  'samples.append(int((self.group / "memory.current").read_text()))\n                        stat = dict(line.split() for line in (self.group / "memory.stat").read_text().splitlines())\n                        memory_profile.append({"monotonic": time.monotonic(), "stage": RESULTS.get("profile_stage"), "current": samples[-1], **{k: int(stat.get(k, 0)) for k in ("anon", "file", "kernel")}})')
+                                  'samples.append(int((self.group / "memory.current").read_text()))\n                        stat = dict(line.split() for line in (self.group / "memory.stat").read_text().splitlines())\n                        cpu = dict(line.split() for line in (self.group / "cpu.stat").read_text().splitlines())\n                        rss = 0\n                        for pid in (self.group / "cgroup.procs").read_text().split():\n                            try:\n                                rss += int(next(line.split()[1] for line in pathlib.Path("/proc", pid, "status").read_text().splitlines() if line.startswith("VmRSS:"))) * 1024\n                            except (FileNotFoundError, StopIteration, ProcessLookupError):\n                                pass\n                        memory_profile.append({"monotonic": time.monotonic(), "cpu_usage_usec": int(cpu["usage_usec"]), "rss_bytes": rss, "stage": RESULTS.get("profile_stage"), "current": samples[-1], **{k: int(stat.get(k, 0)) for k in ("anon", "file", "kernel")}})')
           source = source.replace('"duration_seconds": round(time.monotonic() - before, 3),',
                                   '"last_job": RESULTS.get("last_job"),\n                "memory_profile": memory_profile,\n                "duration_seconds": round(time.monotonic() - before, 3),')
           path.write_text(source)

@@ -4,15 +4,18 @@ without model weights."""
 from __future__ import annotations
 
 import re
+import os
 import shutil
 import tempfile
 from pathlib import Path
 
 import numpy as np
 import librosa
+import soundfile as sf
 
 from . import audio_io
 from .core import SR, cache_key, data_path, log
+from .hpss import blocks
 
 
 class Adapter:
@@ -41,15 +44,31 @@ class HPSSAdapter(Adapter):
     est_memory_gb = 0.5
 
     def separate(self, wav, out_dir, progress):
-        y = audio_io.load(wav)
         progress("hpss", 0.3)
-        out = {"harmonic": [], "percussive": []}
-        for ch in range(2):
-            stft = librosa.stft(y[:, ch])
-            h, p = librosa.decompose.hpss(stft, margin=2.0)
-            out["harmonic"].append(librosa.istft(h, length=len(y)))
-            out["percussive"].append(librosa.istft(p, length=len(y)))
-        return {k: audio_io.write_wav(out_dir / f"{k}.wav", np.stack(v, axis=1)) for k, v in out.items()}
+        with sf.SoundFile(wav) as source:
+            if source.samplerate != SR or source.channels != 2:
+                y = audio_io.load(wav)
+                read = lambda channel, a, b: y[a:b, channel]
+                length = len(y)
+            else:
+                def read(channel, a, b):
+                    source.seek(a)
+                    return source.read(b - a, dtype="float32", always_2d=True)[:, channel]
+                length = len(source)
+            streams = [blocks(lambda a, b, ch=ch: read(ch, a, b), length, np.float32,
+                              margin=2.0, both=True) for ch in range(2)]
+            out_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=out_dir.parent) as temporary:
+                paths = {k: Path(temporary) / f"{k}.wav" for k in self.stems}
+                with sf.SoundFile(paths["harmonic"], "w", samplerate=SR, channels=2, subtype="FLOAT") as h, \
+                     sf.SoundFile(paths["percussive"], "w", samplerate=SR, channels=2, subtype="FLOAT") as p:
+                    for left, right in zip(*streams, strict=True):
+                        h.write(np.stack([left[0], right[0]], axis=1))
+                        p.write(np.stack([left[1], right[1]], axis=1))
+                for name, path in paths.items():
+                    audio_io._release_file_cache(path)
+                    os.replace(path, out_dir / path.name)
+        return {k: out_dir / f"{k}.wav" for k in self.stems}
 
 
 class AudioSeparatorAdapter(Adapter):
