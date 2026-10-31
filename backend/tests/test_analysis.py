@@ -6,6 +6,17 @@ from choplab import analysis, demo
 from choplab.audio_io import AudioError
 
 
+@pytest.mark.parametrize("length", [2048, 130561, 275777])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_bounded_harmonic_matches_default_hpss(length, dtype):
+    import librosa
+
+    mono = np.random.default_rng(31).normal(0, 0.1, length).astype(dtype)
+    mono[:1024] = 0
+    mono[-2048:] = 0
+    np.testing.assert_array_equal(analysis._harmonic(mono), librosa.effects.harmonic(mono))
+
+
 @pytest.mark.parametrize("length", [137, 256, 513, 2000])
 def test_bounded_tempogram_preserves_global_tempo(length):
     import librosa

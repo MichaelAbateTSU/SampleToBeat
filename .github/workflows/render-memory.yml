@@ -29,7 +29,7 @@ jobs:
           source = source.replace('short_passed = run_case(16)\n        if not short_passed:\n            run_case(4)',
                                   'run_case(16)')
           source = source.replace('if result["status"] == "completed":',
-                                  'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "stage", "progress", "error")}\n        if result["status"] == "completed":')
+                                  'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "current_stage", "progress", "error_message")}\n        if result["status"] == "completed":')
           source = source.replace('"duration_seconds": round(time.monotonic() - before, 3),',
                                   '"last_job": RESULTS.get("last_job"),\n                "duration_seconds": round(time.monotonic() - before, 3),')
           path.write_text(source)

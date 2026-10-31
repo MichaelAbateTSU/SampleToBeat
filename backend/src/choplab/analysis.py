@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 import librosa
-import pyloudnorm
 
 from .audio_io import AudioError
 from .core import NOTE_NAMES, SR, parse_key
+from .render import loudness
 
 ASR = 22050  # analysis rate
 HOP = 512
@@ -129,6 +129,20 @@ def _onset_strength(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
     return librosa.onset.onset_strength(S=librosa.power_to_db(mel), sr=ASR, hop_length=hop)
 
 
+def _harmonic(mono: np.ndarray) -> np.ndarray:
+    spectrum = librosa.stft(mono)
+    # Default 31-frame median filter needs 15 original frames on either side.
+    previous = spectrum[:, :0].copy()
+    for start in range(0, spectrum.shape[1], 256):
+        end = min(start + 256, spectrum.shape[1])
+        block = np.concatenate([previous, spectrum[:, start:min(end + 15, spectrum.shape[1])]], axis=1)
+        left = previous.shape[1]
+        previous = spectrum[:, max(start, end - 15):end].copy()
+        harmonic = librosa.decompose.hpss(block)[0]
+        spectrum[:, start:end] = harmonic[:, left:left + end - start]
+    return librosa.istft(spectrum, dtype=mono.dtype, length=len(mono))
+
+
 def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | None = None) -> tuple[dict, dict]:
     """Returns (analysis document, per-beat feature arrays). `override` = user corrections
     {bpm, grid_offset (a downbeat time), downbeat_phase, key}."""
@@ -189,7 +203,7 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     beats = np.clip(librosa.time_to_frames(beat_times, sr=ASR, hop_length=HOP), 0, n_frames - 1)
 
     progress("key", 0.25)
-    harm = librosa.effects.harmonic(mono)
+    harm = _harmonic(mono)
     chroma = librosa.feature.chroma_cqt(y=harm, sr=ASR, hop_length=HOP)[:, :n_frames]
     keys = estimate_key(chroma.sum(axis=1))
     key_conf = round(max(0.0, keys[0]["score"] - keys[1]["score"]) * 5 + max(0.0, keys[0]["score"]) * 0.5, 3)
@@ -234,10 +248,8 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         s["tonal_stability"] = round(float(1 - np.mean(np.std(seg_chroma, axis=1))), 3)
 
     progress("loudness", 0.85)
-    try:
-        lufs = float(pyloudnorm.Meter(SR).integrated_loudness(y48)) if duration > 0.5 else None
-    except ValueError:
-        lufs = None
+    del mono, harm
+    lufs = loudness(y48)
     peak = float(np.abs(y48).max())
 
     # per-bar chroma summary (used for key-aware bass generation)
