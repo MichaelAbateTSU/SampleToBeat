@@ -1,0 +1,23 @@
+name: spool-cache
+on:
+  push:
+    branches: [michaelabatetsu-spool-cache]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          pip install fastapi==0.157.0 starlette==1.9.0 python-multipart==0.0.32
+          python - <<'PY'
+          import inspect
+          from starlette.formparsers import MultiPartParser
+          from starlette.requests import Request
+          from starlette.datastructures import UploadFile
+          print(inspect.getsource(MultiPartParser))
+          print(inspect.getsource(Request._get_form))
+          print(inspect.getsource(UploadFile))
+          PY
