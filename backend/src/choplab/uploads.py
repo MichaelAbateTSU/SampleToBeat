@@ -7,7 +7,6 @@ import tempfile
 from contextlib import aclosing
 
 from fastapi.routing import APIRoute
-from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import FormData, UploadFile
 from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
@@ -78,7 +77,7 @@ class _CacheParser(MultiPartParser):
         # Such files do not belong to FormData and must not escape its cleanup.
         for spool in self._files_to_close_on_error:
             if id(spool) not in retained:
-                await run_in_threadpool(spool.close)
+                spool.close()
         return form
 
 

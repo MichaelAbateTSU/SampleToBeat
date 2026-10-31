@@ -27,6 +27,10 @@ instead of FastAPI's generic parser 400; other spool OSErrors produce a logged
 cancellation close its files; unfinished orphan parts are explicitly closed.
 No backing file is persisted by the cache wrapper.
 
+Orphan cleanup uses Starlette's synchronous close convention with no additional
+await/cancellation point after successful parsing, so a retained FormData cannot
+be stranded by cancellation while closing a separate unfinished part.
+
 Run on Linux Docker:
 
 ```
