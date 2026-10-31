@@ -1,7 +1,10 @@
 import asyncio
 import base64
 import hashlib
+import runpy
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -111,6 +114,20 @@ def test_hosted_config_fails_closed(tmp_path, monkeypatch):
     digest = hashlib.pbkdf2_hmac("sha256", PASSWORD.encode(), SALT, 600_000)
     secret.write_text(f"pbkdf2_sha256$600000${SALT.hex()}${digest.hex()}")
     assert Hosting.from_env().origin == "https://studio.example.com"
+
+
+def test_password_tool_saves_only_a_hash_and_never_overwrites(tmp_path, monkeypatch):
+    script = Path(__file__).resolve().parents[2] / "scripts" / "hosting_password.py"
+    output = tmp_path / "private" / "owner_hash"
+    monkeypatch.setattr(sys, "argv", [str(script), str(output)])
+    monkeypatch.setattr("getpass.getpass", lambda _: PASSWORD)
+    runpy.run_path(str(script), run_name="__main__")
+    content = output.read_text()
+    assert content.startswith("pbkdf2_sha256$600000$")
+    assert PASSWORD not in content
+    with pytest.raises(FileExistsError):
+        runpy.run_path(str(script), run_name="__main__")
+    assert output.read_text() == content
 
 
 def test_upload_limit_and_partial_cleanup(hosted, monkeypatch):

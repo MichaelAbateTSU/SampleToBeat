@@ -5,7 +5,7 @@
 {$CHOPLAB_DOMAIN} {
 	header Strict-Transport-Security "max-age=31536000"
 	request_body {
-		max_size 101MB
+		max_size 101MiB
 	}
 	reverse_proxy app:8765 {
 		flush_interval -1

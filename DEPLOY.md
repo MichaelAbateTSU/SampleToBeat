@@ -105,7 +105,8 @@ the backend's private network trusts only this proxy for forwarded headers.
 The Docker build resolves versions within existing dependency constraints and records the installed package
 versions in `/opt/requirements-installed.txt`. Retain a built image tag for repeatable release/rollback;
 rebuilding later can resolve newer dependencies. The workflow `Hosted container checks` builds and smoke-tests
-the container, authentication, SPA serving, persistence across restart, and Caddy/Compose configuration.
+the container, authentication, SPA serving, native demo/HPSS/generation/HQ/WAV+MP3/range/SSE workflow,
+persistence across restart, and Caddy/Compose configuration.
 It does **not** deploy to Neon or create cloud resources. Standard GitHub-hosted CI is free for this public
 repository; review billing before changing visibility or runner type.
 

@@ -7,6 +7,7 @@ on:
       - "Dockerfile"
       - ".dockerignore"
       - "deploy/**"
+      - "scripts/**"
       - ".github/workflows/container.yml"
   pull_request:
     paths:
@@ -15,6 +16,7 @@ on:
       - "Dockerfile"
       - ".dockerignore"
       - "deploy/**"
+      - "scripts/**"
       - ".github/workflows/container.yml"
   workflow_dispatch:
 permissions:
@@ -23,9 +25,11 @@ jobs:
   container:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build production image
-        run: docker build -t choplab:check .
+        run: |
+          python3 -m py_compile scripts/hosting_password.py scripts/verify_container.py
+          docker build -t choplab:check .
       - name: Smoke test protected image and persistence
         shell: bash
         run: |
@@ -46,23 +50,20 @@ jobs:
             -v choplab_test:/data -p 127.0.0.1:8765:8765 choplab:check
           trap 'docker logs choplab-check; docker rm -f choplab-check' EXIT
           for i in {1..60}; do
+            test "$(docker inspect -f '{{.State.Running}}' choplab-check)" = true
             if curl --fail --silent http://127.0.0.1:8765/api/health; then break; fi
             sleep 2
           done
           curl --fail --silent http://127.0.0.1:8765/api/health
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/)" = 400
-          test "$(curl -s -H 'X-Forwarded-Proto: https' -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/)" = 401
-          curl --fail --silent -H 'X-Forwarded-Proto: https' -u owner:workflow-test-password http://127.0.0.1:8765/ | grep -q '<div id="root">'
-          curl --fail --silent -H 'X-Forwarded-Proto: https' -u owner:workflow-test-password \
-            -H 'Content-Type: application/json' -d '{"name":"Persistence check"}' \
-            http://127.0.0.1:8765/api/projects > "$RUNNER_TEMP/choplab-test/project.json"
+          python3 scripts/verify_container.py "$RUNNER_TEMP/choplab-test/project.json"
           docker restart choplab-check
           for i in {1..60}; do
+            test "$(docker inspect -f '{{.State.Running}}' choplab-check)" = true
             if curl --fail --silent http://127.0.0.1:8765/api/health; then break; fi
             sleep 2
           done
-          curl --fail --silent -H 'X-Forwarded-Proto: https' -u owner:workflow-test-password \
-            http://127.0.0.1:8765/api/projects | grep -q 'Persistence check'
+          python3 scripts/verify_container.py "$RUNNER_TEMP/choplab-test/project.json" --after-restart
       - name: Validate TLS proxy and Compose configuration
         run: |
           set -euo pipefail
@@ -72,3 +73,14 @@ jobs:
           docker compose --project-directory deploy -f deploy/compose.yaml config --quiet
           docker compose --project-directory deploy -f deploy/compose.yaml run --rm --no-deps proxy \
             caddy validate --config /etc/caddy/Caddyfile
+          trap 'docker compose --project-directory deploy -f deploy/compose.yaml logs --tail 100; docker compose --project-directory deploy -f deploy/compose.yaml down' EXIT
+          docker compose --project-directory deploy -f deploy/compose.yaml up -d --wait --wait-timeout 180
+          proxy=$(docker compose --project-directory deploy -f deploy/compose.yaml ps -q proxy)
+          for i in {1..30}; do
+            if docker cp "$proxy:/data/caddy/pki/authorities/local/root.crt" "$RUNNER_TEMP/choplab-test/root.crt"; then break; fi
+            sleep 1
+          done
+          curl --fail --silent --show-error --retry 10 --retry-all-errors \
+            --cacert "$RUNNER_TEMP/choplab-test/root.crt" https://localhost/api/health
+          python3 scripts/verify_container.py "$RUNNER_TEMP/choplab-test/proxy.json" \
+            --base-url https://localhost --ca "$RUNNER_TEMP/choplab-test/root.crt" --upload-limits
