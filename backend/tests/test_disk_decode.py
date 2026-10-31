@@ -246,16 +246,21 @@ def test_coprime_filter_designed_once(tmp_path, monkeypatch):
     assert calls == [960001]
 
 
-def test_pathological_fir_budget_explicit_error_and_cleanup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("rate,frames", [(44100, 150003), (47999, 73), (192001, 73), (1000003, 73)])
+def test_ordered_phase_parity(tmp_path, monkeypatch, rate, frames):
     source = tmp_path / "source.wav"
-    sf.write(source, np.zeros((73, 2), np.float32), 10000019, subtype="FLOAT")
-    destination = tmp_path / "out.wav"
-    destination.write_bytes(b"existing")
-    monkeypatch.setattr(disk_decode, "firwin", lambda *a, **kw: pytest.fail("allocated oversized FIR"))
-    with pytest.raises(audio_io.AudioError, match="Exact resampling.*FIR/workspace budget"):
-        disk_decode.decode_to_wav(source, destination)
-    assert destination.read_bytes() == b"existing"
-    assert not list(tmp_path.glob(".decode-*"))
+    y = np.random.default_rng(21).normal(0, .1, (frames, 2)).astype(np.float32)
+    y[min(21, frames - 1)] = np.nan
+    sf.write(source, y, rate, subtype="FLOAT")
+    expected = original_decode(source)
+    original = disk_decode.resample_poly
+    monkeypatch.setattr(disk_decode, "resample_poly",
+                        lambda *args, **kwargs: pytest.fail("full polyphase workspace allocated"))
+    monkeypatch.setattr(disk_decode, "READ_BYTES", 384 << 20)
+    output = disk_decode.decode_to_wav(source, tmp_path / "out.wav")
+    monkeypatch.setattr(disk_decode, "resample_poly", original)
+    actual, _ = sf.read(output, dtype="float32", always_2d=True)
+    np.testing.assert_array_equal(actual, expected)
 
 
 @pytest.mark.parametrize("rate,frames", [(192001, 73), (192001, 4032022), (1000003, 73)])

@@ -12,7 +12,7 @@ permissions:
 jobs:
   decode:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
       - name: Build prerequisite with isolated overlay
@@ -32,6 +32,9 @@ jobs:
       - name: Capped original-duration 192001-Hz recording
         timeout-minutes: 20
         run: sudo timeout --signal=TERM --kill-after=15s 1160s python3 .github/benchmarks/measure_disk_decode.py "$RUNNER_TEMP/decode-high" 192001 2 1200
+      - name: Capped million-Hz ordered phase recording
+        timeout-minutes: 20
+        run: sudo timeout --signal=TERM --kill-after=15s 1160s python3 .github/benchmarks/measure_disk_decode.py "$RUNNER_TEMP/decode-million-phase" 1000003 2 60
       - name: Readable evidence
         if: always()
         run: sudo find "$RUNNER_TEMP" -maxdepth 2 -path '*/decode-*/*' -type f -exec chmod 644 {} +
