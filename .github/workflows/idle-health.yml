@@ -24,6 +24,7 @@ jobs:
           git archive 345b44235d3343b73ee55b266e1b1b6ddd2c81ae frontend | tar -x -C "$RUNNER_TEMP/idle-health"
           cp frontend/src/App.tsx frontend/src/App.test.tsx "$RUNNER_TEMP/idle-health/frontend/src/"
           cp frontend/src/api/health.ts frontend/src/api/health.test.tsx "$RUNNER_TEMP/idle-health/frontend/src/api/"
+          cp frontend/src/api/backgroundJobs.ts frontend/src/api/backgroundJobs.test.tsx "$RUNNER_TEMP/idle-health/frontend/src/api/"
       - name: Restore missing dependencies and validate frontend
         working-directory: ${{ runner.temp }}/idle-health/frontend
         run: |

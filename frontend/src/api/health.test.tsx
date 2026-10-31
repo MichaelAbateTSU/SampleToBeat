@@ -136,6 +136,7 @@ describe("hosted health activity", () => {
       progress: .2, current_stage: "rendering", error_message: null, result: null,
     };
     useJobs.setState({ jobs: { j: job } });
+    vi.spyOn(api, "job").mockResolvedValue(job);
     renderHook(useHealth, { wrapper });
     await tick(100);
     act(() => {
@@ -147,6 +148,7 @@ describe("hosted health activity", () => {
     const count = vi.mocked(api.health).mock.calls.length;
     await tick(20 * 60_000);
     expect(api.health).toHaveBeenCalledTimes(count);
+    expect(api.job).toHaveBeenCalled();
     act(() => {
       Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
       focusManager.setFocused(true);

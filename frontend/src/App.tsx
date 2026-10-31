@@ -10,11 +10,14 @@ import { navigate, useRoute } from "./router";
 
 function Health() {
   const q = useHealth();
-  if (!q.isError) return null;
+  if (!q.isError && !q.observationError) return null;
   return (
     <div role="alert" className="flex items-center gap-2 bg-red-600/90 px-4 py-1.5 text-sm text-white">
-      <WifiOff className="size-4" /> Cannot reach the ChopLab backend. It may be starting or temporarily unavailable.
-      {q.paused ? " Reconnection resumes when you return or interact with this page." : " This page reconnects automatically."}
+      <WifiOff className="size-4" />
+      {q.isError && <>Cannot reach the ChopLab backend. It may be starting or temporarily unavailable.
+        {q.paused ? " Reconnection resumes when you return or interact with this page." : " This page reconnects automatically."}
+      </>}
+      {q.observationError}
     </div>
   );
 }

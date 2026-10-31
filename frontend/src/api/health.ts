@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
 import { TERMINAL, useCapabilities, useJobs } from "./hooks";
+import { useBackgroundJobs } from "./backgroundJobs";
 
 export const HEALTH_IDLE_MS = 60_000;
 
@@ -9,6 +10,7 @@ export const HEALTH_IDLE_MS = 60_000;
 export function useHealth() {
   const queryClient = useQueryClient();
   const hosted = useCapabilities().data?.hosted === true;
+  const observationError = useBackgroundJobs(hosted);
   const busy = useJobs((s) => Object.values(s.jobs).some((job) => !TERMINAL.has(job.status)));
   const [awake, setAwake] = useState(document.visibilityState === "visible");
   const awakeRef = useRef(awake);
@@ -74,5 +76,5 @@ export function useHealth() {
     }
   }, [queryClient, q.isSuccess, q.isFetching, q.dataUpdatedAt]);
 
-  return { ...q, paused: hosted && !awake && !busy };
+  return { ...q, paused: hosted && !awake && !busy, observationError };
 }
