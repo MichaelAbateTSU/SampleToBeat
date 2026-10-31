@@ -789,12 +789,12 @@ def project_jobs(id: str):
 
 @app.get("/api/jobs/{id}/events")
 async def job_events(id: str, request: Request):
-    _get("job", id)
+    await asyncio.to_thread(_get, "job", id)
 
     async def stream():
         last = None
         while not await request.is_disconnected():
-            job = store.get("job", id)
+            job = await asyncio.to_thread(_get, "job", id)
             s = json.dumps(job)
             if s != last:
                 yield f"data: {s}\n\n"
