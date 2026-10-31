@@ -217,3 +217,31 @@ def test_mp3_uses_exact_bounded_pcm_and_cleans_partial_files(tmp_path, monkeypat
         assert audio_io.write_mp3(target, y).read_bytes() == b"synthetic mp3"
     np.testing.assert_array_equal(y, original)
     assert sorted(p.name for p in tmp_path.iterdir()) == ([] if fail else ["out.mp3"])
+
+
+def test_export_releases_unused_buffers_before_encoding_and_verification(tmp_path, monkeypatch):
+    import weakref
+    from choplab import render
+
+    references = []
+    def render_audio(*args):
+        master = np.zeros((1000, 2), np.float32)
+        stem = master.copy()
+        references.extend([weakref.ref(master), weakref.ref(stem)])
+        return {"master": master, "stems": {"track": stem}, "metrics": {"sentinel": 1}}
+
+    def write(path, audio, fmt):
+        assert references[1]() is None
+        assert references[0]() is audio
+        return path
+
+    def verify(path):
+        assert references[0]() is None
+        return {"verified": True}
+
+    monkeypatch.setattr(render, "render", render_audio)
+    monkeypatch.setattr(render, "write_audio", write)
+    monkeypatch.setattr(render, "verify", verify)
+    result = render.export({}, {}, {}, tmp_path, fmt="mp3")
+    assert result["metrics"] == {"sentinel": 1}
+    assert result["files"][0]["check"] == {"verified": True}

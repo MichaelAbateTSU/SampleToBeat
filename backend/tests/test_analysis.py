@@ -26,6 +26,27 @@ def test_bounded_global_tuning_preserves_pitch_median(length):
     assert analysis._tuning(mono) == librosa.estimate_tuning(y=mono, sr=analysis.ASR, bins_per_octave=36)
 
 
+def test_long_harmonic_preserves_centered_boundaries():
+    import librosa
+
+    mono = np.random.default_rng(44).normal(0, 0.1, analysis.ASR * 300 + 137).astype(np.float32)
+    mono[:2048] = 0
+    mono[-4096:] = 0
+    np.testing.assert_array_equal(analysis._harmonic(mono), librosa.effects.harmonic(mono))
+
+
+def test_long_chroma_preserves_global_tuning_and_normalization():
+    import librosa
+
+    t = np.arange(analysis.ASR * 60 + 137) / analysis.ASR
+    mono = (np.sin(2 * np.pi * 443 * t) + 0.3 * np.sin(2 * np.pi * 661 * t)).astype(np.float32)
+    mono[:len(mono) // 3] *= 0.001
+    expected = librosa.feature.chroma_cqt(y=mono, sr=analysis.ASR, hop_length=analysis.HOP)
+    actual = librosa.feature.chroma_cqt(y=mono, sr=analysis.ASR, hop_length=analysis.HOP,
+                                       tuning=analysis._tuning(mono))
+    np.testing.assert_array_equal(actual, expected)
+
+
 @pytest.mark.parametrize("length", [137, 256, 513, 2000])
 def test_bounded_tempogram_preserves_global_tempo(length):
     import librosa
