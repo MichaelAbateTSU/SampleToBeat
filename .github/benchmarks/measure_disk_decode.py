@@ -11,11 +11,14 @@ out.mkdir()
 out.chmod(0o777)
 name = "choplab-disk-decode"
 image = "choplab:disk-decode"
+expansion = len(sys.argv) > 2
+script = "/checks/check_disk_decode_expansion.py" if expansion else "/checks/check_disk_decode.py"
+parameters = sys.argv[2:] if expansion else []
 subprocess.run(["docker", "run", "--rm", "-v", f"{out}:/evidence", image,
-                "/checks/check_disk_decode.py", "fixture"], check=True, timeout=90)
+                script, "fixture", *parameters], check=True, timeout=240)
 argv = ["docker", "run", "-d", "--name", name, "--no-healthcheck", "--cpus=0.1", "--memory=512m", "--memory-swap=512m",
         "-e", "CHOPLAB_MAX_AUDIO_SECONDS=1200", "-v", f"{out}:/evidence", image,
-        "/checks/check_disk_decode.py", "check"]
+        script, "check", *parameters]
 subprocess.run(argv, check=True, timeout=30)
 start = time.monotonic()
 samples = []

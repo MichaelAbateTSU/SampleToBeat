@@ -5,5 +5,6 @@ RUN python -m pytest --version || uv pip install --python /opt/venv/bin/python p
 COPY backend/src/choplab/disk_decode.py /opt/venv/lib/python3.12/site-packages/choplab/disk_decode.py
 COPY backend/tests/test_disk_decode.py /checks/test_disk_decode.py
 COPY .github/benchmarks/check_disk_decode.py /checks/check_disk_decode.py
+COPY .github/benchmarks/check_disk_decode_expansion.py /checks/check_disk_decode_expansion.py
 USER choplab
 ENTRYPOINT ["python"]

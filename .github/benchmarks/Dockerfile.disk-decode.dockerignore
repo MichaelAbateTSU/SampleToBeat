@@ -8,3 +8,4 @@
 !.github/
 !.github/benchmarks/
 !.github/benchmarks/check_disk_decode.py
+!.github/benchmarks/check_disk_decode_expansion.py
