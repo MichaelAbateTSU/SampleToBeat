@@ -143,6 +143,8 @@ def test_missing_or_ambiguous_reference_cannot_use_unverified_local_bytes(remote
         with pytest.raises(StorageError, match="no durable reference"):
             durable.ensure_path(path, {"_assets": {}})
         first = store.put("sound", {"id": "one", "sample_path": path})
+        store.put("sound", {"id": "identical-independent-publication", "sample_path": path})
+        assert durable.ensure_path(path).read_bytes() == b"local-only"
         with pytest.raises(StorageError, match="disagrees"):
             durable.ensure_path(write(root, "another.wav"), {
                 "_assets": {"another.wav": next(iter(first["_assets"].values()))}})

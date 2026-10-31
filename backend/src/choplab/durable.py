@@ -441,10 +441,14 @@ def ensure_path(value: str | Path, doc: dict | None = None) -> Path:
                 raise StorageError("Required audio path disagrees with its durable reference.")
     else:
         with store._conn() as con:
-            rows = con.execute("SELECT DISTINCT a.id FROM choplab_assets a "
+            rows = con.execute("SELECT DISTINCT a.id,a.ref FROM choplab_assets a "
                                "JOIN choplab_asset_links l ON l.asset_id=a.id "
                                "WHERE a.relative=? AND a.state='live'", (relative,)).fetchall()
-        if len(rows) != 1:
+        # Arrangements and custom sounds can publish the same path independently.
+        # Only byte-identical live publications are interchangeable, not newer
+        # content, ETags or retired keys.
+        references = [ObjectRef(**json.loads(row[1])) for row in rows]
+        if not rows or len({(ref.size, ref.sha256) for ref in references}) != 1:
             raise StorageError("Required audio reference is missing or ambiguous; no local fallback was used.")
         id = rows[0][0]
     return materialize(id)
