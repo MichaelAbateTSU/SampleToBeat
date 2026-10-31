@@ -17,10 +17,15 @@ OUT.mkdir(parents=True, exist_ok=True)
 APPROXIMATE_E2_MICRO = "--approximate-e2-micro" in sys.argv[2:]
 JOB_ENVELOPE = "--job-envelope" in sys.argv[2:]
 ORIGINAL_LIMIT = "--original-limit" in sys.argv[2:]
+IMPORT_DIAGNOSTIC = "--import-diagnostic" in sys.argv[2:]
+if IMPORT_DIAGNOSTIC and not ORIGINAL_LIMIT:
+    raise ValueError("Import diagnostic requires original-limit mode")
 if sum((APPROXIMATE_E2_MICRO, JOB_ENVELOPE, ORIGINAL_LIMIT)) > 1:
     raise ValueError("Choose only one resource experiment")
 if ORIGINAL_LIMIT:
     REVISION = "05eda9d5f06b20453acbe2f5dedd0b238643fd09"
+if IMPORT_DIAGNOSTIC:
+    REVISION = "ece9072e17e0ec5a40ffe337d80fb179f426cfcd"
 CPU = 2 if JOB_ENVELOPE else 0.25 if APPROXIMATE_E2_MICRO else 0.1
 MEMORY = 2147483648 if JOB_ENVELOPE else 1073741824 if APPROXIMATE_E2_MICRO else 536870912
 AUTH = base64.b64encode(b"owner:workflow-test-password").decode()
@@ -31,6 +36,7 @@ RESULTS = {
     "approximate_e2_micro": APPROXIMATE_E2_MICRO,
     "job_envelope": JOB_ENVELOPE,
     "original_limit": ORIGINAL_LIMIT,
+    "import_diagnostic": IMPORT_DIAGNOSTIC,
     "test_only_overrides": {"CHOPLAB_MAX_AUDIO_SECONDS": 1200, "CHOPLAB_MAX_UPLOAD_MB": 1024}
     if ORIGINAL_LIMIT else {},
     "storage": "Disposable Docker volume; NOT proof of provider persistence",
@@ -75,6 +81,9 @@ def api(method, path, body=None, timeout=30):
 def wait_job(job, deadline):
     while time.monotonic() < deadline:
         result = api("GET", f"/api/jobs/{job['id']}", timeout=min(10, max(1, deadline - time.monotonic())))
+        if IMPORT_DIAGNOSTIC:
+            with (OUT / "job-polls.jsonl").open("a") as out:
+                out.write(json.dumps({"monotonic": time.monotonic(), "job": result}) + "\n")
         if result["status"] == "completed":
             return result
         if result["status"] in ("failed", "canceled", "interrupted"):
@@ -91,6 +100,7 @@ class Measurement:
         pid = state(self.name)["State"]["Pid"]
         if not pid:
             return
+        self.pid = pid
         line = next(line for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines()
                     if line.startswith("0::"))
         self.group = Path("/sys/fs/cgroup") / line.split("::", 1)[1].lstrip("/")
@@ -110,6 +120,7 @@ class Measurement:
         samples = []
         peaks = []
         events = []
+        diagnostic = []
         stop = threading.Event()
         def monitor():
             while not stop.is_set():
@@ -124,6 +135,31 @@ class Measurement:
                         peaks.append(int((self.group / "memory.peak").read_text()))
                         events.append(dict(line.split() for line in
                                            (self.group / "memory.events").read_text().splitlines()))
+                        if IMPORT_DIAGNOSTIC:
+                            stat = dict(line.split() for line in
+                                        (self.group / "memory.stat").read_text().splitlines())
+                            process = {}
+                            for pid in (self.group / "cgroup.procs").read_text().split():
+                                try:
+                                    values = {}
+                                    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+                                        key, _, value = line.partition(":")
+                                        if key in ("Name", "VmRSS", "RssAnon", "RssFile", "RssShmem", "VmHWM"):
+                                            values[key] = value.strip()
+                                    process[pid] = values
+                                except FileNotFoundError:
+                                    continue
+                            diagnostic.append({
+                                "elapsed_seconds": round(time.monotonic() - before, 4),
+                                "monotonic": time.monotonic(),
+                                "memory_current_bytes": samples[-1],
+                                "memory_peak_bytes": peaks[-1],
+                                "memory_stat": {k: int(stat[k]) for k in
+                                                ("anon", "file", "kernel", "file_dirty", "file_writeback",
+                                                 "inactive_file", "active_file", "shmem") if k in stat},
+                                "processes": process,
+                                "events": events[-1],
+                            })
                     except FileNotFoundError:
                         pass
                 stop.wait(0.1)
@@ -149,6 +185,12 @@ class Measurement:
                 "memory_events_last_sample": events[-1] if events else {},
                 "container_state": snapshot["State"],
             })
+            if IMPORT_DIAGNOSTIC:
+                path = OUT / f"{label}-memory.jsonl"
+                path.write_text("".join(json.dumps(sample) + "\n" for sample in diagnostic))
+                row["diagnostic_samples"] = len(diagnostic)
+                if diagnostic:
+                    row["peak_memory_sample"] = max(diagnostic, key=lambda sample: sample["memory_current_bytes"])
             print(json.dumps(row), flush=True)
             save()
 
@@ -252,6 +294,9 @@ def run_case(seconds):
             if state(name)["State"]["Running"] and case.get("import_job_id"):
                 case["import_job_last_state"] = api("GET", f"/api/jobs/{case['import_job_id']}")
             return False
+        if IMPORT_DIAGNOSTIC:
+            case["skipped"] = "Downstream studio/export stages outside focused import diagnostic"
+            return True
 
         pid, sid = case["project_id"], case["source_id"]
 
