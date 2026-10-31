@@ -6,6 +6,10 @@ on:
         description: Run only the HTTP harness acceptance against disposable services
         type: boolean
         default: false
+      budget_only:
+        description: Run only the opted-in short synthetic payload/storage/disk budget
+        type: boolean
+        default: false
   push:
     branches: [michaelabatetsu-interrupted-job-recovery]
     paths: [".github/workflows/durable-integration.yml"]
@@ -69,7 +73,7 @@ jobs:
           done
           exit 1
       - name: Verify replacements expired workers reference retirement and range serving under 512 MiB
-        if: ${{ !inputs.http_only }}
+        if: ${{ !inputs.http_only && !inputs.budget_only }}
         run: |
           set -euo pipefail
           docker create --name durable-check --network durable-acceptance --entrypoint python \
@@ -101,7 +105,7 @@ jobs:
           assert container["HostConfig"]["MemorySwap"] == 512*1024*1024
           PY
       - name: Verify full studio workflow and exact outputs after replacement (not memory-capped)
-        if: ${{ !inputs.http_only }}
+        if: ${{ !inputs.http_only && !inputs.budget_only }}
         run: |
           set -euo pipefail
           docker run --rm --network durable-acceptance --entrypoint python \
@@ -117,6 +121,7 @@ jobs:
             /workspace/backend/storage_tests/test_durable.py -k studio_audio_workflow \
             | tee "$RUNNER_TEMP/durable-evidence/studio-tests.log"
       - name: Verify two-phase protected HTTP harness with real disposable cache loss (uncapped)
+        if: ${{ !inputs.budget_only }}
         run: |
           set -euo pipefail
           docker run --rm --network durable-acceptance --entrypoint python \
@@ -132,6 +137,31 @@ jobs:
             /workspace/backend/tests/test_durable_http_harness.py \
             /workspace/backend/storage_tests/test_durable_http_live.py \
             | tee "$RUNNER_TEMP/durable-evidence/http-harness-tests.log"
+      - name: Measure short synthetic application storage bandwidth and disk (uncapped)
+        if: ${{ inputs.budget_only }}
+        run: |
+          set -euo pipefail
+          docker create --name durable-check --network durable-acceptance --entrypoint python \
+            --read-only --tmpfs /tmp:uid=10001,gid=10001 \
+            -e CHOPLAB_DISPOSABLE_POSTGRES_TEST=yes -e CHOPLAB_SYNTHETIC_BUDGET=yes \
+            -e CHOPLAB_BUDGET_ORIGINAL_READ=yes \
+            -e CHOPLAB_BUDGET_REVISION="${{ github.sha }}" -e CHOPLAB_BUDGET_REPORT=/working/budget-report.json \
+            -e CHOPLAB_TEST_POSTGRES_URL='postgresql://choplab_test:synthetic-ci-password@postgres:5432/choplab_recovery_test?sslmode=verify-full' \
+            -e CHOPLAB_TEST_S3_CA=/s3/public.crt -e PGSSLROOTCERT=/pg/server.crt \
+            -v "$RUNNER_TEMP/durable-pg/server.crt:/pg/server.crt:ro" \
+            -v "$RUNNER_TEMP/durable-s3/public.crt:/s3/public.crt:ro" \
+            -v "$PWD/backend:/workspace/backend:ro" -v "$PWD/scripts:/workspace/scripts:ro" \
+            -v durable-working:/working choplab:durable-test \
+            -m pytest -q -s -p no:cacheprovider --basetemp=/working/budget \
+            /workspace/backend/storage_tests/test_budget_measurement.py
+          set +e
+          docker start -a durable-check | tee "$RUNNER_TEMP/durable-evidence/budget-tests.log"
+          code=${PIPESTATUS[0]}
+          set -e
+          docker cp durable-check:/working/budget-report.json "$RUNNER_TEMP/durable-evidence/budget-report.json"
+          docker inspect durable-check --format '{"OOMKilled":{{.State.OOMKilled}},"ExitCode":{{.State.ExitCode}},"MemoryLimit":{{.HostConfig.Memory}}}' \
+            > "$RUNNER_TEMP/durable-evidence/budget-container.json"
+          test "$code" -eq 0
       - name: Preserve acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
