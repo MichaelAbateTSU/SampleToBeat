@@ -28,5 +28,5 @@ USER choplab
 WORKDIR /home/choplab
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3)"
+    CMD python -c "import urllib.request; from choplab.hosting import listening_port; urllib.request.urlopen(f'http://127.0.0.1:{listening_port()}/api/health', timeout=3)"
 CMD ["choplab"]

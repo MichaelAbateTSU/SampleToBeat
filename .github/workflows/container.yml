@@ -52,11 +52,11 @@ jobs:
               f"pbkdf2_sha256$600000${salt.hex()}${digest.hex()}")
           PY
           docker run -d --name choplab-check --read-only --tmpfs /tmp:uid=10001,gid=10001 \
-            --env CHOPLAB_MODE=hosted --env CHOPLAB_PUBLIC_URL=https://localhost \
+            --env CHOPLAB_MODE=hosted --env CHOPLAB_PUBLIC_URL=https://localhost --env PORT=10000 \
             --env CHOPLAB_PROXY_IPS='*' \
             --env CHOPLAB_PASSWORD_HASH_FILE=/run/secrets/hash \
             -v "$RUNNER_TEMP/choplab-test/hash:/run/secrets/hash:ro" \
-            -v choplab_test:/data -p 127.0.0.1:8765:8765 choplab:check
+            -v choplab_test:/data -p 127.0.0.1:8765:10000 choplab:check
           trap 'docker logs choplab-check; docker rm -f choplab-check' EXIT
           for i in {1..60}; do
             test "$(docker inspect -f '{{.State.Running}}' choplab-check)" = true

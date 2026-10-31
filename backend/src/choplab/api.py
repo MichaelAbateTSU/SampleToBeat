@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from . import analysis, audio_io, bass, compose, drums, jobs, render, sampling, schemas, separation, store, transform
 from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, TICKS_PER_BAR, cache_key, data_path, log, parse_key
-from .hosting import HOSTING, OwnerAccess
+from .hosting import HOSTING, OwnerAccess, listening_port
 
 MAX_UPLOAD = int(os.environ.get("CHOPLAB_MAX_UPLOAD_MB", "100" if HOSTING else "1024")) * (1 << 20)
 MIN_FREE = int(os.environ.get("CHOPLAB_MIN_FREE_MB", "2048" if HOSTING else "0")) * (1 << 20)
@@ -876,7 +876,7 @@ def main():
     import uvicorn
 
     logging_level = os.environ.get("CHOPLAB_LOG", "info")
-    port = int(os.environ.get("CHOPLAB_PORT", "8765"))
+    port = listening_port()
     log.info("ChopLab data dir: %s", DATA_DIR)
     host = os.environ.get("CHOPLAB_HOST", "0.0.0.0" if HOSTING else "127.0.0.1")
     if not HOSTING and host not in ("127.0.0.1", "localhost", "::1"):

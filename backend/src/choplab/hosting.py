@@ -58,6 +58,17 @@ class Hosting:
 HOSTING = Hosting.from_env()
 
 
+def listening_port() -> int:
+    raw = os.environ.get("CHOPLAB_PORT") or (os.environ.get("PORT") if HOSTING else None) or "8765"
+    try:
+        port = int(raw)
+    except ValueError:
+        raise ValueError("ChopLab listening port must be an integer from 1 to 65535.") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("ChopLab listening port must be an integer from 1 to 65535.")
+    return port
+
+
 class OwnerAccess:
     def __init__(self, app: ASGIApp, config: Hosting | None = HOSTING):
         self.app, self.config = app, config

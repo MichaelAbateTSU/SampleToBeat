@@ -19,6 +19,35 @@ PASSWORD = "a-long-test-owner-password"
 SALT = b"0123456789abcdef"
 
 
+@pytest.mark.parametrize("protected,explicit,managed,expected", [
+    (False, None, "10000", 8765),
+    (False, "9000", "10000", 9000),
+    (True, None, None, 8765),
+    (True, None, "10000", 10000),
+    (True, "9000", "10000", 9000),
+])
+def test_listening_port_matches_managed_host_without_changing_local_defaults(
+        protected, explicit, managed, expected, monkeypatch):
+    from choplab import hosting as config
+
+    monkeypatch.setattr(config, "HOSTING", protected)
+    for name, value in (("CHOPLAB_PORT", explicit), ("PORT", managed)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    assert config.listening_port() == expected
+
+
+@pytest.mark.parametrize("port", ["zero", "0", "-1", "65536"])
+def test_invalid_listening_port_fails_explicitly(port, monkeypatch):
+    from choplab import hosting as config
+
+    monkeypatch.setenv("CHOPLAB_PORT", port)
+    with pytest.raises(ValueError, match="listening port"):
+        config.listening_port()
+
+
 @pytest.fixture
 def hosting():
     return Hosting("https://studio.example.com", "owner", SALT,
