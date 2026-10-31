@@ -174,6 +174,7 @@ def main():
                  "-p", "127.0.0.1:8765:8765", "choplab:budget", "/probe/app_probe.py"])
         execute(["docker", "start", app])
         initial = state(app)
+        report["app_containers"].append({"name": app, "initial": initial})
         assert initial["limits"] == {"Memory": 536870912, "MemorySwap": 536870912, "NanoCpus": 100000000}
         assert initial["healthcheck"]["Test"] == ["NONE"]
         pid = initial["state"]["Pid"]
@@ -184,7 +185,6 @@ def main():
         assert (group / "cpu.max").read_text().strip() == "10000 100000"
         with lock:
             current.update(name=app, cache=cache, temp=temp, cgroup=group)
-        report["app_containers"].append({"name": app, "initial": initial})
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             if not state(app)["state"]["Running"]:
@@ -200,10 +200,13 @@ def main():
 
     def finish_app():
         if app:
-            # Last running sample retains kernel peak/events before cgroup disappears.
-            report["app_containers"][-1]["before_stop"] = state(app)
+            record = next((entry for entry in report["app_containers"] if entry["name"] == app), None)
+            if record is None:
+                record = {"name": app}
+                report["app_containers"].append(record)
+            record["before_stop"] = state(app)
             execute(["docker", "kill", app], check=False)
-            report["app_containers"][-1]["after_stop"] = state(app)
+            record["after_stop"] = state(app)
 
     def snapshot(name):
         entry = {"name": name, "elapsed_seconds": time.monotonic() - started}
@@ -256,7 +259,11 @@ def main():
         snapshot("failed")
     finally:
         if app:
-            finish_app()
+            try:
+                finish_app()
+            except Exception as error:
+                report["cleanup_observation_error"] = type(error).__name__
+                report["success"] = False
         stop.set()
         observer.join(timeout=5)
         health_thread.join(timeout=5)
@@ -267,6 +274,33 @@ def main():
                 import shutil
                 shutil.copyfile(source, evidence / name)
         report["app_object_traffic"] = summarize(events(root / "app-evidence/object-events.jsonl"))
+        peaks = {}
+        for line in (evidence / "resource-samples.jsonl").read_text().splitlines():
+            sample = json.loads(line)
+            if not sample.get("app"):
+                continue
+            peak = peaks.setdefault(sample["app"], {"samples": 0, "memory_peak": 0,
+                                                    "anon_peak": 0, "file_peak": 0,
+                                                    "disk_logical_peak": 0, "disk_allocated_peak": 0})
+            peak["samples"] += 1
+            group, disk = sample.get("cgroup", {}), sample.get("disk", {})
+            if str(group.get("memory.peak", "")).isdigit():
+                peak["memory_peak"] = max(peak["memory_peak"], int(group["memory.peak"]))
+            stats = group.get("memory.stat", {})
+            if isinstance(stats, dict):
+                for name in ("anon", "file"):
+                    peak[name + "_peak"] = max(peak[name + "_peak"], int(stats.get(name, 0)))
+            peak["disk_logical_peak"] = max(peak["disk_logical_peak"], disk.get("logical_bytes", 0))
+            peak["disk_allocated_peak"] = max(peak["disk_allocated_peak"], disk.get("allocated_bytes", 0))
+            if isinstance(group.get("memory.events"), dict):
+                peak["last_memory_events"] = group["memory.events"]
+        report["app_only_cgroup_host_sampled_resources"] = peaks
+        observations = events(evidence / "health-observer.jsonl")
+        report["separate_health_observer"] = {
+            "requests": len(observations), "response_body_bytes": sum(e["body_bytes"] for e in observations),
+            "status_counts": {str(status): sum(e["status"] == status for e in observations)
+                              for status in sorted({e["status"] for e in observations})},
+            "excluded_from_client_and_application_object_payload": True}
         (evidence / "budget-report.json").write_text(json.dumps(report, indent=2))
     return 0 if report["success"] else 1
 

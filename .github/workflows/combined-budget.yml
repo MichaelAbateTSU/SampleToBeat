@@ -1,5 +1,8 @@
 name: Isolated combined-limit budget preparation
 on:
+  push:
+    branches: [michaelabatetsu-render-free-feasibility]
+    paths: [".github/workflows/combined-budget.yml"]
   workflow_dispatch:
     inputs:
       app_sha:
@@ -21,8 +24,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      APP_SHA: ${{ inputs.app_sha }}
-      BUDGET_MODE: ${{ inputs.mode }}
+      APP_SHA: ${{ inputs.app_sha || '092df4b821a24a33b686eb942dcb0852137503eb' }}
+      BUDGET_MODE: ${{ inputs.mode || 'control' }}
       CONFIRM_FINAL_SHA: ${{ inputs.confirm_final_combined_sha }}
     steps:
       - uses: actions/checkout@v5
@@ -108,15 +111,15 @@ jobs:
         run: |
           root="$RUNNER_TEMP/combined-budget"
           sudo chmod -R a+rX "$root/evidence"
-          for name in combined-budget-postgres combined-budget-s3; do
+          for name in combined-budget-app-0 combined-budget-app-1 combined-budget-postgres combined-budget-s3; do
             docker inspect "$name" --format \
-              '{"OOMKilled":{{.State.OOMKilled}},"ExitCode":{{.State.ExitCode}},"Running":{{.State.Running}},"Memory":{{.HostConfig.Memory}}}' \
+              '{"OOMKilled":{{.State.OOMKilled}},"ExitCode":{{.State.ExitCode}},"Running":{{.State.Running}},"Memory":{{.HostConfig.Memory}},"MemorySwap":{{.HostConfig.MemorySwap}},"NanoCpus":{{.HostConfig.NanoCpus}}}' \
               > "$root/evidence/$name.json" || true
           done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: combined-budget-${{ inputs.mode }}-evidence
+          name: combined-budget-${{ inputs.mode || 'control' }}-evidence
           path: ${{ runner.temp }}/combined-budget/evidence/
           retention-days: 7
           if-no-files-found: warn
