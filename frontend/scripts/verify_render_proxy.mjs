@@ -200,6 +200,7 @@ os.chmod(path, 0o440)
     ...authenticated, origin,
   }, 204, 'DELETE')
   await check('cached owner never authorizes missing credentials', '/api/projects', renderHeaders, 401)
+  await pause(1100)
   await check('changed credentials cannot reuse accepted fingerprint', '/api/projects', {
     ...renderHeaders, authorization: 'Basic ' + Buffer.from('other:wrong').toString('base64'),
   }, 401)
