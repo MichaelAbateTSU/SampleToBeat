@@ -12,7 +12,9 @@ health requests while unfocused, including with a nonterminal job. No hidden-tab
 health keepalive is added. Hosted tabs additionally fetch actual status for
 tracked nonterminal jobs every 30 seconds while hidden, with one in-flight
 request per job. Terminal updates stop observation; teardown discards in-flight
-results and removes timers/listeners. Three consecutive failures pause background
+results and removes timers/listeners (it does not abort an existing request).
+An unresolved request blocks further requests for that job rather than piling up
+traffic; it can stall observation until the network responds. Three consecutive failures pause background
 observation for that job and show an error; visibility return retries immediately
 and restores its failure budget. Other jobs retain independent observation.
 Snapshots cannot overwrite newer SSE progress, except to reconcile terminal state.

@@ -28,6 +28,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   focusManager.setFocused(undefined);
   vi.useRealTimers();
 });
@@ -86,6 +87,30 @@ it("does not stop a healthy job when another exhausts its failure budget", async
   await tick(5 * BACKGROUND_JOB_MS);
   expect(request.mock.calls.filter(([id]) => id === "j")).toHaveLength(3);
   expect(request.mock.calls.filter(([id]) => id === "k")).toHaveLength(5);
+});
+
+it("bounds disconnected SSE fallback traffic while hidden and closes tracking on recovered completion", async () => {
+  let stream!: { close: () => void; onerror?: () => void };
+  const close = vi.fn();
+  vi.stubGlobal("EventSource", class {
+    close = close;
+    onerror?: () => void;
+    constructor() { stream = this; }
+  });
+  const request = vi.spyOn(api, "job").mockRejectedValue(new Error("connection lost"));
+  act(() => useJobs.getState().track(job));
+  renderHook(() => useBackgroundJobs(true));
+  act(() => stream.onerror?.());
+  expect(close).toHaveBeenCalledOnce();
+  await tick(20 * 60_000);
+  expect(request).toHaveBeenCalledTimes(3);
+  request.mockResolvedValue({ ...job, status: "completed" });
+  visible(true);
+  await tick(100);
+  expect(useJobs.getState().jobs.j.status).toBe("completed");
+  const count = request.mock.calls.length;
+  await tick(60_000);
+  expect(request).toHaveBeenCalledTimes(count);
 });
 
 it("does not overlap requests or overwrite newer SSE progress and cleans up pending results", async () => {
