@@ -15,11 +15,15 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+from scipy.signal import firwin, resample_poly
 
 from . import audio_io
 from .core import SR
 
 BLOCK_FRAMES = 65536
+READ_BYTES = 1 << 20
+RESAMPLE_WORK_BYTES = 128 << 20
+FILTER_WORK_BYTES = 128 << 20
 
 
 class _ReadError(Exception):
@@ -84,9 +88,32 @@ def _read_blocks(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int)
         )
     g = math.gcd(inp.samplerate, sr)
     up, down = sr // g, inp.samplerate // g
-    block = max(down, BLOCK_FRAMES // down * down)
+    # Budget the expanded signal AND FIR construction, not just input frames.
+    target = (1 << 20) if up > 1024 else BLOCK_FRAMES
+    block = max(1, target // up) * down
     # Match scipy's default symmetric FIR and global downsampling phase.
-    halo = math.ceil((10 * max(up, down) / up + 2) / down) * down
+    halo = (10 * max(up, down) + 2 * up + up * down - 1) // (up * down) * down
+    frames = min(inp.frames, block + 2 * halo)
+    expanded = (frames * up + down - 1) // down
+    taps = 20 * max(up, down) + 1
+    # upfirdn also allocates the convolution tail before resample_poly slices
+    # it away. Include filter padding, row copies and the trimmed float32 copy.
+    filtered = ((max(frames, 1) - 1) * up + taps + 2 * down - 1) // down + 1
+    if up != down and (taps * 64 > FILTER_WORK_BYTES
+                       or 32 * (frames + max(expanded, filtered)) + READ_BYTES > RESAMPLE_WORK_BYTES):
+        raise audio_io.AudioError(
+            f"Exact resampling from {inp.samplerate} Hz to {sr} Hz exceeds the "
+            "bounded decoder's FIR/workspace budget; convert externally at the "
+            "same quality before importing."
+        )
+    if inp.channels * 4 > READ_BYTES:
+        raise audio_io.AudioError("One audio frame exceeds the bounded decoder's channel-read budget.")
+    coefficients = None
+    if up != down:
+        # Cache the unscaled float32 FIR once. resample_poly applies the same
+        # up scaling, zero-padding and phase as its default filter each block.
+        coefficients = firwin(taps, 1.0 / max(up, down), window=("kaiser", 5.0)).astype(np.float32)
+    read_frames = max(1, min(BLOCK_FRAMES, READ_BYTES // (inp.channels * 4)))
     buffered = np.empty((0, 2), np.float32)
     buffer_start = 0
     for start in range(0, inp.frames, block):
@@ -95,18 +122,27 @@ def _read_blocks(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int)
         right = min(inp.frames, end + halo)
         buffered = buffered[left - buffer_start:]
         buffer_start = left
-        needed = right - left - len(buffered)
-        try:
-            incoming = audio_io._to_stereo(inp.read(needed, dtype="float32", always_2d=True))
-        except sf.LibsndfileError as error:
-            raise _ReadError() from error
-        if len(incoming) != needed:
-            raise audio_io.AudioError("Decoding failed: incomplete audio frames.")
-        buffered = np.concatenate((buffered, incoming))
-        y = audio_io.resample(buffered, inp.samplerate, sr) if up != down else buffered
+        retained = len(buffered)
+        next_buffer = np.empty((right - left, 2), np.float32)
+        next_buffer[:retained] = buffered
+        while retained < len(next_buffer):
+            needed = min(read_frames, len(next_buffer) - retained)
+            try:
+                incoming = audio_io._to_stereo(inp.read(needed, dtype="float32", always_2d=True))
+            except sf.LibsndfileError as error:
+                raise _ReadError() from error
+            if len(incoming) != needed:
+                raise audio_io.AudioError("Decoding failed: incomplete audio frames.")
+            next_buffer[retained:retained + needed] = incoming
+            retained += needed
+        buffered = next_buffer
+        y = resample_poly(buffered, up, down, axis=0, window=coefficients).astype(np.float32) \
+            if up != down else buffered
         offset = (start - left) * up // down
         count = math.ceil(end * up / down) - start * up // down
-        _write(out, y[offset:offset + count], fd, audio_io.MAX_SECONDS * sr)
+        for position in range(offset, offset + count, BLOCK_FRAMES):
+            _write(out, y[position:min(position + BLOCK_FRAMES, offset + count)],
+                   fd, audio_io.MAX_SECONDS * sr)
         _discard_cache(source.fileno())
 
 
@@ -167,6 +203,10 @@ def decode_to_wav(path: Path, destination: Path, sr: int = SR, *, timeout: float
 
     libsndfile inputs preserve audio_io.decode's first-two-channel/mono-duplication
     and scipy polyphase resampling, using phase-aligned overlapping blocks.
+    Channel reads, expanded workspace and FIR design have separate budgets;
+    pathological ratios outside those budgets raise an explicit AudioError
+    before allocation rather than substituting a different resampling algorithm.
+    FIR coefficients are cached per decode; sanitization/writes use small blocks.
     FFmpeg fallback preserves its existing stereo mixing/resampler and streams PCM.
     No partial destination is published; failures remove temporary files and leave
     an existing destination unchanged. The caller owns the completed file and must
