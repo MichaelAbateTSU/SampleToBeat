@@ -297,7 +297,7 @@ def checksums(client, manifest):
     p, s, v, e = (ids[key] for key in ("project", "source", "variation", "export"))
     result = {}
     source = client.json("GET", f"/api/sources/{s}")
-    if source.get("content_hash") != digest(synthetic_audio()) or source.get("analysis_status") != "analyzed":
+    if source.get("content_hash") != manifest["sha256"].get("original_upload") or source.get("analysis_status") != "analyzed":
         raise AcceptanceError("Original upload identity was lost or changed.")
     result["original_upload"] = source["content_hash"]
     for name, path in {
@@ -340,7 +340,10 @@ def prepare(client, path):
         save(path, manifest)
         return value
     p = record("project", client.json("POST", "/api/projects", {"name": "synthetic-" + manifest["run_id"]})["id"])
-    imported = client.upload(f"/api/projects/{p}/sources", synthetic_audio())
+    audio = synthetic_audio()
+    manifest["sha256"]["original_upload"] = digest(audio)
+    save(path, manifest)
+    imported = client.upload(f"/api/projects/{p}/sources", audio)
     s = record("source", imported["source"]["id"])
     record("import_job", imported["job"]["id"])
     client.wait(imported["job"])

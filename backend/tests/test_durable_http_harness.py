@@ -285,3 +285,19 @@ def test_verify_is_read_only_and_checksum_mismatch_is_explicit(tmp_path, monkeyp
     monkeypatch.setattr(harness, "checksums", lambda *args: observed)
     with pytest.raises(harness.AcceptanceError, match="checksum mismatch: source_audio"):
         harness.verify(client, path)
+
+
+def test_verification_uses_recorded_upload_hash_not_platform_dependent_regeneration(monkeypatch):
+    client = PreflightClient()
+    data = manifest(client)
+    def respond(method, path, body=None):
+        assert method == "GET"
+        if path == "/api/sources/source_synthetic":
+            return {"analysis_status": "analyzed", "content_hash": "a" * 64}
+        if path == "/api/exports/export_synthetic":
+            return {"status": "done", "files": [{"name": "synthetic.wav", "check": {"silent": False}}]}
+        return {}
+    monkeypatch.setattr(client, "json", respond)
+    monkeypatch.setattr(client, "checksum", lambda *args, **kwargs: "a" * 64, raising=False)
+    monkeypatch.setattr(harness, "synthetic_audio", lambda: (_ for _ in ()).throw(AssertionError("Do not regenerate in verify")))
+    assert harness.checksums(client, data)["original_upload"] == "a" * 64
