@@ -75,13 +75,15 @@ jobs:
             -v "$RUNNER_TEMP/durable-s3/public.crt:/s3/public.crt:ro" \
             -v "$PWD/backend:/workspace/backend:ro" -v "$PWD/scripts:/workspace/scripts:ro" \
             -v durable-working:/working choplab:durable-test \
-            -m pytest -q -p no:cacheprovider --basetemp=/working/tests \
+            /workspace/backend/storage_tests/run_durable_acceptance.py \
+            -q -p no:cacheprovider --basetemp=/working/tests \
             /workspace/backend/storage_tests/test_durable.py
           set +e
           docker start -a durable-check | tee "$RUNNER_TEMP/durable-evidence/tests.log"
           code=${PIPESTATUS[0]}
           set -e
           docker inspect durable-check > "$RUNNER_TEMP/durable-evidence/container.json"
+          docker cp durable-check:/working/evidence.json "$RUNNER_TEMP/durable-evidence/memory.json"
           test "$code" -eq 0
           python3 - <<'PY'
           import json, os, pathlib
