@@ -97,6 +97,20 @@ def main():
     check("idempotent publish skips transfer", lambda: adapter.publish("large.wav"))
     assert len(parts) == part_count
 
+    def rewrite_same_bytes():
+        from boto3.s3.transfer import TransferConfig
+        adapter.client.upload_file(
+            str(source), settings.bucket, ref.key, ExtraArgs={"Metadata": {"sha256": ref.sha256}},
+            Config=TransferConfig(multipart_threshold=16 * MIB,
+                                  multipart_chunksize=16 * MIB, use_threads=False),
+        )
+        head = adapter.client.head_object(Bucket=settings.bucket, Key=ref.key)
+        assert head["ETag"] != ref.etag
+        adapter.materialize(ref, "changed-layout.wav")
+        assert digest(ROOT / "changed-layout.wav") == expected
+    check("identical bytes with different multipart ETag retain valid earlier reference",
+          rewrite_same_bytes)
+
     # A different large file gets a new key; make the server reject its second part.
     with source.open("r+b") as stream:
         stream.write(b"different synthetic input")
