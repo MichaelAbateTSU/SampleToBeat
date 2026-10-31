@@ -13,7 +13,7 @@ name = "choplab-disk-decode"
 image = "choplab:disk-decode"
 subprocess.run(["docker", "run", "--rm", "-v", f"{out}:/evidence", image,
                 "/checks/check_disk_decode.py", "fixture"], check=True, timeout=90)
-argv = ["docker", "run", "-d", "--name", name, "--cpus=0.1", "--memory=512m", "--memory-swap=512m",
+argv = ["docker", "run", "-d", "--name", name, "--no-healthcheck", "--cpus=0.1", "--memory=512m", "--memory-swap=512m",
         "-e", "CHOPLAB_MAX_AUDIO_SECONDS=1200", "-v", f"{out}:/evidence", image,
         "/checks/check_disk_decode.py", "check"]
 subprocess.run(argv, check=True, timeout=30)
@@ -39,6 +39,7 @@ try:
             stat = dict(line.split() for line in (group / "memory.stat").read_text().splitlines())
             samples.append({
                 "seconds": time.monotonic() - start,
+                "phase": (out / "phase").read_text() if (out / "phase").exists() else "startup",
                 "current": int((group / "memory.current").read_text()),
                 "peak": int((group / "memory.peak").read_text()),
                 "anon": int(stat["anon"]), "file": int(stat["file"]),
@@ -59,6 +60,11 @@ finally:
         "lifetime_peak": max((s["peak"] for s in samples), default=0),
         "peak_anon": max((s["anon"] for s in samples), default=0),
         "peak_file": max((s["file"] for s in samples), default=0),
+        "phase_peaks": {phase: {
+            "current": max((s["current"] for s in samples if s["phase"] == phase), default=0),
+            "anon": max((s["anon"] for s in samples if s["phase"] == phase), default=0),
+            "file": max((s["file"] for s in samples if s["phase"] == phase), default=0),
+        } for phase in ("startup", "decode", "parity")},
         "state": snapshot["State"], "parity_evidence_exists": (out / "parity.json").exists(),
     }, indent=2))
     (out / "container.log").write_bytes(subprocess.check_output(
