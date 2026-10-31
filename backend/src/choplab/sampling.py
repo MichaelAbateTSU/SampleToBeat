@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from . import audio_io, store, transform
+from . import audio_io, durable, store, transform
 from .core import NOTE_NAMES, SR
 
 WEIGHTS = {"harmonic": 0.20, "phrase": 0.20, "loop": 0.20, "signal": 0.15, "distinct": 0.15, "clean": 0.10}
@@ -30,6 +30,7 @@ def stem_sets(source: dict) -> dict[str, list[str]]:
 def resolve(source: dict, stems: list[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Stem names -> (file paths, content identities) for the transform cache."""
     files = [source["internal_audio_path"] if s == "mix" else source["stems"][s] for s in stems]
+    files = [str(durable.ensure_path(f, source)) for f in files]
     for f in files:
         if not Path(f).exists():
             raise FileNotFoundError(f"Missing audio for sample source: {f}")

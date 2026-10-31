@@ -256,18 +256,25 @@ passwordless SQL role as a sufficient provisioning step.
 
 ### Integrated durable-runtime gates
 
-The complete recovery/storage final tree `240f23f` is being integrated atomically with the hosting work,
-not deployed as a recovery-only intermediate. Durable mode requires PostgreSQL and a private
+The complete recovery/storage final tree `240f23f` was integrated atomically at `fd53e2a`, not deployed
+as a recovery-only intermediate. Its combined hosted x64/ARM, secret permissions, isolated recovery,
+full PostgreSQL/S3 integration and live TLS object-storage boundary checks passed. Durable mode requires PostgreSQL and a private
 `CHOPLAB_STORAGE_CONFIG_FILE`; it bypasses permanent volume binding, fences metadata/asset publication,
 and reports interrupted jobs or lost ownership explicitly. Do not overlap legacy unfenced workers with
 durable production. The final image includes the PostgreSQL/storage extras and excludes all three Render
 secret filenames from its build context. Local volume-backed mode remains supported.
 
-Standalone component CI is not combined-state proof. The combined image still needs full durable
-replacement/recovery, protected two-phase HTTP, native x64/ARM and exact capped CPU/memory acceptance.
-The current final-tree metadata reads eagerly materialize referenced assets; a verified lazy-hydration
-follow-up is pending. Opening a cache-empty 1,200s stereo 48 kHz PCM16 source can otherwise download
-roughly 1.6 GB of original/internal/two-stem audio before returning metadata. Repeated small-fixture
+The entire selective-hydration follow-up (`c140252`, `5b088367`, `100cbc4`) is integrated together,
+retaining the hosting audio response's range support and cache release. Metadata/API/snapshot/startup
+reads no longer eagerly download audio; processing and playback materialize only the required,
+authoritatively referenced asset with the existing checksum and fencing guards. The follow-up's
+standalone five-asset instrumentation recorded zero GETs for cold metadata, then one whole 3 MiB
+source download for a selected 64-byte HTTP range; repeat playback used the verified local cache.
+A selected harmonic required its own whole 4 MiB download. This is not range-only object transfer.
+All final combined replacement/recovery, protected HTTP and native container checks must be rerun;
+standalone component CI is not combined-state proof, and exact capped full-runtime acceptance remains blocked.
+A 1,200s stereo 48 kHz PCM16 original/internal/two-stem set still occupies roughly 1.6 GB, even though
+opening its metadata no longer transfers that set. Repeated small-fixture
 replacement success is not evidence of long-library cold-start, disk or 5 GB egress headroom.
 
 The fenced runtime renews its lease through PostgreSQL every ten seconds while active. This prevents

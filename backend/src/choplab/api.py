@@ -189,7 +189,7 @@ def job_import(ctx, source_id: str):
     src = _get("source", source_id)
     try:
         ctx.progress("decoding", 0.02)
-        orig = Path(src["original_file_path"])
+        orig = durable.ensure_path(src["original_file_path"], src)
         meta = audio_io.probe(orig)
         y = audio_io.decode(orig)
         internal_name = f"audio-{ctx.id}.wav" if durable.enabled() else "audio.wav"
@@ -216,7 +216,7 @@ def job_analyze(ctx, source_id: str, override: dict | None = None):
 
 def _analyze(ctx, source_id, y=None, override=None):
     src = _get("source", source_id)
-    y = audio_io.load(Path(src["internal_audio_path"])) if y is None else y
+    y = audio_io.load(durable.ensure_path(src["internal_audio_path"], src)) if y is None else y
     doc, f = analysis.analyze(y, _sub(ctx, 0.05, 0.7), override)
     features = (_dir(src["project_id"], "sources", source_id) / f"features-{ctx.id}.npz"
                 if durable.enabled() else _features_path(src))
@@ -230,7 +230,7 @@ def _analyze(ctx, source_id, y=None, override=None):
 def _discover(ctx, source_id) -> int:
     ctx.progress("finding samples", 0.75)
     src = _get("source", source_id)
-    f = dict(np.load(_features_path(src)))
+    f = dict(np.load(durable.ensure_path(_features_path(src), src)))
     keep = _referenced(src["project_id"])
     for s in store.list_("sample", source_id):
         if s["origin"] == "auto" and s["id"] not in keep and not s.get("favorite"):
@@ -423,7 +423,7 @@ def source_audio(id: str):
     s = _get("source", id)
     if not s.get("internal_audio_path"):
         raise HTTPException(409, "Audio is still being imported.")
-    return AudioFileResponse(s["internal_audio_path"], media_type="audio/wav")
+    return AudioFileResponse(durable.ensure_path(s["internal_audio_path"], s), media_type="audio/wav")
 
 
 @app.get("/api/sources/{id}/waveform")
@@ -481,10 +481,11 @@ def stems(id: str):
 @app.get("/api/stems/{stem_id}/audio")
 def stem_audio(stem_id: str):
     sid, _, name = stem_id.rpartition(".")
-    path = (_get("source", sid).get("stems") or {}).get(name)
+    source = _get("source", sid)
+    path = (source.get("stems") or {}).get(name)
     if not path:
         raise HTTPException(404, "No such stem")
-    return AudioFileResponse(path, media_type="audio/wav")
+    return AudioFileResponse(durable.ensure_path(path, source), media_type="audio/wav")
 
 
 # ---------------------------------------------------------------- samples
@@ -616,7 +617,8 @@ def get_variation(id: str):
 
 @app.get("/api/variations/{id}/audio")
 def variation_audio(id: str):
-    return AudioFileResponse(_get("variation", id)["preview_path"], media_type="audio/wav")
+    doc = _get("variation", id)
+    return AudioFileResponse(durable.ensure_path(doc["preview_path"], doc), media_type="audio/wav")
 
 
 @app.post("/api/variations/{id}/regenerate", status_code=202)
@@ -684,7 +686,11 @@ def preview(id: str, body: schemas.PreviewRequest):
 def preview_file(id: str, name: str):
     if not re.fullmatch(r"studio_r_[0-9a-f]{12}\.wav", name):
         raise HTTPException(404)
-    f = Path(_get("preview", name.removesuffix(".wav"))["preview_path"]) if durable.enabled() else DATA_DIR / "projects" / id / "previews" / name
+    if durable.enabled():
+        doc = _get("preview", name.removesuffix(".wav"))
+        f = durable.ensure_path(doc["preview_path"], doc)
+    else:
+        f = DATA_DIR / "projects" / id / "previews" / name
     if not f.exists():
         raise HTTPException(404, "Preview expired; render again.")
     return AudioFileResponse(f, media_type="audio/wav")
@@ -742,7 +748,7 @@ def download(id: str, name: str | None = None):
     name = name or next(iter(files))
     if name not in files:  # only files this export produced: no path traversal
         raise HTTPException(404, "No such file in this export")
-    return AudioFileResponse(files[name], filename=name)
+    return AudioFileResponse(durable.ensure_path(files[name], e), filename=name)
 
 
 @app.post("/api/exports/{id}/reveal")
@@ -781,7 +787,8 @@ def gen_bass(body: schemas.BassPatternRequest):
 @app.get("/api/kits")
 def kits():
     if durable.enabled():
-        durable.restore_kits()
+        return {k: {i: store.get("kit", f"kit-{k}-{i}") is not None for i in drums.INSTRUMENTS}
+                for k in drums.KITS}
     return {k: {i: drums.kit_path(k, i).parent.name == "custom" for i in drums.INSTRUMENTS} for k in drums.KITS}
 
 

@@ -82,8 +82,9 @@ jobs:
             -v "$PWD/backend:/workspace/backend:ro" -v "$PWD/scripts:/workspace/scripts:ro" \
             -v durable-working:/working choplab:durable-test \
             /workspace/backend/storage_tests/run_durable_acceptance.py \
-            -q -p no:cacheprovider --basetemp=/working/tests \
-            /workspace/backend/storage_tests/test_durable.py
+            -q -s -p no:cacheprovider --basetemp=/working/tests \
+            /workspace/backend/storage_tests/test_durable.py \
+            /workspace/backend/storage_tests/test_selective_hydration.py
           set +e
           docker start -a durable-check | tee "$RUNNER_TEMP/durable-evidence/tests.log"
           code=${PIPESTATUS[0]}

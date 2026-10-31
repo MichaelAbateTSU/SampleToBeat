@@ -109,11 +109,11 @@ def test_all_asset_fields_restore_after_volume_replacement(remote, monkeypatch):
         restored = store.get("source", "source")
         for field in ("original_file_path", "internal_audio_path", "features_path"):
             assert Path(restored[field]).is_relative_to(successor)
-            assert Path(restored[field]).read_bytes() == b"identical-audio-bytes"
+            assert durable.ensure_path(restored[field], restored).read_bytes() == b"identical-audio-bytes"
         for kind, id in (("variation", "variation"), ("preview", "studio"), ("project", "p"),
                          ("sound", "sound"), ("export", "export"), ("kit", "kit-trap-kick")):
             assert store.get(kind, id)
-        assert core.data_path("kits", "trap", "custom", "kick.wav").exists()
+        assert drums.kit_path("trap", "kick").exists()
         assert restored["analysis"] == source["analysis"]
 
 
@@ -190,7 +190,8 @@ def test_offline_snapshot_restore_preserves_live_assets_and_tombstones(remote, m
     store.restore_snapshot(snapshot)
     with jobs.runtime():
         assert durable._fence > old_fence
-        assert Path(store.get("sound", "live")["sample_path"]).read_bytes() == b"identical-audio-bytes"
+        saved = store.get("sound", "live")
+        assert durable.ensure_path(saved["sample_path"], saved).read_bytes() == b"identical-audio-bytes"
         with store._conn() as con:
             assert con.execute("SELECT COUNT(*) FROM choplab_assets WHERE state='deleted'").fetchone()[0] == 1
 
@@ -500,6 +501,7 @@ def test_studio_audio_workflow_survives_replacement_with_custom_sounds(remote, m
         assert portable["sources"][0]["internal_audio_path"].startswith("asset-path:")
         original_audio = client.get(f"/api/sources/{source}/audio").content
         original_mix = client.get(f"/api/exports/{export}/download").content
+        original_preview = client.get(preview.json()["url"]).content
         analysis = client.get(f"/api/sources/{source}/analysis").json()
     replace_volume(remote, monkeypatch, destroy_old=True)
     with TestClient(api.app) as client:
@@ -509,6 +511,9 @@ def test_studio_audio_workflow_survives_replacement_with_custom_sounds(remote, m
         assert client.get(f"/api/variations/{variation}/audio").status_code == 200
         assert client.get(preview.json()["url"]).status_code == 200
         assert client.get("/api/kits/trap/kick/audio").status_code == 200
+        rendered = client.post(f"/api/projects/{project}/preview", json={"scope": "loop", "loop_bars": 1})
+        assert rendered.status_code == 200, rendered.text
+        assert client.get(rendered.json()["url"]).content == original_preview
         assert client.get(f"/api/projects/{project}").json()["arrangement"]["tracks"] == store.get("project", project)["arrangement"]["tracks"]
         reanalyze = client.post(f"/api/sources/{source}/analyze").json()
         finished = jobs.wait(reanalyze["id"], timeout=300)

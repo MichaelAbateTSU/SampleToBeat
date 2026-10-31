@@ -13,7 +13,7 @@ import numpy as np
 import librosa
 import soundfile as sf
 
-from . import audio_io
+from . import audio_io, durable
 from .core import SR, cache_key, data_path, log
 from .hpss import blocks
 from .memory import release_unused
@@ -146,7 +146,8 @@ def separate(source: dict, model_id: str, progress, *, working_id: str | None = 
     if not ok:
         raise RuntimeError(why)
     if working_id and source.get("stem_model") == model_id and source.get("stems"):
-        if all(Path(path).is_file() for path in source["stems"].values()):
+        paths = [durable.ensure_path(path, source) for path in source["stems"].values()]
+        if all(path.is_file() for path in paths):
             return source["stems"]
     key = cache_key("sep", source["content_hash"], model_id)
     if working_id:
@@ -156,6 +157,6 @@ def separate(source: dict, model_id: str, progress, *, working_id: str | None = 
     if done.exists():  # cached; never rerun identical separation
         log.info("stems cache hit %s", key)
         return {p.stem: str(p) for p in out_dir.glob("*.wav")}
-    files = adapter.separate(Path(source["internal_audio_path"]), out_dir, progress)
+    files = adapter.separate(durable.ensure_path(source["internal_audio_path"], source), out_dir, progress)
     done.write_text(model_id)
     return {k: str(v) for k, v in files.items()}
