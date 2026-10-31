@@ -42,9 +42,20 @@ def test_long_chroma_preserves_global_tuning_and_normalization():
     mono = (np.sin(2 * np.pi * 443 * t) + 0.3 * np.sin(2 * np.pi * 661 * t)).astype(np.float32)
     mono[:len(mono) // 3] *= 0.001
     expected = librosa.feature.chroma_cqt(y=mono, sr=analysis.ASR, hop_length=analysis.HOP)
-    actual = librosa.feature.chroma_cqt(y=mono, sr=analysis.ASR, hop_length=analysis.HOP,
-                                       tuning=analysis._tuning(mono))
+    actual = analysis._chroma(mono, analysis.ASR, analysis.HOP, analysis._tuning(mono))
     np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("length", [4097, 275777, analysis.ASR * 300 + 137])
+@pytest.mark.parametrize("tuning", [-0.27, 0.0, 0.19])
+def test_bounded_cqt_keeps_global_downsampling_and_centered_frames(length, tuning):
+    import librosa
+
+    mono = np.random.default_rng(45).normal(0, 0.1, length).astype(np.float32)
+    mono[:1024] = 0
+    mono[-1024:] = 0
+    expected = librosa.feature.chroma_cqt(y=mono, sr=analysis.ASR, hop_length=analysis.HOP, tuning=tuning)
+    np.testing.assert_array_equal(analysis._chroma(mono, analysis.ASR, analysis.HOP, tuning), expected)
 
 
 @pytest.mark.parametrize("length", [137, 256, 513, 2000])

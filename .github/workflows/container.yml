@@ -39,6 +39,17 @@ jobs:
         run: |
           python3 -m py_compile scripts/hosting_password.py scripts/verify_container.py
           docker build -t choplab:check .
+      - name: Verify native scientific parity and response cleanup
+        run: |
+          docker run --rm --user 0:0 --entrypoint sh \
+            -v "$PWD/backend:/tests:ro" choplab:check -c '
+              set -eu
+              if ! python -c "import pytest, httpx" >/dev/null 2>&1; then
+                python -m ensurepip >/dev/null
+                python -c "import tomllib, subprocess; requirements = tomllib.load(open(\"/tests/pyproject.toml\", \"rb\"))[\"dependency-groups\"][\"dev\"]; subprocess.check_call([\"python\", \"-m\", \"pip\", \"install\", \"--quiet\", *requirements])"
+              fi
+              python -m pytest /tests/tests -q
+            '
       - name: Smoke test protected image and persistence
         shell: bash
         run: |

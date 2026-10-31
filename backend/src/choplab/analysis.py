@@ -9,6 +9,7 @@ from .audio_io import AudioError
 from .core import NOTE_NAMES, SR, parse_key
 from .render import loudness
 from .hpss import blocks
+from .cqt import chroma as _chroma
 
 ASR = 22050  # analysis rate
 HOP = 512
@@ -245,7 +246,7 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     progress("key_chroma", 0.25)
     tuning = _tuning(harm)
     progress("key_cqt", 0.25)
-    chroma = librosa.feature.chroma_cqt(y=harm, sr=ASR, hop_length=HOP, tuning=tuning)[:, :n_frames]
+    chroma = _chroma(harm, ASR, HOP, tuning)[:, :n_frames]
     del harm
     keys = estimate_key(chroma.sum(axis=1))
     key_conf = round(max(0.0, keys[0]["score"] - keys[1]["score"]) * 5 + max(0.0, keys[0]["score"]) * 0.5, 3)

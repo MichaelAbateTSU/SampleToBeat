@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from .responses import AudioFileResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
@@ -377,7 +378,7 @@ def source_audio(id: str):
     s = _get("source", id)
     if not s.get("internal_audio_path"):
         raise HTTPException(409, "Audio is still being imported.")
-    return FileResponse(s["internal_audio_path"], media_type="audio/wav")
+    return AudioFileResponse(s["internal_audio_path"], media_type="audio/wav")
 
 
 @app.get("/api/sources/{id}/waveform")
@@ -437,7 +438,7 @@ def stem_audio(stem_id: str):
     path = (_get("source", sid).get("stems") or {}).get(name)
     if not path:
         raise HTTPException(404, "No such stem")
-    return FileResponse(path, media_type="audio/wav")
+    return AudioFileResponse(path, media_type="audio/wav")
 
 
 # ---------------------------------------------------------------- samples
@@ -506,7 +507,7 @@ def _sample_file(s: dict, bpm: float | None) -> Path:
 def sample_audio(id: str, bpm: float | None = None):
     if bpm is not None and not 40 <= bpm <= 220:
         raise HTTPException(400, "bpm must be 40-220")
-    return FileResponse(_sample_file(_get("sample", id), bpm), media_type="audio/wav")
+    return AudioFileResponse(_sample_file(_get("sample", id), bpm), media_type="audio/wav")
 
 
 @app.get("/api/samples/{id}/buffer")
@@ -524,7 +525,7 @@ def sample_buffer(id: str, bpm: float, ratio: float = 1.0, pitch: float = 0.0):
         with jobs.compute_slot():
             y, _ = render.sample_buffer(s, src, bpm, ratio, pitch)
             audio_io.write_wav(out, np.clip(y, -1, 1), subtype="PCM_16")
-    return FileResponse(out, media_type="audio/wav")
+    return AudioFileResponse(out, media_type="audio/wav")
 
 
 @app.post("/api/samples/{id}/preview")
@@ -569,7 +570,7 @@ def get_variation(id: str):
 
 @app.get("/api/variations/{id}/audio")
 def variation_audio(id: str):
-    return FileResponse(_get("variation", id)["preview_path"], media_type="audio/wav")
+    return AudioFileResponse(_get("variation", id)["preview_path"], media_type="audio/wav")
 
 
 @app.post("/api/variations/{id}/regenerate", status_code=202)
@@ -638,7 +639,7 @@ def preview_file(id: str, name: str):
     f = DATA_DIR / "projects" / id / "previews" / name
     if not f.exists():
         raise HTTPException(404, "Preview expired; render again.")
-    return FileResponse(f, media_type="audio/wav")
+    return AudioFileResponse(f, media_type="audio/wav")
 
 
 @app.post("/api/projects/{id}/bass-sample", status_code=201)
@@ -690,7 +691,7 @@ def download(id: str, name: str | None = None):
     name = name or next(iter(files))
     if name not in files:  # only files this export produced: no path traversal
         raise HTTPException(404, "No such file in this export")
-    return FileResponse(files[name], filename=name)
+    return AudioFileResponse(files[name], filename=name)
 
 
 @app.post("/api/exports/{id}/reveal")
@@ -740,7 +741,7 @@ def _kit_inst(kit, inst):
 def kit_audio(kit: str, inst: str):
     _kit_inst(kit, inst)
     drums.sound(kit, inst)  # materialize the synthesized default
-    return FileResponse(drums.kit_path(kit, inst), media_type="audio/wav")
+    return AudioFileResponse(drums.kit_path(kit, inst), media_type="audio/wav")
 
 
 @app.post("/api/kits/{kit}/{inst}", status_code=201)

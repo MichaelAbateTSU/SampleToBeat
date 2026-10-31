@@ -6,7 +6,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.157.0",
     "imageio-ffmpeg>=0.6.0",
-    "librosa>=1.0.0",
+    "librosa>=1.0.0,<1.1",
+    "numba>=0.66.0",
     "numpy>=2.5.4",
     "pedalboard>=0.9.26",
     "pydantic>=2.14.1",

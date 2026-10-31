@@ -68,6 +68,7 @@ class HPSSAdapter(Adapter):
                 for name, path in paths.items():
                     audio_io._release_file_cache(path)
                     os.replace(path, out_dir / path.name)
+        audio_io._release_file_cache(wav)
         return {k: out_dir / f"{k}.wav" for k in self.stems}
 
 
