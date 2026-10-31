@@ -100,6 +100,19 @@ an ephemeral disk or call it durable because the metadata uses Neon:
   stages passed. Short generation peaks fell to 450.01/469.84 MiB, respectively. However, 16s MP3 reached
   512 MiB, and 300s import was OOM-killed (exit 137) at 511.98 MiB after 209.129 seconds; its downstream
   stages were skipped. There is no reliable headroom or five-minute support established at the cap.
+* A narrower follow-up retained sample-identical default harmonic separation using overlapping median
+  workspaces, reused the centered mel batching for MFCC, reused channelwise loudness, and streamed exact
+  clipped float32 PCM into the MP3 encoder. At `c9148a2`,
+  [300s import still OOM-killed in the key-analysis stage](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41229576106)
+  after 236.607 seconds at 512 MiB (exit 137). At final code `9290f7b`,
+  [the affected 16s workflow passed](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41230824337),
+  but WAV reached 507.07 MiB and MP3 still reached 512 MiB; this does not establish reliable headroom.
+  The original 4s case was not repeated, and the unchanged 300s import was not repeated after the
+  encoder-only correction. 141 backend tests and
+  [native x64/ARM container regressions](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41230824317)
+  passed. Benchmark CI success means evidence collection succeeded, not that all measured operations did.
+  Hosted defaults remain 300 seconds / 100 MiB, versus local 1,200 seconds / 1,024 MiB; 1,200-second
+  inputs were not tested. No full input parity, live deployment, or provider persistence is established.
   Default longer/multiple-variation generation, alternate effects and concurrent requests remain untested
   at these limits. A green measurement workflow records failures as evidence, not production readiness.
 * Free web services lose uploaded/generated files on every restart, redeploy and 15-minute idle spin-down.
