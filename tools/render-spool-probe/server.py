@@ -61,9 +61,18 @@ SOURCE_HASHES = {
 
 def filesystem(path):
     st, fs = os.stat(path), os.statvfs(path)
+    mounts = []
+    for line in Path("/proc/self/mountinfo").read_text().splitlines():
+        head, tail = line.split(" - ", 1)
+        fields, info = head.split(), tail.split()
+        mount = fields[4]
+        if path == mount or path.startswith(mount.rstrip("/") + "/"):
+            mounts.append((len(mount), {"mountpoint": mount, "device": fields[2],
+                                       "filesystem_type": info[0]}))
+    identity = max(mounts, key=lambda item: item[0])[1] if mounts else {}
     return {"path": path, "st_dev": st.st_dev, "free_bytes": fs.f_bavail * fs.f_frsize,
             "total_bytes": fs.f_blocks * fs.f_frsize,
-            "free_inodes": fs.f_favail}
+            "free_inodes": fs.f_favail, **identity}
 
 
 def snapshot():
@@ -154,6 +163,15 @@ class Boundary:
         if not hmac.compare_digest(headers.get(b"authorization", b""), expected):
             return await JSONResponse({"error": "unauthorized"}, 401,
                                       headers={"X-Upload-Probe": "1"})(scope, receive, send)
+        if scope["path"] == "/status" and scope["method"] == "GET":
+            return await JSONResponse(
+                {"source_sha": SOURCE, "source_hashes": SOURCE_HASHES,
+                 "filesystem": snapshot(), "durable_enabled": durable.enabled(),
+                 "reserve_bytes": api.MIN_FREE, "max_upload_bytes": api.MAX_UPLOAD,
+                 "parser_spool_max_size": formparsers.MultiPartParser.spool_max_size,
+                 "versions": {p: importlib.metadata.version(p)
+                              for p in ("fastapi", "starlette", "python-multipart", "uvicorn")}},
+                headers={"X-Upload-Probe": "1"})(scope, receive, send)
         if scope["path"] != "/probe" or scope["method"] != "POST":
             return await JSONResponse({"error": "not_found"}, 404)(scope, receive, send)
         try:
