@@ -9,6 +9,7 @@
 **/playwright-report
 **/.env
 **/secrets
+**/owner_password_hash
 **/backups
 data
 .e2e-data
