@@ -156,17 +156,29 @@ class Client:
         except urllib.error.URLError:
             raise AcceptanceError("HTTP connection/TLS failed; verify origin, readiness and trusted certificates.") from None
 
-    def json(self, method, path, body=None, *, timeout=None):
+    def _read_metadata(self, response, timeout):
         try:
-            with self.open(method, path, body=body, timeout=timeout) as response:
-                data = response.read(MAX_JSON + 1)
-            if len(data) > MAX_JSON:
-                raise AcceptanceError("Metadata response exceeded the 2-MiB safety limit.")
-            return json.loads(data)
+            chunks, size = [], 0
+            deadline = time.monotonic() + timeout
+            while True:
+                chunk = response.read1(64 << 10)
+                if time.monotonic() >= deadline:
+                    raise AcceptanceError("Metadata response exceeded the observation timeout.")
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_JSON:
+                    raise AcceptanceError("Metadata response exceeded the 2-MiB safety limit.")
+                chunks.append(chunk)
+            return json.loads(b"".join(chunks))
         except (ValueError, UnicodeError):
             raise AcceptanceError("Server returned invalid JSON; no successful state was inferred.") from None
         except (TimeoutError, socket.timeout):
             raise AcceptanceError("Metadata response timed out.") from None
+
+    def json(self, method, path, body=None, *, timeout=None):
+        with self.open(method, path, body=body, timeout=timeout) as response:
+            return self._read_metadata(response, timeout or self.timeout)
 
     def checksum(self, path, *, headers=None, expected_status=200):
         sha = hashlib.sha256()
@@ -210,15 +222,9 @@ class Client:
         try:
             with self.open("POST", path, raw=prefix + audio + f"\r\n--{boundary}--\r\n".encode(),
                            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}) as response:
-                data = response.read(MAX_JSON + 1)
-        except (TimeoutError, socket.timeout):
-            raise AcceptanceError("Upload response timed out; its commit state is unknown. Inspect the synthetic project; no automatic retry was submitted.") from None
-        if len(data) > MAX_JSON:
-            raise AcceptanceError("Upload metadata exceeded its safety limit.")
-        try:
-            return json.loads(data)
-        except (ValueError, UnicodeError):
-            raise AcceptanceError("Upload returned invalid JSON.") from None
+                return self._read_metadata(response, self.timeout)
+        except AcceptanceError as error:
+            raise AcceptanceError(f"Upload response failed: {error} Its commit state may be unknown; inspect the synthetic project. No automatic retry was submitted.") from None
 
 
 def synthetic_audio():

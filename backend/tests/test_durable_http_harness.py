@@ -221,6 +221,19 @@ def test_network_timeouts_are_safe(auth, monkeypatch):
     assert "secret-never-log" not in str(error.value)
 
 
+def test_trickling_metadata_cannot_bypass_observation_deadline(auth, monkeypatch):
+    client = harness.Client("https://test.invalid", "https://test.invalid", auth, timeout=1)
+    clock = [0]
+    monkeypatch.setattr(harness.time, "monotonic", lambda: clock[0])
+    class Slow:
+        def read1(self, size):
+            clock[0] += .6
+            return b" "
+    with pytest.raises(harness.AcceptanceError, match="observation timeout"):
+        client._read_metadata(Slow(), 1)
+    assert clock[0] < 2
+
+
 def manifest(client):
     return {"format": harness.FORMAT, "complete": True, "run_id": "a" * 32,
             "origin_sha256": harness.digest(client.base.encode()),
