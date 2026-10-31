@@ -1,0 +1,46 @@
+name: Isolated exact large ratio investigation
+on:
+  push:
+    branches: [michaelabatetsu-render-free-feasibility]
+    paths:
+      - "backend/src/choplab/disk_decode.py"
+      - "backend/tests/test_disk_decode.py"
+      - ".github/benchmarks/*disk_decode*"
+      - ".github/workflows/disk-decode.yml"
+permissions:
+  contents: read
+jobs:
+  decode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build prerequisite with isolated overlay
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin e42630a486045cfcbabc579a36b1829b59d0685d
+          mkdir "$RUNNER_TEMP/base"
+          git archive e42630a486045cfcbabc579a36b1829b59d0685d | tar -x -C "$RUNNER_TEMP/base"
+          docker build -t choplab:decode-base "$RUNNER_TEMP/base"
+          docker build -t choplab:disk-decode -f .github/benchmarks/Dockerfile.disk-decode .
+      - name: Independent coefficient and output parity
+        timeout-minutes: 6
+        run: docker run --rm choplab:disk-decode -m pytest -q -p no:cacheprovider /checks/test_disk_decode.py
+      - name: Capped million-Hz short recording
+        timeout-minutes: 6
+        run: sudo timeout --signal=TERM --kill-after=15s 330s python3 .github/benchmarks/measure_disk_decode.py "$RUNNER_TEMP/decode-million" 1000003 2 1
+      - name: Capped original-duration 192001-Hz recording
+        timeout-minutes: 20
+        run: sudo timeout --signal=TERM --kill-after=15s 1160s python3 .github/benchmarks/measure_disk_decode.py "$RUNNER_TEMP/decode-high" 192001 2 1200
+      - name: Readable evidence
+        if: always()
+        run: sudo find "$RUNNER_TEMP" -maxdepth 2 -path '*/decode-*/*' -type f -exec chmod 644 {} +
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: large-ratio-evidence
+          path: |
+            ${{ runner.temp }}/decode-*/*.json
+            ${{ runner.temp }}/decode-*/*.jsonl
+            ${{ runner.temp }}/decode-*/*.log
+          retention-days: 7

@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 from scipy.signal import firwin, resample_poly
+from scipy.special import i0
 
 from . import audio_io
 from .core import SR
@@ -28,6 +29,50 @@ FILTER_WORK_BYTES = 128 << 20
 
 class _ReadError(Exception):
     pass
+
+
+def _disk_fir(directory: Path, taps: int, cutoff: float) -> tuple[np.memmap, Path]:
+    """Build the same normalized Kaiser-5 lowpass without full float64 temporaries."""
+    fd, name = tempfile.mkstemp(prefix=".decode-fir-", dir=directory)
+    path = Path(name)
+    try:
+        with os.fdopen(fd, "w+b") as file:
+            file.truncate(taps * 8)
+            values = np.memmap(file, dtype=np.float64, mode="r+", shape=taps)
+            alpha = .5 * (taps - 1)
+            try:
+                for start in range(0, taps, BLOCK_FRAMES):
+                    end = min(start + BLOCK_FRAMES, taps)
+                    position = np.arange(start, end, dtype=np.float64) - alpha
+                    window = i0(5.0 * np.sqrt(1 - ((position / alpha) ** 2))) / i0(5.0)
+                    values[start:end] = cutoff * np.sinc(cutoff * position) * window
+                values.flush()
+                # One contiguous reduction preserves NumPy's original pairwise
+                # sum tree; summing independent chunks changes coefficients.
+                scale = np.sum(values)
+                for start in range(0, taps, BLOCK_FRAMES):
+                    end = min(start + BLOCK_FRAMES, taps)
+                    values[start:end] /= scale
+                values.flush()
+                coefficients = np.memmap(file, dtype=np.float32, mode="r+", shape=taps)
+                try:
+                    # Forward conversion never overwrites unread float64 values.
+                    for start in range(0, taps, BLOCK_FRAMES):
+                        end = min(start + BLOCK_FRAMES, taps)
+                        coefficients[start:end] = values[start:end].astype(np.float32)
+                    coefficients.flush()
+                finally:
+                    coefficients._mmap.close()
+            finally:
+                values._mmap.close()
+            file.truncate(taps * 4)
+            file.flush()
+            os.fsync(file.fileno())
+            _discard_cache(file.fileno())
+        return np.memmap(path, dtype=np.float32, mode="r", shape=taps), path
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _probe(path: Path, timeout: float) -> dict:
@@ -71,17 +116,28 @@ def _write(out: sf.SoundFile, y: np.ndarray, fd: int, max_frames: int) -> None:
     _discard_cache(fd)
 
 
-def _soundfile(path: Path, out: sf.SoundFile, fd: int, sr: int) -> None:
+def _soundfile(path: Path, out: sf.SoundFile, fd: int, sr: int, directory: Path) -> None:
     with path.open("rb") as source:
         try:
             inp = sf.SoundFile(source)
         except sf.LibsndfileError as error:
             raise _ReadError() from error
         with inp:
-            _read_blocks(source, inp, out, fd, sr)
+            _read_blocks(source, inp, out, fd, sr, directory)
 
 
-def _read_blocks(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int) -> None:
+def _read_blocks(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int, directory: Path) -> None:
+    filters = []
+    try:
+        _read_resampled(source, inp, out, fd, sr, directory, filters)
+    finally:
+        for coefficients, filter_path in filters:
+            coefficients._mmap.close()
+            filter_path.unlink(missing_ok=True)
+
+
+def _read_resampled(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int,
+                    directory: Path, filters: list) -> None:
     if inp.frames / inp.samplerate > audio_io.MAX_SECONDS:
         raise audio_io.AudioError(
             f"Recording is longer than {audio_io.MAX_SECONDS} seconds; trim it before importing."
@@ -99,8 +155,8 @@ def _read_blocks(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int)
     # upfirdn also allocates the convolution tail before resample_poly slices
     # it away. Include filter padding, row copies and the trimmed float32 copy.
     filtered = ((max(frames, 1) - 1) * up + taps + 2 * down - 1) // down + 1
-    if up != down and (taps * 64 > FILTER_WORK_BYTES
-                       or 32 * (frames + max(expanded, filtered)) + READ_BYTES > RESAMPLE_WORK_BYTES):
+    if up != down and (taps * 16 + 32 * (frames + max(expanded, filtered))
+                       + READ_BYTES > 384 << 20):
         raise audio_io.AudioError(
             f"Exact resampling from {inp.samplerate} Hz to {sr} Hz exceeds the "
             "bounded decoder's FIR/workspace budget; convert externally at the "
@@ -109,10 +165,15 @@ def _read_blocks(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int)
     if inp.channels * 4 > READ_BYTES:
         raise audio_io.AudioError("One audio frame exceeds the bounded decoder's channel-read budget.")
     coefficients = None
+    filter_path = None
     if up != down:
         # Cache the unscaled float32 FIR once. resample_poly applies the same
         # up scaling, zero-padding and phase as its default filter each block.
-        coefficients = firwin(taps, 1.0 / max(up, down), window=("kaiser", 5.0)).astype(np.float32)
+        if taps * 64 > FILTER_WORK_BYTES:
+            coefficients, filter_path = _disk_fir(directory, taps, 1.0 / max(up, down))
+            filters.append((coefficients, filter_path))
+        else:
+            coefficients = firwin(taps, 1.0 / max(up, down), window=("kaiser", 5.0)).astype(np.float32)
     read_frames = max(1, min(BLOCK_FRAMES, READ_BYTES // (inp.channels * 4)))
     buffered = np.empty((0, 2), np.float32)
     buffer_start = 0
@@ -234,7 +295,7 @@ def decode_to_wav(path: Path, destination: Path, sr: int = SR, *, timeout: float
                     if fallback:
                         _ffmpeg(path, out, file.fileno(), sr, timeout)
                     else:
-                        _soundfile(path, out, file.fileno(), sr)
+                        _soundfile(path, out, file.fileno(), sr, destination.parent)
                     if out.tell() == 0:
                         raise audio_io.AudioError("Audio file is empty (zero length).")
                     out.flush()

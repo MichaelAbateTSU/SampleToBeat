@@ -19,7 +19,8 @@ source = root / "input.wav"
 reference = root / "reference.wav"
 if mode == "fixture":
     count = seconds * rate
-    with sf.SoundFile(source, mode="w", samplerate=rate, channels=channels, subtype="FLOAT") as out:
+    with sf.SoundFile(source, mode="w", samplerate=rate, channels=channels,
+                      subtype="PCM_16" if rate > 96000 else "FLOAT") as out:
         for start in range(0, count, 4096):
             t = np.arange(start, min(start + 4096, count), dtype=np.float64) / rate
             y = np.empty((len(t), channels), np.float32)

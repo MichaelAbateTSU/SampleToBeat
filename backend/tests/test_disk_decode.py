@@ -248,11 +248,47 @@ def test_coprime_filter_designed_once(tmp_path, monkeypatch):
 
 def test_pathological_fir_budget_explicit_error_and_cleanup(tmp_path, monkeypatch):
     source = tmp_path / "source.wav"
-    sf.write(source, np.zeros((73, 2), np.float32), 1000003, subtype="FLOAT")
+    sf.write(source, np.zeros((73, 2), np.float32), 10000019, subtype="FLOAT")
     destination = tmp_path / "out.wav"
     destination.write_bytes(b"existing")
     monkeypatch.setattr(disk_decode, "firwin", lambda *a, **kw: pytest.fail("allocated oversized FIR"))
     with pytest.raises(audio_io.AudioError, match="Exact resampling.*FIR/workspace budget"):
+        disk_decode.decode_to_wav(source, destination)
+    assert destination.read_bytes() == b"existing"
+    assert not list(tmp_path.glob(".decode-*"))
+
+
+@pytest.mark.parametrize("rate,frames", [(192001, 73), (192001, 4032022), (1000003, 73)])
+def test_large_coprime_parity(tmp_path, rate, frames):
+    source = tmp_path / "source.wav"
+    sf.write(source, np.random.default_rng(2).normal(0, .1, (frames, 2)).astype(np.float32),
+             rate, subtype="FLOAT")
+    expected = original_decode(source)
+    actual, _ = sf.read(disk_decode.decode_to_wav(source, tmp_path / "out.wav"),
+                        dtype="float32", always_2d=True)
+    np.testing.assert_array_equal(actual, expected)
+    assert not list(tmp_path.glob(".decode-*"))
+
+
+@pytest.mark.parametrize("maximum", [48000, 192001, 1000003])
+def test_disk_fir_coefficients_exact(tmp_path, maximum):
+    expected = disk_decode.firwin(20 * maximum + 1, 1.0 / maximum,
+                                  window=("kaiser", 5.0)).astype(np.float32)
+    actual, path = disk_decode._disk_fir(tmp_path, len(expected), 1.0 / maximum)
+    try:
+        np.testing.assert_array_equal(actual, expected)
+    finally:
+        actual._mmap.close()
+        path.unlink()
+
+
+def test_large_filter_write_failure_cleanup(tmp_path, monkeypatch):
+    source = tmp_path / "source.wav"
+    sf.write(source, np.zeros((73, 2), np.float32), 192001, subtype="FLOAT")
+    destination = tmp_path / "out.wav"
+    destination.write_bytes(b"existing")
+    monkeypatch.setattr(disk_decode, "_write", lambda *args: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
         disk_decode.decode_to_wav(source, destination)
     assert destination.read_bytes() == b"existing"
     assert not list(tmp_path.glob(".decode-*"))
