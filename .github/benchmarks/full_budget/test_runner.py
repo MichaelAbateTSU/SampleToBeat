@@ -2,9 +2,13 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+import subprocess
 
 import verify_external_durable_http as E
 from budget_probe import Ledger, MeasuredBody, summarize
+from run import CommandFailure
+import admin
 import io
 
 
@@ -49,6 +53,25 @@ class FixtureGuards(unittest.TestCase):
             self.assertEqual(report["http_attempts"][0]["body_bytes_read_or_buffered"], 3)
             self.assertEqual(report["http_attempts"][0]["outcome"], "unobserved_or_process_interrupted")
             self.assertEqual(report["operations"]["PutObject"]["successful_calls"], 0)
+
+    def test_subprocess_evidence_redacts_stderr_paths_and_values(self):
+        result = subprocess.CompletedProcess(["docker"], 1, "", "PermissionError: confidential-marker\n")
+        error = CommandFailure("docker", result)
+        self.assertEqual(error.evidence["exception_class"], "PermissionError")
+        self.assertNotIn("confidential-marker", json.dumps(error.evidence))
+        self.assertNotIn("confidential-marker", str(error))
+
+    def test_admin_rejects_non_synthetic_target_before_importing_app(self):
+        with patch.dict("os.environ", {"CHOPLAB_SYNTHETIC_BUDGET": "yes",
+                                     "CHOPLAB_DATABASE_URL": "postgresql://example.invalid/other"}, clear=True):
+            with self.assertRaises(RuntimeError):
+                admin.guard()
+
+    def test_admin_accepts_only_known_throwaway_postgres(self):
+        with patch.dict("os.environ", {"CHOPLAB_SYNTHETIC_BUDGET": "yes",
+                                     "CHOPLAB_DATABASE_URL":
+                                     "postgresql://choplab_test:synthetic-ci-password@postgres:5432/choplab_recovery_test"}, clear=True):
+            admin.guard()
 
 
 if __name__ == "__main__":

@@ -274,6 +274,11 @@ def main():
         snapshot("verified-after-cold-replacement")
         begin = time.monotonic()
         action = "admin-original-read"
+        # The host harness atomically saves mode-0600 manifests as root; grant
+        # only the known synthetic verifier UID access after both HTTP phases.
+        manifest_path = root / "acceptance/manifest.json"
+        os.chown(manifest_path, 10001, 10001)
+        manifest_path.chmod(0o600)
         admin("original", cache="cache1")
         report["optional_original_read"] = {"seconds": time.monotonic() - begin,
                                           "traffic": summarize(events(root / "app-evidence/admin-object-events.jsonl")),

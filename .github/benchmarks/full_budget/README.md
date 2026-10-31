@@ -116,3 +116,19 @@ and CI at 120 minutes. Timeout prevents later workflow claims. All exact named
 containers and the synthetic network are removed in `always()` cleanup; the
 runner disk is disposable. A green artifact upload never establishes successful
 workload, provider feasibility, uptime, or persistence on Render.
+
+## Residual provider limits (official docs checked 2026-10-31)
+
+[Render Free](https://render.com/docs/free) explicitly warns against production
+use and may suspend a Free service for an uncommonly high volume of traffic it
+initiates over the public internet, including external databases and object
+storage. No numeric threshold is published. Therefore, even measured traffic
+below an included monthly allowance cannot prove provider acceptance or
+uninterrupted operation.
+
+[Neon pricing](https://neon.com/pricing) lists 5 GB/project included Object
+Storage and 5 GB/project/month public egress on Free. The public-egress allowance
+is shared by Postgres, Object Storage and Functions, not a separate 5 GB for each.
+The runner does not meter PostgreSQL wire traffic or outside project consumers.
+Consumed S3 payload and synthetic recorded inventory must not be called complete
+provider usage or quota headroom; retention and unknown transfers remain limits.
