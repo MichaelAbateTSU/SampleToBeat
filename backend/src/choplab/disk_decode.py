@@ -78,32 +78,36 @@ def _soundfile(path: Path, out: sf.SoundFile, fd: int, sr: int) -> None:
 
 
 def _read_blocks(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int) -> None:
-        if inp.frames / inp.samplerate > audio_io.MAX_SECONDS:
-            raise audio_io.AudioError(
-                f"Recording is longer than {audio_io.MAX_SECONDS} seconds; trim it before importing."
-            )
-        g = math.gcd(inp.samplerate, sr)
-        up, down = sr // g, inp.samplerate // g
-        block = max(down, BLOCK_FRAMES // down * down)
-        # Match scipy's default symmetric FIR and global downsampling phase.
-        halo = math.ceil((10 * max(up, down) / up + 2) / down) * down
-        for start in range(0, inp.frames, block):
-            end = min(start + block, inp.frames)
-            left = max(0, start - halo)
-            right = min(inp.frames, end + halo)
-            inp.seek(left)
-            try:
-                y = audio_io._to_stereo(inp.read(right - left, dtype="float32", always_2d=True))
-            except sf.LibsndfileError as error:
-                raise _ReadError() from error
-            if len(y) != right - left:
-                raise audio_io.AudioError("Decoding failed: incomplete audio frames.")
-            if up != down:
-                y = audio_io.resample(y, inp.samplerate, sr)
-            offset = (start - left) * up // down
-            count = math.ceil(end * up / down) - start * up // down
-            _write(out, y[offset:offset + count], fd, audio_io.MAX_SECONDS * sr)
-            _discard_cache(source.fileno())
+    if inp.frames / inp.samplerate > audio_io.MAX_SECONDS:
+        raise audio_io.AudioError(
+            f"Recording is longer than {audio_io.MAX_SECONDS} seconds; trim it before importing."
+        )
+    g = math.gcd(inp.samplerate, sr)
+    up, down = sr // g, inp.samplerate // g
+    block = max(down, BLOCK_FRAMES // down * down)
+    # Match scipy's default symmetric FIR and global downsampling phase.
+    halo = math.ceil((10 * max(up, down) / up + 2) / down) * down
+    buffered = np.empty((0, 2), np.float32)
+    buffer_start = 0
+    for start in range(0, inp.frames, block):
+        end = min(start + block, inp.frames)
+        left = max(0, start - halo)
+        right = min(inp.frames, end + halo)
+        buffered = buffered[left - buffer_start:]
+        buffer_start = left
+        needed = right - left - len(buffered)
+        try:
+            incoming = audio_io._to_stereo(inp.read(needed, dtype="float32", always_2d=True))
+        except sf.LibsndfileError as error:
+            raise _ReadError() from error
+        if len(incoming) != needed:
+            raise audio_io.AudioError("Decoding failed: incomplete audio frames.")
+        buffered = np.concatenate((buffered, incoming))
+        y = audio_io.resample(buffered, inp.samplerate, sr) if up != down else buffered
+        offset = (start - left) * up // down
+        count = math.ceil(end * up / down) - start * up // down
+        _write(out, y[offset:offset + count], fd, audio_io.MAX_SECONDS * sr)
+        _discard_cache(source.fileno())
 
 
 def _ffmpeg(path: Path, out: sf.SoundFile, fd: int, sr: int, timeout: float) -> None:
@@ -184,17 +188,23 @@ def decode_to_wav(path: Path, destination: Path, sr: int = SR, *, timeout: float
     tmp = Path(name)
     try:
         with os.fdopen(fd, "w+b") as file:
-            with sf.SoundFile(file, mode="w", samplerate=sr, channels=2,
-                              format="WAV", subtype="FLOAT", closefd=False) as out:
-                try:
-                    _soundfile(path, out, file.fileno(), sr)
-                except _ReadError:
-                    out.seek(0)
-                    out.truncate(0)
-                    _ffmpeg(path, out, file.fileno(), sr, timeout)
-                if out.tell() == 0:
-                    raise audio_io.AudioError("Audio file is empty (zero length).")
-                out.flush()
+            def fill(fallback: bool) -> None:
+                with sf.SoundFile(file, mode="w", samplerate=sr, channels=2,
+                                  format="WAV", subtype="FLOAT", closefd=False) as out:
+                    if fallback:
+                        _ffmpeg(path, out, file.fileno(), sr, timeout)
+                    else:
+                        _soundfile(path, out, file.fileno(), sr)
+                    if out.tell() == 0:
+                        raise audio_io.AudioError("Audio file is empty (zero length).")
+                    out.flush()
+
+            try:
+                fill(False)
+            except _ReadError:
+                file.seek(0)
+                file.truncate(0)
+                fill(True)
             file.flush()
             os.fsync(file.fileno())
             _discard_cache(file.fileno())
