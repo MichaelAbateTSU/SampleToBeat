@@ -1,0 +1,10 @@
+**
+!backend/
+!backend/src/
+!backend/src/choplab/
+!backend/src/choplab/disk_decode.py
+!backend/tests/
+!backend/tests/test_disk_decode.py
+!.github/
+!.github/benchmarks/
+!.github/benchmarks/check_disk_decode.py
