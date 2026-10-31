@@ -123,8 +123,8 @@ python tools\render-spool-probe\client.py --url https://<service>.onrender.com -
 python tools\render-spool-probe\client.py --url https://<service>.onrender.com --size 16MiB --token-dpapi-file <private.dpapi> --out <session-files\small.json>
 ```
 
-Use `client.get_json` from the older `tools/render-upload-probe/client.py` with
-`load_token` to fetch authenticated `/status` without printing auth headers.
+Add `--status` to fetch authenticated `/status` without uploading a body or
+printing auth headers; save this initial filesystem/source inspection first.
 The new client reuses that checked incremental generator/HTTPS transport and
 failure classification; no arbitrary-size client was introduced.
 

@@ -20,6 +20,8 @@ run_case() {
     sleep 1
   done
   python3 tools/render-spool-probe/client.py --url http://127.0.0.1:10000 \
+    --allow-http --status --out "spool-results/$name-status.json"
+  python3 tools/render-spool-probe/client.py --url http://127.0.0.1:10000 \
     --allow-http --size 16MiB --expect-status "$expected" --out "spool-results/$name.json"
   docker logs spool >"spool-results/$name.log" 2>&1
   docker inspect spool --format '{{.State.OOMKilled}}' | grep -q false
@@ -47,6 +49,9 @@ s = body("spool-full")
 assert s["phase"] == "parser" and "ENOSPC" in s["errors"], s
 assert not s["part_exists_before_probe_cleanup"]
 for p in Path("spool-results").glob("*.json"):
+    if p.stem.endswith("-status"):
+        assert json.loads(p.read_text())["body"]["parser_spool_max_size"] == 1024 * 1024
+        continue
     b = json.loads(p.read_text())["response"]["body"]
     print(p.stem, {k:b.get(k) for k in ("source_sha","phase","production_status","errors","release_calls",
           "production_open_spools_before_probe_cleanup","sampled")})

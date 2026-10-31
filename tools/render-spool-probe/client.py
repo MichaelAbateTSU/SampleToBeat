@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "render-upload-probe"))
-from client import Payload, load_token, parse_size, run_probe  # noqa: E402
+from client import Payload, get_json, load_token, parse_size, run_probe  # noqa: E402
 
 
 def main():
@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--token-file")
     parser.add_argument("--token-dpapi-file")
     parser.add_argument("--expect-status", type=int, default=200)
+    parser.add_argument("--status", action="store_true", help="authenticated disk/source inspection only")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
     url = urlsplit(args.url)
@@ -32,6 +33,14 @@ def main():
     token = load_token(args.token_file, args.token_dpapi_file)
     if not token:
         parser.error("no private token source")
+    if args.status:
+        result = get_json(url, "/status", token, 120)
+        text = json.dumps(result, indent=2)
+        if token in text:
+            raise RuntimeError("refusing to persist token-bearing output")
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(json.dumps({"status": result["status"], "from_app": result["from_app"]}))
+        return 0 if result["status"] == args.expect_status and result["from_app"] else 1
     payload = Payload(args.size, True)
     file_hash = hashlib.sha256()
     for block in payload.chunks(len(payload.prefix), len(payload.prefix) + args.size):
