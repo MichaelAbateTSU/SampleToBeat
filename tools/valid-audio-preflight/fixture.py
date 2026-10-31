@@ -105,15 +105,16 @@ def write(path: Path, frames: int):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--describe", action="store_true")
-    parser.add_argument("--hash", action="store_true", help="stream offline exact fixture hash")
-    parser.add_argument("--write", type=Path)
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument("--describe", action="store_true")
+    operation.add_argument("--hash", action="store_true", help="stream offline exact fixture hash")
+    operation.add_argument("--write", type=Path)
     parser.add_argument("--frames", type=int, default=FRAMES)
     parser.add_argument("--allow-gib-fixture", action="store_true")
     args = parser.parse_args()
     if not 0 < args.frames <= FRAMES:
         parser.error("frame cap exceeded")
-    if args.frames == FRAMES and not args.describe and not args.allow_gib_fixture:
+    if args.frames == FRAMES and (args.hash or args.write) and not args.allow_gib_fixture:
         parser.error("exact GiB generation requires --allow-gib-fixture")
     if args.write:
         result = write(args.write, args.frames)

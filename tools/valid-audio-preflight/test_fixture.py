@@ -123,6 +123,15 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(json.loads(run.stdout)["file_bytes"], 1073741824)
         run = subprocess.run([sys.executable, "fixture.py", "--hash"], capture_output=True)
         self.assertNotEqual(run.returncode, 0)
+        run = subprocess.run([sys.executable, "fixture.py"], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0)
+        self.assertEqual(json.loads(run.stdout)["file_bytes"], 1073741824)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "must-not-exist.wav"
+            run = subprocess.run([sys.executable, "fixture.py", "--describe", "--write", str(path)],
+                                 capture_output=True)
+            self.assertNotEqual(run.returncode, 0)
+            self.assertFalse(path.exists())
 
     def test_budget_approval_freshness_and_caps(self):
         b = budget()

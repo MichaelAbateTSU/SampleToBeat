@@ -32,6 +32,12 @@ MAX_RESPONSE_BYTES = 1 << 20
 TERMINAL = {"completed", "failed", "canceled", "interrupted"}
 
 
+class PreflightError(RuntimeError):
+    def __init__(self, reason, status=None):
+        super().__init__(reason)
+        self.reason, self.status = reason, status
+
+
 def plan():
     return {**describe(), "multipart_body_bytes": BODY_BYTES,
             "internal_stereo_48khz_frames": INTERNAL_FRAMES,
@@ -118,9 +124,9 @@ class Transport:
 
     def connect(self):
         if self.calls >= self.budget["max_http_requests"]:
-            raise RuntimeError("approved HTTP request budget exhausted")
+            raise PreflightError("approved_request_budget_exhausted")
         if datetime.now(timezone.utc) >= datetime.fromisoformat(self.budget["expires_at"].replace("Z", "+00:00")):
-            raise RuntimeError("approved quota budget expired")
+            raise PreflightError("approved_quota_budget_expired")
         self.calls += 1
         if self.parts.scheme == "https":
             return http.client.HTTPSConnection(
@@ -132,10 +138,10 @@ class Transport:
         response = conn.getresponse()
         raw = response.read(MAX_RESPONSE_BYTES + 1)
         if len(raw) > MAX_RESPONSE_BYTES:
-            raise RuntimeError("response exceeded cap")
+            raise PreflightError("response_cap_exceeded")
         result = {"status": response.status}
         if self.password and (self.password.encode() in raw or self.auth.encode() in raw):
-            raise RuntimeError("refusing credential-bearing response")
+            raise PreflightError("credential_bearing_response_blocked")
         try:
             result["body"] = json.loads(raw) if raw else {}
         except ValueError:
@@ -156,6 +162,7 @@ class Transport:
         conn = self.connect()
         file_hash, body_hash = hashlib.sha256(), hashlib.sha256()
         sent = 0
+        file_bytes = BODY_BYTES - len(PREFIX) - len(SUFFIX)
         try:
             conn.putrequest("POST", f"/api/projects/{quote(project_id, safe='')}/sources")
             conn.putheader("Authorization", self.auth)
@@ -166,16 +173,20 @@ class Transport:
             body_hash.update(PREFIX)
             sent += len(PREFIX)
             for piece in chunks():
+                if sent - len(PREFIX) + len(piece) > file_bytes:
+                    raise PreflightError("fixture_exceeds_declared_content_length")
                 conn.send(piece)
                 file_hash.update(piece)
                 body_hash.update(piece)
                 sent += len(piece)
+            if sent - len(PREFIX) != file_bytes:
+                raise PreflightError("fixture_shorter_than_declared_content_length")
             conn.send(SUFFIX)
             body_hash.update(SUFFIX)
             sent += len(SUFFIX)
             response = self.read(conn)
             if file_hash.hexdigest() != expected_file_digest:
-                raise RuntimeError("deterministic fixture changed between hash and send")
+                raise PreflightError("fixture_digest_changed")
             return {**response, "sent_body_bytes": sent,
                     "sent_file_sha256": file_hash.hexdigest(),
                     "sent_multipart_sha256": body_hash.hexdigest()}
@@ -185,7 +196,7 @@ class Transport:
 
 def require(response, code):
     if response["status"] != code:
-        raise RuntimeError(f"HTTP {response['status']} (expected {code}); no retry")
+        raise PreflightError("unexpected_http_response_no_retry", response["status"])
     return response["body"]
 
 
@@ -219,16 +230,16 @@ def execute(transport, state, persist, expected_digest, *, max_polls=120, sleep=
         state["phase"] = "capabilities"
         capabilities = require(transport.request("GET", "/api/system/capabilities"), 200)
         if capabilities.get("max_upload_mb") != 1024 or capabilities.get("max_audio_seconds", 0) < FRAMES / RATE:
-            raise RuntimeError("actual app caps differ from approved fixture preflight")
+            raise PreflightError("actual_app_caps_incompatible")
         # Coarse public capability value cannot replace measured filesystem budget.
         if capabilities.get("disk_free_gb", 0) * 1e9 < MIN_LOCAL_BYTES:
-            raise RuntimeError("app reports insufficient local disk space")
+            raise PreflightError("reported_disk_below_policy")
         state["create_attempted"] = True
         state["phase"] = "create"
         persist()
         created = require(transport.request("POST", "/api/projects", {"name": state["project_name"]}), 201)
         if not isinstance(created.get("id"), str) or not created["id"]:
-            raise RuntimeError("create returned no project identity")
+            raise PreflightError("missing_project_identity")
         state["project_id"] = created["id"]
         persist()
         state["upload_attempted"] = True
@@ -266,6 +277,8 @@ def execute(transport, state, persist, expected_digest, *, max_polls=120, sleep=
         # Do not serialize arbitrary SDK/network exception text containing credentials.
         state["outcome"] = "failed_or_unknown"
         state["error_class"] = type(exc).__name__
+        if isinstance(exc, PreflightError):
+            state["error_reason"], state["http_status"] = exc.reason, exc.status
     finally:
         if state.get("create_attempted"):
             try:
