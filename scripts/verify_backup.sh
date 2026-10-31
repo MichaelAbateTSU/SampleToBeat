@@ -36,7 +36,7 @@ case "${BACKUP_FAULT:-}:$*" in
   invalid:*"choplab.metadata backup"*) printf 'invalid json'; exit 0 ;;
   archive:*"--entrypoint tar"*) printf 'partial archive'; exit 1 ;;
   invalid-archive:*"--entrypoint tar"*) printf 'invalid archive'; exit 0 ;;
-  recovery:*"start --wait"*) exit 1 ;;
+  recovery:*"start app"*) exit 1 ;;
   pause:*"--entrypoint tar"*)
     touch "$BACKUP_TEST_DIR/archiving"
     for i in {1..60}; do
@@ -53,7 +53,8 @@ run_backup() { PATH="$test_dir/bin:$PATH" bash "$release/backup.sh"; }
 "${compose[@]}" stop app
 "${compose[@]}" run -T --rm --no-deps -v "$PWD/scripts/verify_backup.py:/verify_backup.py:ro" \
   app python /verify_backup.py seed
-"${compose[@]}" start --wait --wait-timeout 180 app
+"${compose[@]}" up -d --no-deps --wait --wait-timeout 180 app
+app=$("${compose[@]}" ps --all --quiet app)
 before=$(complete_count)
 run_backup > "$test_dir/success.log" 2>&1
 running true
@@ -74,7 +75,7 @@ for fault in metadata invalid archive invalid-archive recovery; do
   if [[ "$fault" == recovery ]]; then
     running false
     grep -q 'app recovery failed' "$test_dir/$fault.log"
-    "${compose[@]}" start --wait --wait-timeout 180 app
+    "${compose[@]}" up -d --no-deps --wait --wait-timeout 180 app
   else
     running true
   fi
@@ -130,7 +131,7 @@ if [[ "$mode" == postgres ]]; then
 fi
 "${compose[@]}" run -T --rm --no-deps -v "$PWD/scripts/verify_backup.py:/verify_backup.py:ro" \
   app python /verify_backup.py cleanup
-"${compose[@]}" start --wait --wait-timeout 180 app
+"${compose[@]}" up -d --no-deps --wait --wait-timeout 180 app
 running true
 docker volume rm "$restore_volume" > /dev/null
 echo "Real $mode backup/paired restore, export/JSON/archive/recovery failures, stopped-state and concurrent writer checks passed."

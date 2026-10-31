@@ -24,11 +24,22 @@ fi
 was_running=$(docker inspect --format '{{.State.Running}}' "$container")
 pending=$(mktemp -d "$root/backups/.pending-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
 completed="${pending/\/.pending-/\/backup-}"
+resume() {
+  "${compose[@]}" start app || return 1
+  local state
+  for ((attempt=0; attempt<90; attempt++)); do
+    state=$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container") || return 1
+    if [[ "$state" == "true healthy" ]]; then return 0; fi
+    if [[ "$state" != "true "* || "$state" == "true unhealthy" ]]; then return 1; fi
+    sleep 2
+  done
+  return 1
+}
 recover() {
   local status=$?
   trap - EXIT
   if [[ "$was_running" == true ]]; then
-    if ! "${compose[@]}" start --wait --wait-timeout 180 app; then
+    if ! resume; then
       echo "Backup failed: app recovery failed; inspect the service before using the studio." >&2
       status=1
     fi
