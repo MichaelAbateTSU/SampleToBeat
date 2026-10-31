@@ -177,6 +177,15 @@ def test_tls_and_private_configuration(adapter, endpoint):
     assert "synthetic-secret" not in repr(adapter.settings)
 
 
+def test_explicit_private_ca_requires_existing_file(adapter, tmp_path):
+    with pytest.raises(ValueError, match="CA bundle"):
+        replace(adapter.settings, ca_bundle=str(tmp_path / "missing.crt"))
+    cert = tmp_path / "private-ca.crt"
+    cert.write_text("synthetic configuration fixture")
+    settings = replace(adapter.settings, ca_bundle=str(cert))
+    assert settings.ca_bundle == str(cert)
+
+
 def test_real_sdk_configuration_and_streaming_read(tmp_path):
     settings = S3Settings("https://example.invalid", "private-audio", "us-east-2", "fake", "fake")
     adapter = S3ByteStorage(settings, tmp_path)

@@ -104,6 +104,7 @@ class S3Settings:
     prefix: str = "choplab"
     max_bytes: int = 1024 * MIB
     min_free_bytes: int = 0
+    ca_bundle: str | None = None
 
     def __post_init__(self):
         url = urlsplit(self.endpoint)
@@ -116,6 +117,8 @@ class S3Settings:
         _safe_name(self.prefix)
         if len(self.prefix) > 800 or not 0 < self.max_bytes <= MAX_OBJECT_BYTES or self.min_free_bytes < 0:
             raise ValueError("Invalid storage limits")
+        if self.ca_bundle is not None and not Path(self.ca_bundle).is_file():
+            raise ValueError("Storage CA bundle must be an existing certificate file")
 
 
 class S3ByteStorage:
@@ -137,7 +140,7 @@ class S3ByteStorage:
         self.client = boto3.client(
             "s3", endpoint_url=settings.endpoint, region_name=settings.region,
             aws_access_key_id=settings.access_key, aws_secret_access_key=settings.secret_key,
-            verify=True, config=Config(
+            verify=settings.ca_bundle or True, config=Config(
                 signature_version="s3v4", s3={"addressing_style": "path"},
                 connect_timeout=10, read_timeout=60,
                 retries={"mode": "standard", "total_max_attempts": 3},
