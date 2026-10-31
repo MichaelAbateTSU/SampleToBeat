@@ -226,7 +226,7 @@ with jobs.runtime():
     store.put('source',{'id':'newer','analysis_status':'analyzed','analysis':{'bpm':101},'separation_status':'done'})
     store.put('export',{'id':'saved','status':'done','note':'completed history'})
     for kind,params in [('analyze',{'source_id':'source'}),('separate',{'source_id':'source','model_id':'builtin-hpss'}),('export',{'export_id':'export','project_id':'p','request':{}})]:
-        store.put('job',{'id':kind,'job_type':kind,'status':'running','owner_volume':'durable','params':params})
+        store.put('job',{'id':'job-'+kind,'job_type':kind,'status':'running','owner_volume':'durable','params':params})
     Path(os.environ['SIGNAL']).write_text('ready')
     while True: time.sleep(.1)
 """
@@ -242,8 +242,8 @@ with jobs.runtime():
         with TestClient(api.app) as client:
             assert client.get("/api/system/recovery").json()["ok"]
             for id in ("analyze", "separate", "export"):
-                assert raw("job", id)["status"] == "interrupted"
-                assert "retry" in raw("job", id)["error_message"].lower()
+                assert raw("job", "job-" + id)["status"] == "interrupted"
+                assert "retry" in raw("job", "job-" + id)["error_message"].lower()
             assert raw("source", "source")["analysis_status"] == "interrupted"
             assert raw("source", "source")["separation_status"] == "interrupted"
             assert raw("export", "export")["status"] == "interrupted"
@@ -303,10 +303,15 @@ root = Path(os.environ['CHOPLAB_DATA']); root.mkdir(exist_ok=True)
 signal = Path(os.environ['SIGNAL_DIR'])
 durable.configure()
 original_delete = S3ByteStorage.delete
+original_publish = S3ByteStorage.publish
 def delayed_delete(self, ref):
     (signal/'delete-ready').write_text(ref.key)
     while not (signal/'release').exists(): time.sleep(.02)
     original_delete(self, ref)
+def delayed_publish(self, relative):
+    (signal/'upload-ready').write_text('reserved before upload')
+    while not (signal/'release').exists(): time.sleep(.02)
+    return original_publish(self, relative)
 try:
     with jobs.runtime():
         path = root/'asset.wav'; path.write_bytes(b'identical-audio-bytes')
@@ -315,6 +320,9 @@ try:
             store.delete('sound','old')
             S3ByteStorage.delete = delayed_delete
             durable.reconcile()
+        elif os.environ['ACTION'] == 'upload':
+            S3ByteStorage.publish = delayed_publish
+            store.put('sound', {'id':'old-upload','sample_path':str(path)})
         else:
             (signal/'write-ready').write_text('ready')
             while not (signal/'release').exists(): time.sleep(.02)
@@ -332,7 +340,7 @@ def wait_file(path, process):
     assert path.exists(), "Worker never reached the required race boundary"
 
 
-@pytest.mark.parametrize("action", ["write", "delete"])
+@pytest.mark.parametrize("action", ["write", "delete", "upload"])
 def test_expired_worker_is_fenced_and_delayed_delete_cannot_remove_successor(remote, monkeypatch, action):
     root, _, _ = remote
     signal = root.parent / "signals"
@@ -354,8 +362,12 @@ def test_expired_worker_is_fenced_and_delayed_delete_cannot_remove_successor(rem
             assert durable.materialize(next(iter(new["_assets"].values()))).read_bytes() == b"identical-audio-bytes"
             if action == "write":
                 assert "note" not in store.get("sound", "old")
-            else:
+            elif action == "delete":
                 assert store.get("sound", "old") is None
+            else:
+                assert store.get("sound", "old-upload") is None
+                durable.reconcile()
+                assert durable.materialize(next(iter(new["_assets"].values()))).read_bytes() == b"identical-audio-bytes"
     finally:
         if worker.poll() is None:
             worker.kill()
@@ -442,7 +454,7 @@ def test_studio_audio_workflow_survives_replacement_with_custom_sounds(remote, m
     monkeypatch.setattr(api, "MIN_FREE", 0)
     monkeypatch.setattr(audio_io, "MAX_SECONDS", 300)
     with TestClient(api.app) as client:
-        project = client.post("/api/projects", json={"name": "durable-audio"}).json()["id"]
+        project = client.post("/api/projects", json={"name": "/durable-audio"}).json()["id"]
         imported = client.post(f"/api/projects/{project}/demo").json()
         job = jobs.wait(imported["job"]["id"], timeout=300)
         assert job["status"] == "completed", job.get("error_message")
@@ -475,6 +487,13 @@ def test_studio_audio_workflow_survives_replacement_with_custom_sounds(remote, m
         finished = jobs.wait(exported["job"]["id"], timeout=300)
         assert finished["status"] == "completed", finished.get("error_message")
         export = exported["export_id"]
+        export_doc = store.get("export", export)
+        project_file = next(item for item in export_doc["files"] if item["name"].endswith(".json"))
+        portable = json.loads(Path(project_file["path"]).read_text())
+        assert portable["project"]["name"] == "/durable-audio"
+        assert str(root) not in json.dumps(portable)
+        assert portable["durable_assets"]
+        assert portable["sources"][0]["internal_audio_path"].startswith("asset-path:")
         original_audio = client.get(f"/api/sources/{source}/audio").content
         original_mix = client.get(f"/api/exports/{export}/download").content
         analysis = client.get(f"/api/sources/{source}/analysis").json()

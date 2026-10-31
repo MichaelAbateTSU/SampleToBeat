@@ -145,13 +145,15 @@ def migrate_local():
                 store.put("kit", {"id": f"kit-{kit}-{inst}", "audio_path": str(path)})
 
 
-def portable(doc):
+def portable(doc, field=""):
     """Serialize exported project metadata without a host-specific cache root."""
     if isinstance(doc, dict):
-        return {k: portable(v) for k, v in doc.items()}
+        return {k: {name: portable(path, "stems-value") for name, path in v.items()}
+                if k == "stems" and isinstance(v, dict) else portable(v, k)
+                for k, v in doc.items()}
     if isinstance(doc, list):
-        return [portable(v) for v in doc]
-    if isinstance(doc, str) and Path(doc).is_absolute():
+        return [portable(v, field) for v in doc]
+    if isinstance(doc, str) and (field in _PATH_FIELDS or field == "stems-value") and Path(doc).is_absolute():
         return "asset-path:" + _relative(doc)
     return doc
 
@@ -263,11 +265,7 @@ def _runtime(*, on_acquired=None):
         while not _stop.wait(5):
             try:
                 if acquire():
-                    try:
-                        activate()
-                    except (StorageError, store.StoreUnavailable) as error:
-                        _runtime_error = f"Storage initialization/reconciliation failed: {error} Processing is read-only; resolve the error and restart this instance."
-                        core.log.error("%s", _runtime_error)
+                    activate()
                     return
             except (StorageError, store.StoreUnavailable) as error:
                 core.log.error("Replacement ownership/reconciliation failed: %s", error)
@@ -277,7 +275,11 @@ def _runtime(*, on_acquired=None):
     supervisor = None
     try:
         if acquire():
-            activate()
+            try:
+                activate()
+            except (StorageError, store.StoreUnavailable) as error:
+                _runtime_error = f"Storage initialization/reconciliation failed: {error} Processing is read-only; resolve the error and restart this instance."
+                core.log.error("%s", _runtime_error)
         else:
             core.log.warning("Waiting as health-ready/read-only replacement; current owner was not interrupted.")
             supervisor = threading.Thread(target=supervise, name="storage-takeover", daemon=True)
