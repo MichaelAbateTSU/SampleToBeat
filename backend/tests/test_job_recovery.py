@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 from contextlib import closing, contextmanager
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,6 +31,22 @@ def library(tmp_path, monkeypatch):
 def database(library, request, monkeypatch):
     store.initialize()
     if request.param == "postgres":
+        real_url = os.environ.get("CHOPLAB_TEST_POSTGRES_URL")
+        if real_url:
+            # Never accept a production target for these destructive fixture resets.
+            target = urlsplit(real_url)
+            assert os.environ.get("CHOPLAB_DISPOSABLE_POSTGRES_TEST") == "yes"
+            assert target.hostname == "postgres" and target.path == "/choplab_recovery_test"
+            assert target.username == "choplab_test" and target.password == "synthetic-ci-password"
+            monkeypatch.setattr(store, "_DATABASE_URL", real_url)
+            monkeypatch.setattr(store, "_initialized", False)
+            with store._postgres_conn() as con:
+                store._postgres_schema(con)
+                con.execute("DELETE FROM docs")
+                assert con.connection.pgconn.ssl_in_use
+                assert con.connection.info.get_parameters()["sslmode"] == "verify-full"
+            store.initialize()
+            return request.param
         # Exercise the PostgreSQL connection/ownership branch with the same fixed
         # SQL against a local DB; no cloud credentials or services in unit tests.
         @contextmanager
@@ -218,20 +235,38 @@ def test_foreign_postgres_jobs_are_untouched_with_actionable_api_and_offline_rec
         assert jobs.recovery_error is None
 
 
-def test_postgres_volume_binding_is_not_overwritten(database, library):
+def test_postgres_volume_binding_is_not_overwritten(database, library, monkeypatch):
     if database != "postgres":
         pytest.skip("PostgreSQL-only volume binding")
     original = identify_volume()
     with pytest.raises(store.StoreConfigurationError, match="another audio volume"):
         store.bind_job_volume("different-volume")
     assert store.get("runtime", "job_runtime_volume")["volume_id"] == original
-    # Simulate a fresh independent host volume connected to the same metadata.
-    (library / "jobs.lock").write_bytes(b"0" + b"1" * 32)
+    # A genuinely empty replacement volume must fail even with an empty queue.
+    assert store.list_("job") == []
+    fresh = library / "fresh-volume"
+    fresh.mkdir()
+    assert list(fresh.iterdir()) == []
+    monkeypatch.setattr(core, "DATA_DIR", fresh)
+    monkeypatch.setattr(store, "_initialized", False)
+    store.initialize()
     with jobs.runtime():
         assert "another audio volume" in jobs.recovery_error
+        assert store.list_("job") == []
+        assert store.get("runtime", "job_runtime_volume")["volume_id"] == original
     with pytest.raises(store.StoreConfigurationError, match="another audio volume"):
         with jobs.runtime(offline_recovery=True):
             pytest.fail("Offline confirmation must not bypass audio ownership")
+
+
+def test_real_postgres_full_runtime_uses_verified_tls(database):
+    if database != "postgres" or not os.environ.get("CHOPLAB_TEST_POSTGRES_URL"):
+        pytest.skip("Requires explicitly isolated CI PostgreSQL")
+    with jobs.runtime():
+        assert jobs.recovery_error is None
+        with store._postgres_conn() as con:
+            assert con.connection.pgconn.ssl_in_use
+            assert con.connection.info.get_parameters()["sslmode"] == "verify-full"
 
 
 @pytest.mark.parametrize("job_type", ["analyze", "separate", "export"])

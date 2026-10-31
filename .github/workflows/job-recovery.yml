@@ -1,0 +1,82 @@
+name: Isolated job recovery regressions
+on:
+  workflow_dispatch:
+  push:
+    branches: [michaelabatetsu-interrupted-job-recovery]
+    paths:
+      - ".github/workflows/job-recovery.yml"
+      - "backend/tests/test_job_recovery.py"
+      - "backend/tests/test_job_events.py"
+      - "scripts/verify_postgres.py"
+permissions:
+  contents: read
+jobs:
+  recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build production image and disposable test runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t choplab:recovery .
+          printf '%s\n' \
+            'FROM choplab:recovery' \
+            'USER root' \
+            'RUN /opt/venv/bin/python -m ensurepip && /opt/venv/bin/python -m pip install pytest httpx' \
+            'USER choplab' > "$RUNNER_TEMP/recovery.Dockerfile"
+          docker build -f "$RUNNER_TEMP/recovery.Dockerfile" -t choplab:recovery-test "$RUNNER_TEMP"
+      - name: Start isolated PostgreSQL with authenticated TLS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/recovery-certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=postgres' \
+            -addext 'subjectAltName=DNS:postgres' \
+            -keyout "$RUNNER_TEMP/recovery-certs/server.key" \
+            -out "$RUNNER_TEMP/recovery-certs/server.crt" 2>/dev/null
+          sudo chown 999:999 "$RUNNER_TEMP/recovery-certs/server.key"
+          sudo chmod 600 "$RUNNER_TEMP/recovery-certs/server.key"
+          docker network create choplab-recovery-test
+          docker run -d --name postgres --network choplab-recovery-test \
+            --tmpfs /var/lib/postgresql/data:uid=999,gid=999 \
+            -e POSTGRES_USER=choplab_test -e POSTGRES_DB=choplab_recovery_test \
+            -e POSTGRES_PASSWORD=synthetic-ci-password \
+            -v "$RUNNER_TEMP/recovery-certs:/certs:ro" \
+            postgres:17-bookworm postgres -c ssl=on \
+            -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
+          for i in {1..60}; do
+            if docker exec postgres pg_isready -U choplab_test -d choplab_recovery_test; then exit 0; fi
+            sleep 1
+          done
+          docker logs postgres
+          exit 1
+      - name: Run SQLite and real PostgreSQL recovery plus SSE responsiveness regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network choplab-recovery-test --entrypoint python \
+            --read-only --tmpfs /tmp:uid=10001,gid=10001 \
+            -e CHOPLAB_DISPOSABLE_POSTGRES_TEST=yes \
+            -e CHOPLAB_TEST_POSTGRES_URL='postgresql://choplab_test:synthetic-ci-password@postgres:5432/choplab_recovery_test?sslmode=verify-full' \
+            -e PGSSLROOTCERT=/certs/server.crt \
+            -v "$RUNNER_TEMP/recovery-certs/server.crt:/certs/server.crt:ro" \
+            -v "$PWD/backend/tests:/tests:ro" \
+            choplab:recovery-test -m pytest -q -p no:cacheprovider \
+            /tests/test_job_recovery.py /tests/test_job_events.py /tests/test_hosting.py /tests/test_metadata.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Verify browser observation and production frontend
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund && npm test && npm run build && npm run lint
+      - name: Clean up only disposable test resources
+        if: always()
+        shell: bash
+        run: |
+          docker logs postgres || true
+          docker rm -f postgres || true
+          docker network rm choplab-recovery-test || true
