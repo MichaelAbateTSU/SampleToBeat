@@ -295,7 +295,10 @@ def export(arr: dict, samples: dict, sources: dict, out_dir: Path, filename: str
     out_dir.mkdir(parents=True, exist_ok=True)
     files = []
     progress("writing", 0.6)
+    if not stems:
+        res["stems"].clear()
     main = write_audio(out_dir / f"{name}.{FORMATS[fmt][0]}", res["master"], fmt)
+    del res["master"]
     files.append({"kind": "mix", "name": main.name, "path": str(main), "check": verify(main)})
     if stems:
         progress("writing stems", 0.75)

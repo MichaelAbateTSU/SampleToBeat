@@ -23,11 +23,12 @@ COPY --from=backend /opt/venv /opt/venv
 COPY --from=backend /opt/requirements-installed.txt /opt/requirements-installed.txt
 COPY --from=frontend --chown=choplab:choplab /build/frontend/dist /opt/frontend
 ENV PATH="/opt/venv/bin:$PATH" CHOPLAB_DATA=/data CHOPLAB_FRONTEND=/opt/frontend \
-    PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 NUMBA_CACHE_DIR=/tmp/numba \
+    PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 NUMBA_CACHE_DIR=/tmp/numba NUMBA_CPU_NAME=generic \
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMBA_NUM_THREADS=1
 USER choplab
 WORKDIR /home/choplab
+RUN NUMBA_CACHE_DIR=/home/choplab/.cache/numba python -c "from choplab import demo, analysis; analysis.analyze(demo.make(bars=2))"
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD python -c "import urllib.request; from choplab.hosting import listening_port; urllib.request.urlopen(f'http://127.0.0.1:{listening_port()}/api/health', timeout=3)"
-CMD ["choplab"]
+CMD ["sh", "-c", "mkdir -p /tmp/numba && cp -R /home/choplab/.cache/numba/. /tmp/numba/ && exec choplab"]
