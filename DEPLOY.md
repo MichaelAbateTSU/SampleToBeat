@@ -4,7 +4,8 @@
 instead of the initially investigated VM host.
 The protected container now supports Neon-compatible PostgreSQL metadata, but Neon does not host the Python
 app or frontend. The dedicated Free Neon project and private audio bucket have been provisioned, but their production
-credentials are not wired to an app host. Render sign-in and suitable compute remain unresolved.
+credentials are not wired to an app host. Final Render configuration, suitable compute and integrated
+durability validation remain unresolved.
 A temporary synthetic test database is not a deployed studio or permanent production database.
 
 ## What Neon can host
@@ -41,9 +42,10 @@ container, avoiding cross-origin auth, SSE, download and audio-range complicatio
 
 * [Render free](https://render.com/docs/free) is the selected application host, but its
   [0.1 CPU / 512 MB](https://render.com/docs/compute-plans) limit, sleep and ephemeral disk remain
-  hard blockers: the baseline OOM-killed short generation and five-minute import. Targeted memory reductions
-  now pass the measured short full workflows, but five-minute import still OOM-kills and short MP3 reaches
-  the cap. It is not a production-ready deployment for the full supported studio.
+  hard blockers: the baseline OOM-killed short generation and five-minute import. Subsequent bounded DSP
+  and lifetime changes pass measured five-minute workflows, but their lifetime peaks still reach 512 MiB.
+  Repeated workflows must remain at or below 448 MiB, including the configured durable runtime, before
+  treating the compute gate as passed. It is not a production-ready deployment for the full supported studio.
 * [Hugging Face Spaces](https://huggingface.co/docs/hub/spaces-overview) requires a paid plan to create a
   Docker Space; CPU Basic's zero hourly price does not make a new Docker Space $0. Its default storage is
   ephemeral and unused compute sleeps.
@@ -115,6 +117,63 @@ an ephemeral disk or call it durable because the metadata uses Neon:
   inputs were not tested. No full input parity, live deployment, or provider persistence is established.
   Default longer/multiple-variation generation, alternate effects and concurrent requests remain untested
   at these limits. A green measurement workflow records failures as evidence, not production readiness.
+* Expanded bounded DSP work subsequently passed two complete 300s-source workflows at `1725fa0`, but
+  HPSS/export reached 512 MiB and final Docker health was unhealthy with repeated five-second subprocess
+  timeouts. Those results did not establish either headroom or satisfactory container liveness.
+  At `b758ed2`, [repeated capped workflows](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41239040577)
+  passed import, HPSS, eight-bar generation, HQ two-bar preview, WAV24 and MP3, including downloads.
+  Two 16s workflows had lifetime peaks of 360.83/354.73 MiB; two 300s imports reached 457.46/457.48 MiB,
+  and their later workflows still reached 512 MiB. The 300s headroom gate therefore remained failed.
+  Startup was about 21-23 seconds, 16s import about 21 seconds instead of the earlier 287 seconds,
+  300s import about 109 seconds, and 300s HPSS about 131-136 seconds at 0.1 CPU.
+  Native curl health checks remained healthy, and all direct external HTTP probes completed within five
+  seconds (maximum observed 300s import response 1.20164 seconds). These probes reached an exposed local
+  Docker endpoint, **not Render's edge**; replacing a heavy Python health subprocess does not alone prove
+  HTTP responsiveness. [Render HTTP health checks](https://render.com/docs/health-checks) also require
+  a 2xx/3xx response within five seconds.
+  Later code releases unused allocator arenas, bounds CQT projection, aligns the original native FFT batch
+  boundaries/layout, and flushes/releases audio page cache during streaming HPSS rather than only at its end.
+  At `df589bd`, [native x64/ARM compatibility](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41240688462)
+  passed unchanged exact-array assertions; earlier native one-ULP discrepancies were not hidden by looser
+  tolerances. [Repeated conservative cold-code-cache measurements](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41240688346)
+  completed all four workflows, but lifetime peaks remained 511.97-512 MiB and all cases recorded memory
+  pressure events, without an OOM. Cold mode releases clean scientific code cache before each measured
+  container because build/input-maker activity can otherwise charge shared mapped pages outside its cgroup.
+  Charged file cache was substantial: about 185-191 MiB during short exports; their sampled anonymous
+  maxima were about 311-317 MiB. The 300s imports' sampled anonymous maxima were 394.5/441.6 MiB;
+  total-memory peak samples included 155.0/134.9 MiB file cache. File charge can be reclaimable and is not
+  the same as anonymous memory or unique RSS, but reaching 512 MiB still fails the 448 MiB headroom gate.
+  A lifetime peak carries earlier operation peaks forward; a later row's high-water is not necessarily
+  that operation's own peak. All sampled direct HTTP checks passed, with maximum 1.295 seconds; Docker
+  health was healthy during audio work. The 300s imports took 102.6/104.8 seconds and HPSS 138.7/139.6 seconds.
+  Observed import/HPSS CPU work was approximately 10.2-10.4/13.8-13.9 CPU seconds respectively, explaining
+  much of the remaining wall time at 0.1 CPU rather than cold compilation alone.
+  At `0541653`, further changes remove redundant float32 resampling copies, calculate exact peaks without
+  full absolute-value buffers, retain owned native output views, and release unused per-track arenas.
+  The local suite passed 185 tests with one platform skip, and
+  [native x64/ARM parity and container checks passed](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41242404181).
+  [Repeated cold capped measurements](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41242403566)
+  are pending. No headroom improvement is claimed before those measurements.
+  All these measurements use local metadata/audio, **not configured PostgreSQL/S3**, and exclude the
+  durable SDK, lease activity and storage transfers. They cannot establish combined-runtime readiness.
+* Original input compatibility remains unverified. Hosted defaults are still 300 seconds / 100 MiB;
+  local defaults remain 1,200 seconds / 1,024 MiB. Independent test-only overrides accepted a valid
+  1,200s stereo 48 kHz PCM16 input at `05eda9d`, but
+  [import OOM-killed after 14.217 seconds](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41240082067/artifacts/13056863220)
+  at 512 MiB (exit 137). A [newer diagnostic at `ece9072`](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41240643182/artifacts/13057531302)
+  OOM-killed after 8.215 seconds in the decoding label, which includes probe/decode/preprocessing.
+  Upload file cache peaked at 378 MiB but fell to 0.05 MiB while anonymous memory climbed to 508.90 MiB:
+  unreclaimed upload cache alone was not the terminal pressure. This does not pinpoint a particular
+  allocation or measure newer code. Downstream stages did not run in either diagnostic, and neither
+  establishes 1,024 MiB upload coverage. Do not raise hosted limits, weaken exact-parity assertions or
+  claim full local input parity; the complete original-limit durable workflow is still a separate gate.
+  A [pinned `0541653` retest](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41242656402/artifacts/13057618500)
+  likewise OOM-killed after 8.514 seconds, with terminal sampled anonymous memory 509.19 MiB and file cache
+  0.04 MiB; later stages were skipped. Static sizing identifies a representation blocker independent of
+  stack attribution: the whole stereo float32 decode alone occupies 439.45 MiB, and the subsequent
+  full 48 kHz mono mean adds 219.73 MiB before resampling/runtime overhead. Compressed decode also retains
+  full captured PCM plus a copy. Original-limit support requires a safely bounded representation through
+  decode, analysis and other decode/reanalysis callers, not only chunked peak calculation.
 * Free web services lose uploaded/generated files on every restart, redeploy and 15-minute idle spin-down.
   They cannot attach persistent disks, run one-off jobs or use dashboard/SSH shells. The full app currently
   needs `/data` files and has no Neon Object Storage integration; an empty bucket is not automatic persistence.
@@ -144,6 +203,46 @@ Without Render account access, that boundary and a live studio cannot be verifie
 authorized/ranged downloads, cache loss, job recovery and realistic audio within 512 MB must also pass
 before claiming end-to-end Render Free support. Paid resources or silent feature reductions are not a
 solution to these gates.
+
+### Independent platform diagnostics, not final studio validation
+
+Disposable, data-free reference probes confirmed that Render redirected HTTP to HTTPS, presented peer
+`127.0.0.1`, and overwrote `X-Forwarded-Proto` to `https` even for spoofed external values. It preserved
+client-supplied `X-Forwarded-Host` and `Forwarded`, and spoofed `X-Forwarded-For` entries remained on the
+left of a platform-extended chain. Do not trust forwarded host or the leftmost forwarded IP. This was not
+ChopLab/Uvicorn or its owner-auth flow; the final edge-to-application trust boundary still needs verification.
+
+A real Render reference secret mount had owner/group `root:1000` and mode `0640`. UID/GID 10001 was denied
+without supplementary groups and read a synthetic secret with supplementary GID 1000. The independently
+integrated secret-access fix `308a0dc` keeps UID/GID 10001 and adds that group; native image identity and
+permission checks passed. This does not replace final ChopLab startup validation against real mounted files.
+Render [stages secret files in the Docker build-context root](https://render.com/docs/docker-secrets);
+allowlisted `COPY` paths must remain, and final integration must exclude `owner_password_hash`,
+`database_url` and `storage_config.json` from the context.
+
+A disposable Render-to-Neon metadata-only test at `0ca3079` initially failed with `InsufficientPrivilege`:
+the non-owner role had `USAGE`, but needed `CREATE` on the app's `public` schema. Granting it only on the
+disposable branch allowed startup and synthetic writes/reads. Same-commit redeployment to a different
+Render instance preserved those metadata records, verified independently in Neon and then deleted.
+No audio assets, integrated fencing or object-storage recovery were tested; production grants were unchanged.
+The disposable services, database branch/roles and probe files were deleted.
+
+A separate synthetic Render HTTPS upload probe at `f55b963` received byte-exact 230,400,044-byte raw and
+multipart bodies and 1,073,742,002-byte multipart bodies using both chunked and explicit Content-Length
+requests. On this one Cloudflare IAD client path, uploads appeared buffered until the body finished;
+5-10 second pauses resumed, but a 20-second pause disconnected before the app observed the request.
+An app-level 413 arrived only after the sender transmitted a declared 1,258,291,201-byte over-cap body.
+This is provider-path evidence, not ChopLab upload, decode, quality or persistence validation, nor a
+guarantee for every client/edge. Preserve the original cap and account for buffering and upload timeouts.
+The probe hashed/discarded bodies; it did not exercise FastAPI multipart spooling, ephemeral-disk reserves
+or Neon quotas. The real app parses `UploadFile` before copying it to a `.part` file and checking the
+hosted 2,048 MiB free-space reserve, so acceptance must account for briefly overlapping local copies.
+
+Configure appropriate schema/object privileges for the actual database role rather than assuming every
+Neon role owns `public`. Console password reset also does not create missing application privileges or clear
+`NOLOGIN`: a passwordless SQL-created probe role returned HTTP 422 on reset, while a privately initialized
+password allowed reset and retained `NOLOGIN` and its least-privilege flags. Do not document reset of a
+passwordless SQL role as a sufficient provisioning step.
 
 ## Portable container preparation
 

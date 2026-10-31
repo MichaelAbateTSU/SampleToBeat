@@ -13,7 +13,7 @@ function Health() {
   if (!q.isError) return null;
   return (
     <div role="alert" className="flex items-center gap-2 bg-red-600/90 px-4 py-1.5 text-sm text-white">
-      <WifiOff className="size-4" /> Cannot reach the ChopLab backend. Start it with the start script, then this page reconnects automatically.
+      <WifiOff className="size-4" /> Cannot reach the ChopLab backend. It may be starting or temporarily unavailable. This page reconnects automatically.
     </div>
   );
 }
