@@ -108,6 +108,22 @@ jobs:
             -m pytest -q -p no:cacheprovider --basetemp=/working/audio-tests \
             /workspace/backend/storage_tests/test_durable.py -k studio_audio_workflow \
             | tee "$RUNNER_TEMP/durable-evidence/studio-tests.log"
+      - name: Verify two-phase protected HTTP harness with real disposable cache loss (uncapped)
+        run: |
+          set -euo pipefail
+          docker run --rm --network durable-acceptance --entrypoint python \
+            --read-only --tmpfs /tmp:uid=10001,gid=10001 \
+            -e CHOPLAB_DISPOSABLE_POSTGRES_TEST=yes -e CHOPLAB_FULL_DURABLE_AUDIO=yes \
+            -e CHOPLAB_TEST_POSTGRES_URL='postgresql://choplab_test:synthetic-ci-password@postgres:5432/choplab_recovery_test?sslmode=verify-full' \
+            -e CHOPLAB_TEST_S3_CA=/s3/public.crt -e PGSSLROOTCERT=/pg/server.crt \
+            -v "$RUNNER_TEMP/durable-pg/server.crt:/pg/server.crt:ro" \
+            -v "$RUNNER_TEMP/durable-s3/public.crt:/s3/public.crt:ro" \
+            -v "$PWD/backend:/workspace/backend:ro" -v "$PWD/scripts:/workspace/scripts:ro" \
+            -v durable-working:/working choplab:durable-test \
+            -m pytest -q -p no:cacheprovider --basetemp=/working/http-tests \
+            /workspace/backend/tests/test_durable_http_harness.py \
+            /workspace/backend/storage_tests/test_durable_http_live.py \
+            | tee "$RUNNER_TEMP/durable-evidence/http-harness-tests.log"
       - name: Preserve acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
