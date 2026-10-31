@@ -1,24 +1,26 @@
-import { useQuery } from "@tanstack/react-query";
 import { AudioWaveform, FolderOpen, Settings as SettingsIcon, WifiOff } from "lucide-react";
-import { api } from "./api/client";
+import { useHealth } from "./api/health";
+import { useCapabilities } from "./api/hooks";
 import { NowPlaying } from "./components/Audio";
-import { cx } from "./components/ui";
+import { cx, ErrorBanner } from "./components/ui";
 import HomePage from "./pages/Home";
 import ProjectPage from "./pages/Project";
 import SettingsPage from "./pages/Settings";
 import { navigate, useRoute } from "./router";
 
 function Health() {
-  const q = useQuery({ queryKey: ["health"], queryFn: api.health, refetchInterval: 10_000, retry: false });
+  const q = useHealth();
   if (!q.isError) return null;
   return (
     <div role="alert" className="flex items-center gap-2 bg-red-600/90 px-4 py-1.5 text-sm text-white">
-      <WifiOff className="size-4" /> Cannot reach the ChopLab backend. Start it with the start script, then this page reconnects automatically.
+      <WifiOff className="size-4" /> Cannot reach the ChopLab backend. It may be starting or temporarily unavailable.
+      {q.paused ? " Reconnection resumes when you return or interact with this page." : " This page reconnects automatically."}
     </div>
   );
 }
 
 export default function App() {
+  const caps = useCapabilities();
   const route = useRoute();
   const [top, id, tab] = route;
   let page;
@@ -28,6 +30,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       <Health />
+      {caps.data?.job_recovery_error && <ErrorBanner error={`Processing is disabled (read-only): ${caps.data.job_recovery_error}`} />}
       <header className="flex h-12 shrink-0 items-center gap-4 border-b border-ink-700 bg-ink-900 px-4">
         <button onClick={() => navigate("/")} className="flex items-center gap-2 font-semibold tracking-tight">
           <AudioWaveform className="size-5 text-accent" /> ChopLab <span className="text-accent">AI</span>
