@@ -1,6 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
 import { AudioWaveform, FolderOpen, Settings as SettingsIcon, WifiOff } from "lucide-react";
-import { api } from "./api/client";
+import { useHealth } from "./api/health";
 import { useCapabilities } from "./api/hooks";
 import { NowPlaying } from "./components/Audio";
 import { cx, ErrorBanner } from "./components/ui";
@@ -10,11 +9,15 @@ import SettingsPage from "./pages/Settings";
 import { navigate, useRoute } from "./router";
 
 function Health() {
-  const q = useQuery({ queryKey: ["health"], queryFn: api.health, refetchInterval: 10_000, retry: false });
-  if (!q.isError) return null;
+  const q = useHealth();
+  if (!q.isError && !q.observationError) return null;
   return (
     <div role="alert" className="flex items-center gap-2 bg-red-600/90 px-4 py-1.5 text-sm text-white">
-      <WifiOff className="size-4" /> Cannot reach the ChopLab backend. It may be starting or temporarily unavailable. This page reconnects automatically.
+      <WifiOff className="size-4" />
+      {q.isError && <>Cannot reach the ChopLab backend. It may be starting or temporarily unavailable.
+        {q.paused ? " Reconnection resumes when you return or interact with this page." : " This page reconnects automatically."}
+      </>}
+      {q.observationError}
     </div>
   );
 }
