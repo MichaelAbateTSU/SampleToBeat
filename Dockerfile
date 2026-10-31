@@ -10,7 +10,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv
 WORKDIR /build/backend
 COPY backend/pyproject.toml ./
 COPY backend/src ./src
-RUN uv venv /opt/venv && uv pip install --python /opt/venv/bin/python . \
+RUN uv venv /opt/venv && uv pip install --python /opt/venv/bin/python ".[postgres]" \
     && uv pip freeze --python /opt/venv/bin/python > /opt/requirements-installed.txt
 
 FROM python:3.12-slim-bookworm AS runtime

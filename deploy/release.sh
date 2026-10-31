@@ -5,6 +5,9 @@ release=$(cd "$(dirname "$0")" && pwd)
 image=${1:?Pass the loaded choplab image tag}
 export CHOPLAB_IMAGE="$image" CADDY_CONFIG="$release/Caddyfile"
 compose=(docker compose --project-name choplab --project-directory "$root" --env-file "$root/.env" -f "$release/compose.yaml")
+if [[ -s "$root/secrets/database_url" ]]; then
+  compose+=(-f "$release/compose.neon.yaml")
+fi
 test -s "$root/secrets/owner_password_hash"
 previous=$(cat "$root/current-image" 2>/dev/null || true)
 previous_release=$(cat "$root/current-release" 2>/dev/null || true)
@@ -15,8 +18,15 @@ if ! "${compose[@]}" up -d --wait --wait-timeout 180; then
   if [[ -n "$previous" && -n "$previous_release" ]]; then
     export CHOPLAB_IMAGE="$previous"
     export CADDY_CONFIG="$previous_release/Caddyfile"
-    docker compose --project-name choplab --project-directory "$root" --env-file "$root/.env" \
-      -f "$previous_release/compose.yaml" up -d --wait --wait-timeout 180
+    rollback=(docker compose --project-name choplab --project-directory "$root" --env-file "$root/.env" -f "$previous_release/compose.yaml")
+    if [[ -s "$root/secrets/database_url" ]]; then
+      if [[ ! -f "$previous_release/compose.neon.yaml" ]]; then
+        echo "Previous release lacks PostgreSQL support; refusing an unsafe SQLite rollback." >&2
+        exit 1
+      fi
+      rollback+=(-f "$previous_release/compose.neon.yaml")
+    fi
+    "${rollback[@]}" up -d --wait --wait-timeout 180
   fi
   exit 1
 fi

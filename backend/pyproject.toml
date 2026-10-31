@@ -21,6 +21,7 @@ dependencies = [
 choplab = "choplab.api:main"
 
 [project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2.0,<4"]
 separation = [
     "audio-separator[cpu]>=0.47",
     "audioread>=3.1.0",

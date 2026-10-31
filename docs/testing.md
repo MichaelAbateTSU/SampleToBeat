@@ -7,6 +7,12 @@ checks audio/download byte ranges and completed-job SSE. `.github/workflows/cont
 SPA, restart-persistence and TLS/Compose configuration checks. These checks do not provision a live Neon
 deployment; see [DEPLOY.md](../DEPLOY.md) for the remaining provider/account constraints.
 
+PostgreSQL container CI uses a disposable TLS database to verify metadata CRUD, timestamp precision,
+parameterized values, threaded job updates, restart recovery, explicit SQLite migration, safe store switching,
+snapshot restore, and the full studio audio workflow with PostgreSQL metadata. The same job runs natively
+on x86-64 and ARM64. Optional manual Neon checks require a dedicated disposable secret and synthetic data;
+they must never target an existing production database. Liveness probes do not query the database.
+
 All automated tests use synthetic audio (the generated demo song and in-test signals). No copyrighted audio
 is needed.
 

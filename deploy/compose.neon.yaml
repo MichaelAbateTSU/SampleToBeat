@@ -1,0 +1,10 @@
+# Opt in by creating the private secrets/database_url file and adding this override.
+services:
+  app:
+    environment:
+      CHOPLAB_DATABASE_URL_FILE: /run/secrets/database_url
+    secrets:
+      - database_url
+secrets:
+  database_url:
+    file: ./secrets/database_url

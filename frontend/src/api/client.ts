@@ -67,6 +67,7 @@ function upload<T>(url: string, file: File): Promise<T> {
 
 export const api = {
   health: () => get<{ ok: boolean; version: string; engine: string }>("/api/health"),
+  databaseReady: () => get<{ ok: boolean; metadata_store: "sqlite" | "postgres" }>("/api/system/database"),
   capabilities: () => get<Capabilities>("/api/system/capabilities"),
   models: () => get<ModelInfo[]>("/api/system/models"),
   clearCache: () => request<{ freed_mb: number }>("DELETE", "/api/system/cache"),

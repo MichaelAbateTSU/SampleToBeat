@@ -1,0 +1,27 @@
+# CI only: disposable TLS PostgreSQL, never a production database or published port.
+services:
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: choplab
+      POSTGRES_DB: choplab
+      POSTGRES_PASSWORD: container-test-database-password
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/certs/server.crt
+      - -c
+      - ssl_key_file=/certs/server.key
+    volumes:
+      - ${PG_TEST_CERT_DIR:?Set disposable CI certificate directory}:/certs:ro
+    tmpfs:
+      - /var/lib/postgresql/data:uid=999,gid=999
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U choplab -d choplab"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

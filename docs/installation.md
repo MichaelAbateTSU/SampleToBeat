@@ -100,6 +100,12 @@ Equivalent single command: `cd backend && uv run choplab`.
 | `CHOPLAB_MAX_UPLOAD_MB` | `1024` locally, `100` hosted | Per-file upload bound |
 | `CHOPLAB_MAX_AUDIO_SECONDS` | `1200` locally, `300` hosted | Decoded audio duration bound |
 | `CHOPLAB_MIN_FREE_MB` | `0` locally, `2048` hosted | Disk reserve checked during uploads |
+| `CHOPLAB_DATABASE_URL_FILE` | unset | Private optional PostgreSQL URL file; Docker Neon override uses a secret |
+| `CHOPLAB_DATABASE_URL` / `DATABASE_URL` | unset | Alternative server-only PostgreSQL URL; never a frontend variable |
+
+SQLite remains the default. For Neon-compatible metadata install `uv sync --extra postgres`, configure one
+private URL source, and follow the explicit existing-data migration and paired metadata/audio backup steps in
+[DEPLOY.md](../DEPLOY.md). Configured database failures do not fall back to SQLite. Audio remains on disk.
 
 For a production ARM64 container, native ffmpeg is installed because bundled binary availability varies
 by architecture. [DEPLOY.md](../DEPLOY.md) covers Neon compatibility, container/TLS preparation, backups and recovery.

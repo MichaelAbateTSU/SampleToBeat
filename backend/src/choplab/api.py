@@ -31,6 +31,7 @@ FRONTEND = Path(os.environ.get("CHOPLAB_FRONTEND", Path(__file__).resolve().pare
 
 @asynccontextmanager
 async def lifespan(app):
+    store.initialize()
     jobs.recover_interrupted()
     yield
 
@@ -40,6 +41,11 @@ app = FastAPI(title="ChopLab AI", version="0.1.0", lifespan=lifespan,
 app.add_middleware(OwnerAccess)
 if HOSTING:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(HOSTING.origin).hostname, "localhost", "127.0.0.1"])
+
+
+@app.exception_handler(store.StoreUnavailable)
+async def _database_unavailable(_, e):
+    return JSONResponse({"detail": str(e)}, 503, headers={"Retry-After": "10"})
 
 
 @app.exception_handler(jobs.Busy)
@@ -808,12 +814,19 @@ def health():
     return {"ok": True, "version": app.version, "engine": ENGINE_VERSION}
 
 
+@app.get("/api/system/database")
+def database_ready():
+    """Explicit owner-requested readiness check; health probes must not keep Neon awake."""
+    return store.check_ready()
+
+
 @app.get("/api/system/capabilities")
 def capabilities():
     """Also serves as UI configuration: genres, strategies, kits and default settings come from here."""
     free = shutil.disk_usage(DATA_DIR).free
     return {"ffmpeg": audio_io.ffmpeg_exe() is not None, "sample_rate": SR, "data_dir": str(DATA_DIR),
             "hosted": HOSTING is not None, "max_upload_mb": MAX_UPLOAD // (1 << 20),
+            "metadata_store": store.backend_name(),
             "max_audio_seconds": audio_io.MAX_SECONDS,
             "disk_free_gb": round(free / 1e9, 1), "schema_version": SCHEMA_VERSION,
             "genres": {k: {**v, "bpm": list(v["bpm"]), "swing": list(v["swing"])} for k, v in drums.GENRES.items()},

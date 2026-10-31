@@ -345,6 +345,7 @@ export interface GenreInfo {
 
 export interface Capabilities {
   hosted?: boolean;
+  metadata_store?: "sqlite" | "postgres";
   max_upload_mb?: number;
   max_audio_seconds?: number;
   ffmpeg: boolean;

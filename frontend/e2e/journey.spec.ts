@@ -97,4 +97,6 @@ test("settings page lists models and kits", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("nav-settings").click();
   await expect(page.getByTestId("model-builtin-hpss")).toBeVisible();
+  await page.getByRole("button", { name: "Check database" }).click();
+  await expect(page.getByText("Last check: available")).toBeVisible();
 });

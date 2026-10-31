@@ -76,5 +76,5 @@ volumes:
     name: choplab_caddy_config
 networks:
   private:
-    internal: true
+    # Unpublished backend, with outbound NAT for the encrypted Neon connection.
   public:

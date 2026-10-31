@@ -18,6 +18,7 @@ export default function SettingsPage() {
   const [freed, setFreed] = useState<number | null>(null);
 
   const clear = useMutation({ mutationFn: api.clearCache, onSuccess: (r) => setFreed(r.freed_mb) });
+  const database = useMutation({ mutationFn: api.databaseReady });
   const afterKitChange = () => {
     queryClient.invalidateQueries({ queryKey: keys.kits });
     engine.reloadKit();
@@ -39,12 +40,18 @@ export default function SettingsPage() {
             <Stat label="FFmpeg (MP3)" value={c.ffmpeg ? <Badge tone="good">available</Badge> : <Badge tone="warn">missing</Badge>} hint="Needed for MP3 import/export" />
             <Stat label="Free disk" value={`${c.disk_free_gb.toFixed(1)} GB`} />
             <Stat label="Data folder" value={<span className="break-all text-xs">{c.data_dir}</span>} />
+            <Stat label="Metadata" value={c.metadata_store === "postgres" ? "PostgreSQL" : "SQLite"} hint="Audio stays in the data folder" />
           </div>
         )}
         <div className="mt-4 flex items-center gap-3">
           <Button onClick={() => clear.mutate()} busy={clear.isPending}><Trash2 className="size-4" /> Clear render cache</Button>
           {freed !== null && <span className="text-sm text-ink-400">Freed {freed.toFixed(1)} MB</span>}
           <ErrorBanner error={clear.error} />
+        </div>
+        <div className="mt-3 flex items-center gap-3">
+          <Button onClick={() => database.mutate()} busy={database.isPending}>Check database</Button>
+          {database.data?.ok && <Badge tone="good">Last check: available</Badge>}
+          <ErrorBanner error={database.error} />
         </div>
       </Card>
 
