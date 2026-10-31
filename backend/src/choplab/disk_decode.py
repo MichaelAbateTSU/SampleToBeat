@@ -6,6 +6,7 @@ It does not change audio_io.decode or wire the import/analysis pipeline.
 from __future__ import annotations
 
 import math
+import mmap
 import os
 import re
 import subprocess
@@ -23,12 +24,19 @@ from .core import SR
 
 BLOCK_FRAMES = 65536
 READ_BYTES = 1 << 20
-RESAMPLE_WORK_BYTES = 128 << 20
 FILTER_WORK_BYTES = 128 << 20
 
 
 class _ReadError(Exception):
     pass
+
+
+def _flush_span(values: np.memmap, start: int, end: int) -> None:
+    offset = start * values.dtype.itemsize
+    size = (end - start) * values.dtype.itemsize
+    values._mmap.flush(offset, size)
+    if hasattr(values._mmap, "madvise"):
+        values._mmap.madvise(mmap.MADV_DONTNEED, offset, size)
 
 
 def _disk_fir(directory: Path, taps: int, cutoff: float) -> tuple[np.memmap, Path]:
@@ -46,6 +54,7 @@ def _disk_fir(directory: Path, taps: int, cutoff: float) -> tuple[np.memmap, Pat
                     position = np.arange(start, end, dtype=np.float64) - alpha
                     window = i0(5.0 * np.sqrt(1 - ((position / alpha) ** 2))) / i0(5.0)
                     values[start:end] = cutoff * np.sinc(cutoff * position) * window
+                    _flush_span(values, start, end)
                 values.flush()
                 # One contiguous reduction preserves NumPy's original pairwise
                 # sum tree; summing independent chunks changes coefficients.
@@ -53,6 +62,7 @@ def _disk_fir(directory: Path, taps: int, cutoff: float) -> tuple[np.memmap, Pat
                 for start in range(0, taps, BLOCK_FRAMES):
                     end = min(start + BLOCK_FRAMES, taps)
                     values[start:end] /= scale
+                    _flush_span(values, start, end)
                 values.flush()
                 coefficients = np.memmap(file, dtype=np.float32, mode="r+", shape=taps)
                 try:
@@ -60,6 +70,7 @@ def _disk_fir(directory: Path, taps: int, cutoff: float) -> tuple[np.memmap, Pat
                     for start in range(0, taps, BLOCK_FRAMES):
                         end = min(start + BLOCK_FRAMES, taps)
                         coefficients[start:end] = values[start:end].astype(np.float32)
+                        _flush_span(coefficients, start, end)
                     coefficients.flush()
                 finally:
                     coefficients._mmap.close()
