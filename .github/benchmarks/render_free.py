@@ -16,8 +16,11 @@ OUT = Path(sys.argv[1])
 OUT.mkdir(parents=True, exist_ok=True)
 APPROXIMATE_E2_MICRO = "--approximate-e2-micro" in sys.argv[2:]
 JOB_ENVELOPE = "--job-envelope" in sys.argv[2:]
-if APPROXIMATE_E2_MICRO and JOB_ENVELOPE:
+ORIGINAL_LIMIT = "--original-limit" in sys.argv[2:]
+if sum((APPROXIMATE_E2_MICRO, JOB_ENVELOPE, ORIGINAL_LIMIT)) > 1:
     raise ValueError("Choose only one resource experiment")
+if ORIGINAL_LIMIT:
+    REVISION = "05eda9d5f06b20453acbe2f5dedd0b238643fd09"
 CPU = 2 if JOB_ENVELOPE else 0.25 if APPROXIMATE_E2_MICRO else 0.1
 MEMORY = 2147483648 if JOB_ENVELOPE else 1073741824 if APPROXIMATE_E2_MICRO else 536870912
 AUTH = base64.b64encode(b"owner:workflow-test-password").decode()
@@ -27,6 +30,9 @@ RESULTS = {
     "environment": "GitHub Actions Ubuntu 24.04 Linux Docker; not a provider deployment",
     "approximate_e2_micro": APPROXIMATE_E2_MICRO,
     "job_envelope": JOB_ENVELOPE,
+    "original_limit": ORIGINAL_LIMIT,
+    "test_only_overrides": {"CHOPLAB_MAX_AUDIO_SECONDS": 1200, "CHOPLAB_MAX_UPLOAD_MB": 1024}
+    if ORIGINAL_LIMIT else {},
     "storage": "Disposable Docker volume; NOT proof of provider persistence",
     "cases": [],
 }
@@ -91,6 +97,11 @@ class Measurement:
         assert (self.group / "cpu.max").read_text().split() == [str(int(CPU * 100000)), "100000"]
         assert int((self.group / "memory.max").read_text()) == MEMORY
         assert int((self.group / "memory.swap.max").read_text()) == 0
+        self.case["verified_cgroup_limits"] = {
+            "cpu.max": (self.group / "cpu.max").read_text().strip(),
+            "memory.max": (self.group / "memory.max").read_text().strip(),
+            "memory.swap.max": (self.group / "memory.swap.max").read_text().strip(),
+        }
 
     def run(self, label, action, limit):
         row = {"operation": label, "timeout_seconds": limit}
@@ -153,8 +164,28 @@ def create_input(seconds):
         "y=np.tile(y,(int(np.ceil(n/len(y))),1))[:n]; "
         f"audio_io.write_wav(Path('/inputs/{seconds}.wav'),y,subtype='PCM_16')"
     )
+    if ORIGINAL_LIMIT:
+        code = """
+from choplab import demo
+import soundfile as sf
+from pathlib import Path
+y = demo.make(bars=6)
+n = 1200 * 48000
+path = Path('/inputs/1200.wav')
+with sf.SoundFile(path, mode='w', samplerate=48000, channels=2, subtype='PCM_16') as out:
+    while n:
+        block = y[:min(n, len(y))]
+        out.write(block)
+        n -= len(block)
+info = sf.info(path)
+assert info.frames == 1200 * 48000 and info.channels == 2
+assert info.samplerate == 48000 and info.subtype == 'PCM_16'
+print(info)
+"""
     command("docker", "run", "--rm", "--entrypoint", "python",
             "-v", f"{inputs}:/inputs", IMAGE, "-c", code)
+    if ORIGINAL_LIMIT:
+        assert (inputs / f"{seconds}.wav").stat().st_size < 1024 * (1 << 20)
     return inputs / f"{seconds}.wav"
 
 
@@ -174,6 +205,9 @@ def run_case(seconds):
                "--env", "CHOPLAB_PROXY_IPS=*", "--env", "CHOPLAB_PASSWORD_HASH_FILE=/run/secrets/hash",
                "-v", f"{OUT / 'hash'}:/run/secrets/hash:ro", "-v", f"{volume}:/data",
                "-p", "127.0.0.1:8765:8765", IMAGE]
+        if ORIGINAL_LIMIT:
+            run[-1:-1] = ["--env", "CHOPLAB_MAX_AUDIO_SECONDS=1200",
+                          "--env", "CHOPLAB_MAX_UPLOAD_MB=1024"]
         case["docker_run_argv"] = run
         command(*run)
         measurement.locate_group()
@@ -185,7 +219,8 @@ def run_case(seconds):
                 if api("GET", "/api/health", timeout=3)["ok"]:
                     assert b'<div id="root">' in request("GET", "/")
                     caps = api("GET", "/api/system/capabilities")
-                    assert caps["hosted"] and caps["ffmpeg"] and caps["max_audio_seconds"] == 300
+                    assert caps["hosted"] and caps["ffmpeg"]
+                    assert caps["max_audio_seconds"] == (1200 if ORIGINAL_LIMIT else 300)
                     case["capabilities"] = caps
                     return True
             except (OSError, RuntimeError) as error:
@@ -209,10 +244,13 @@ def run_case(seconds):
                                          content_type=f"multipart/form-data; boundary={boundary}",
                                          timeout=min(60, deadline - time.monotonic())))
             case["source_id"] = imported["source"]["id"]
+            case["import_job_id"] = imported["job"]["id"]
             return wait_job(imported["job"], deadline)
 
-        if not measurement.run("upload_decode_analysis_discovery", upload, 360):
+        if not measurement.run("upload_decode_analysis_discovery", upload, 600 if ORIGINAL_LIMIT else 360):
             case["skipped"] = "HPSS/generation/HQ/WAV/MP3: import failed, no usable analyzed source"
+            if state(name)["State"]["Running"] and case.get("import_job_id"):
+                case["import_job_last_state"] = api("GET", f"/api/jobs/{case['import_job_id']}")
             return False
 
         pid, sid = case["project_id"], case["source_id"]
@@ -242,7 +280,9 @@ def run_case(seconds):
         if not measurement.run("generate_one_eight_bar_variation", generate, 360):
             case["skipped"] = "HQ/WAV/MP3: generation failed"
             return False
-        if APPROXIMATE_E2_MICRO:
+        if ORIGINAL_LIMIT:
+            run_case(1200)
+        elif APPROXIMATE_E2_MICRO:
             variation = api("GET", f"/api/projects/{pid}/variations")[0]
             audio = request("GET", f"/api/variations/{variation['id']}/audio")
             assert audio.startswith(b"RIFF") and len(audio) > 100

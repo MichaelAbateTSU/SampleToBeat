@@ -1,0 +1,43 @@
+name: Disposable original-duration feasibility
+on:
+  push:
+    branches: [michaelabatetsu-render-free-feasibility]
+    paths:
+      - ".github/workflows/original-limit-feasibility.yml"
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build precisely pinned current hosting revision
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin 05eda9d5f06b20453acbe2f5dedd0b238643fd09
+          mkdir "$RUNNER_TEMP/pinned-source"
+          git archive 05eda9d5f06b20453acbe2f5dedd0b238643fd09 | tar -x -C "$RUNNER_TEMP/pinned-source"
+          docker build -t choplab:render-free "$RUNNER_TEMP/pinned-source"
+      - name: Measure original 1200-second input under Render Free resources
+        timeout-minutes: 30
+        run: |
+          python3 -m py_compile .github/benchmarks/render_free.py
+          sudo timeout --signal=TERM --kill-after=15s 1750s \
+            python3 -u .github/benchmarks/render_free.py \
+            "$RUNNER_TEMP/original-limit-results" --original-limit
+      - name: Make only benchmark evidence readable
+        if: always()
+        run: |
+          if test -d "$RUNNER_TEMP/original-limit-results"; then
+            sudo find "$RUNNER_TEMP/original-limit-results" -type f -exec chmod 644 {} +
+          fi
+      - name: Preserve workload outcomes even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: original-limit-evidence
+          path: |
+            ${{ runner.temp }}/original-limit-results/*.json
+            ${{ runner.temp }}/original-limit-results/*.log
+          retention-days: 7
