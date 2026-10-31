@@ -156,12 +156,21 @@ def write_mp3(path: Path, y: np.ndarray, sr: int = SR, bitrate: str = "320k") ->
         raise AudioError("MP3 export requires FFmpeg.")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp.mp3")
-    pcm = np.clip(y, -1, 1).astype(np.float32).tobytes()
-    r = subprocess.run([exe, "-v", "error", "-y", "-f", "f32le", "-ar", str(sr), "-ac", "2", "-i", "-",
-                        "-codec:a", "libmp3lame", "-b:a", bitrate, str(tmp)], input=pcm, capture_output=True)
-    if r.returncode != 0:
-        raise AudioError(f"MP3 encoding failed: {r.stderr.decode(errors='replace')[-300:]}")
-    os.replace(tmp, path)
+    # Preserve the exact float32 PCM sent to ffmpeg without a full clipped array + bytes copy.
+    fd, pcm = tempfile.mkstemp(suffix=".pcm", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            for start in range(0, len(y), 65536):
+                output.write(np.clip(y[start:start + 65536], -1, 1).astype(np.float32).tobytes())
+        r = subprocess.run([exe, "-v", "error", "-y", "-f", "f32le", "-ar", str(sr), "-ac", "2",
+                            "-i", pcm, "-codec:a", "libmp3lame", "-b:a", bitrate, str(tmp)],
+                           capture_output=True)
+        if r.returncode != 0:
+            raise AudioError(f"MP3 encoding failed: {r.stderr.decode(errors='replace')[-300:]}")
+        os.replace(tmp, path)
+    finally:
+        os.remove(pcm)
+        tmp.unlink(missing_ok=True)
     return path
 
 

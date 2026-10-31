@@ -27,7 +27,11 @@ jobs:
           source = source.replace('REVISION = "4d62d58a6ba64f2f8efe642777ba3c057fcc8e64"',
                                   f'REVISION = "{os.environ["GITHUB_SHA"]}"')
           source = source.replace('short_passed = run_case(16)\n        if not short_passed:\n            run_case(4)',
-                                  'run_case(4)\n        run_case(16)')
+                                  'run_case(16)')
+          source = source.replace('if result["status"] == "completed":',
+                                  'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "stage", "progress", "error")}\n        if result["status"] == "completed":')
+          source = source.replace('"duration_seconds": round(time.monotonic() - before, 3),',
+                                  '"last_job": RESULTS.get("last_job"),\n                "duration_seconds": round(time.monotonic() - before, 3),')
           path.write_text(source)
           PY
           python3 -m py_compile "$RUNNER_TEMP/render-memory.py"

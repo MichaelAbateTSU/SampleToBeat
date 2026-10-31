@@ -169,3 +169,30 @@ def test_streamed_beat_rms_matches_full_source_reduceat(tmp_path, monkeypatch):
         raise AssertionError("Internal beat RMS must not retain a full-source cache.")
     monkeypatch.setattr(transform, "source_audio", full_read)
     np.testing.assert_allclose(sampling._beat_rms((path,), beats), expected, atol=1e-14)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_mp3_uses_exact_bounded_pcm_and_cleans_partial_files(tmp_path, monkeypatch, fail):
+    from types import SimpleNamespace
+
+    y = sine(220, 2.1, amp=1.2)
+    expected = np.clip(y, -1, 1).astype(np.float32).tobytes()
+    original = y.copy()
+    monkeypatch.setattr(audio_io, "ffmpeg_exe", lambda: "synthetic-ffmpeg")
+    def encode(args, **kwargs):
+        assert "input" not in kwargs
+        pcm_path = Path(args[args.index("-i") + 1])
+        assert pcm_path.read_bytes() == expected
+        Path(args[-1]).write_bytes(b"synthetic mp3")
+        return SimpleNamespace(returncode=int(fail), stderr=b"synthetic encoding error")
+    from pathlib import Path
+    monkeypatch.setattr(audio_io.subprocess, "run", encode)
+    target = tmp_path / "out.mp3"
+    if fail:
+        with pytest.raises(audio_io.AudioError, match="encoding failed"):
+            audio_io.write_mp3(target, y)
+        assert not target.exists()
+    else:
+        assert audio_io.write_mp3(target, y).read_bytes() == b"synthetic mp3"
+    np.testing.assert_array_equal(y, original)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ([] if fail else ["out.mp3"])
