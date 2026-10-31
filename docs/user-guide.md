@@ -198,3 +198,13 @@ assumed to immediately reclaim quota. Render can suspend services with heavy out
 Cache restoration is bounded per transfer and by the configured disk reserve; an insufficient cache
 disk fails explicitly. Live Neon compatibility, full audio workload headroom at 512 MiB, and actual
 Render replacement behavior must be verified separately before production readiness is claimed.
+
+Metadata reads (including opening projects, listing stems/kits and viewing analysis) do not
+download audio into a cold cache. Playback and processing restore only their referenced input
+assets, verifying byte size and SHA-256 before exposing local files. Reopening metadata does not
+redownload originals or unused stems. A first byte-range playback still restores its entire
+selected immutable audio object before serving the range; it is not a remote partial-object
+stream. Cached assets are verified before reuse. Analysis needs decoded audio and features;
+sample discovery can legitimately read the mix and melodic stems, and generation/export can
+read every asset used by the arrangement. Those operations still incur their actual transfer
+costs and do not guarantee a provider egress allowance is sufficient.

@@ -425,9 +425,33 @@ def materialize(id: str) -> Path:
             raise StorageError(f"{error}. Check quota, private branch credentials, 503 SlowDown and local disk reserve; no incomplete audio was served.") from None
 
 
-def restore(doc: dict, *, hydrate: bool = True) -> dict:
+def ensure_path(value: str | Path, doc: dict | None = None) -> Path:
+    """Restore only the authoritative asset a consumer is about to read."""
+    path = Path(value)
+    if not enabled():
+        return path
+    from . import store
+    relative = _relative(str(path))
+    if doc is not None:
+        id = doc.get("_assets", {}).get(relative)
+        if not id:
+            raise StorageError("Required audio has no durable reference; no local fallback was used.")
+        with store._conn() as con:
+            if _asset(con, id)[0] != relative:
+                raise StorageError("Required audio path disagrees with its durable reference.")
+    else:
+        with store._conn() as con:
+            rows = con.execute("SELECT DISTINCT a.id FROM choplab_assets a "
+                               "JOIN choplab_asset_links l ON l.asset_id=a.id "
+                               "WHERE a.relative=? AND a.state='live'", (relative,)).fetchall()
+        if len(rows) != 1:
+            raise StorageError("Required audio reference is missing or ambiguous; no local fallback was used.")
+        id = rows[0][0]
+    return materialize(id)
+
+
+def restore(doc: dict, *, hydrate: bool = False) -> dict:
     assets = doc.get("_assets", {})
-    # Restore before exposing paths to existing DSP and authenticated FileResponse.
     if hydrate:
         for id in set(assets.values()):
             materialize(id)

@@ -92,7 +92,7 @@ def kit_path(kit: str, inst: str) -> Path:
     if durable.enabled():
         doc = store.get("kit", f"kit-{kit}-{inst}")
         if doc:
-            return Path(doc["audio_path"])
+            return durable.ensure_path(doc["audio_path"], doc)
         custom.unlink(missing_ok=True)
     return custom if custom.exists() else data_path("kits", kit, f"{inst}.wav")
 
