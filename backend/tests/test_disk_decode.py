@@ -194,9 +194,9 @@ def test_hidden_duration_and_write_failure_cleanup(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("rate,frames", [
-    (1, 1), (1, 19), (1, 20), (1, 21), (7, 241), (31, 1301),
-    (47999, 73), (47999, 959980), (47999, 959981),
-    (48001, 131079), (96001, 200003),
+    (1, 1), (1, 20), (1, 21), (1, 22), (1, 43), (7, 241), (31, 1303),
+    (47999, 73), (47999, 1007978), (47999, 1007979), (47999, 1007980),
+    (48001, 1008022), (96001, 2016022),
 ])
 def test_expanding_and_coprime_parity(tmp_path, rate, frames):
     source = tmp_path / "source.wav"
@@ -233,7 +233,7 @@ def test_channel_reads_bounded_before_stereo_conversion(tmp_path, monkeypatch, r
 
 def test_coprime_filter_designed_once(tmp_path, monkeypatch):
     source = tmp_path / "source.wav"
-    sf.write(source, np.zeros((959981, 2), np.float32), 47999, subtype="FLOAT")
+    sf.write(source, np.zeros((2015959, 2), np.float32), 47999, subtype="FLOAT")
     design = disk_decode.firwin
     calls = []
 
