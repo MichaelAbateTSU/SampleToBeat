@@ -1,0 +1,43 @@
+name: Disposable e2-micro approximation
+on:
+  push:
+    branches: [michaelabatetsu-render-free-feasibility]
+    paths:
+      - ".github/workflows/e2-micro-approximation.yml"
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build unchanged pinned application
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin 4d62d58a6ba64f2f8efe642777ba3c057fcc8e64
+          mkdir "$RUNNER_TEMP/pinned-source"
+          git archive 4d62d58a6ba64f2f8efe642777ba3c057fcc8e64 | tar -x -C "$RUNNER_TEMP/pinned-source"
+          docker build -t choplab:render-free "$RUNNER_TEMP/pinned-source"
+      - name: Focused synthetic 1 GiB and 0.25 CPU approximation
+        timeout-minutes: 22
+        run: |
+          python3 -m py_compile .github/benchmarks/render_free.py
+          sudo timeout --signal=TERM --kill-after=15s 1200s \
+            python3 -u .github/benchmarks/render_free.py \
+            "$RUNNER_TEMP/e2-micro-results" --approximate-e2-micro
+      - name: Make only benchmark evidence readable
+        if: always()
+        run: |
+          if test -d "$RUNNER_TEMP/e2-micro-results"; then
+            sudo find "$RUNNER_TEMP/e2-micro-results" -type f -exec chmod 644 {} +
+          fi
+      - name: Preserve measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2-micro-approximation
+          path: |
+            ${{ runner.temp }}/e2-micro-results/*.json
+            ${{ runner.temp }}/e2-micro-results/*.log
+          retention-days: 7

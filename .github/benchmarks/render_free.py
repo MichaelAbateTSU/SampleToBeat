@@ -14,12 +14,16 @@ IMAGE = "choplab:render-free"
 REVISION = "4d62d58a6ba64f2f8efe642777ba3c057fcc8e64"
 OUT = Path(sys.argv[1])
 OUT.mkdir(parents=True, exist_ok=True)
+APPROXIMATE_E2_MICRO = "--approximate-e2-micro" in sys.argv[2:]
+CPU = 0.25 if APPROXIMATE_E2_MICRO else 0.1
+MEMORY = 1073741824 if APPROXIMATE_E2_MICRO else 536870912
 AUTH = base64.b64encode(b"owner:workflow-test-password").decode()
 RESULTS = {
     "revision": REVISION,
-    "limits": {"cpu": 0.1, "memory_bytes": 536870912, "swap_bytes": 0},
-    "environment": "GitHub Actions Ubuntu 24.04 Linux Docker; not an actual Render deployment",
-    "storage": "Disposable Docker volume; NOT proof of persistence on Render Free",
+    "limits": {"cpu": CPU, "memory_bytes": MEMORY, "swap_bytes": 0},
+    "environment": "GitHub Actions Ubuntu 24.04 Linux Docker; not a provider deployment",
+    "approximate_e2_micro": APPROXIMATE_E2_MICRO,
+    "storage": "Disposable Docker volume; NOT proof of provider persistence",
     "cases": [],
 }
 
@@ -80,8 +84,8 @@ class Measurement:
         line = next(line for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines()
                     if line.startswith("0::"))
         self.group = Path("/sys/fs/cgroup") / line.split("::", 1)[1].lstrip("/")
-        assert (self.group / "cpu.max").read_text().split() == ["10000", "100000"]
-        assert int((self.group / "memory.max").read_text()) == 536870912
+        assert (self.group / "cpu.max").read_text().split() == [str(int(CPU * 100000)), "100000"]
+        assert int((self.group / "memory.max").read_text()) == MEMORY
         assert int((self.group / "memory.swap.max").read_text()) == 0
 
     def run(self, label, action, limit):
@@ -160,8 +164,8 @@ def run_case(seconds):
     measurement = Measurement(name, case)
 
     def startup(deadline):
-        run = ["docker", "run", "-d", "--name", name, "--cpus=0.1",
-               "--memory=512m", "--memory-swap=512m",
+        run = ["docker", "run", "-d", "--name", name, f"--cpus={CPU}",
+               f"--memory={MEMORY}", f"--memory-swap={MEMORY}",
                "--env", "CHOPLAB_MODE=hosted", "--env", "CHOPLAB_PUBLIC_URL=https://localhost",
                "--env", "CHOPLAB_PROXY_IPS=*", "--env", "CHOPLAB_PASSWORD_HASH_FILE=/run/secrets/hash",
                "-v", f"{OUT / 'hash'}:/run/secrets/hash:ro", "-v", f"{volume}:/data",
@@ -232,6 +236,13 @@ def run_case(seconds):
         if not measurement.run("generate_one_eight_bar_variation", generate, 360):
             case["skipped"] = "HQ/WAV/MP3: generation failed"
             return False
+        if APPROXIMATE_E2_MICRO:
+            variation = api("GET", f"/api/projects/{pid}/variations")[0]
+            audio = request("GET", f"/api/variations/{variation['id']}/audio")
+            assert audio.startswith(b"RIFF") and len(audio) > 100
+            case["generated_audio_bytes"] = len(audio)
+            case["skipped"] = "HQ/WAV/MP3 and maximum input: outside focused approximation check"
+            return all(row["outcome"] == "passed" for row in case["operations"])
         variation = api("GET", f"/api/projects/{pid}/variations")[0]
         api("POST", f"/api/variations/{variation['id']}/open-in-studio", {})
 
@@ -283,10 +294,14 @@ def main():
     (OUT / "hash").chmod(0o644)
     RESULTS["docker_version"] = command("docker", "version", "--format", "{{json .}}")
     save()
-    short_passed = run_case(16)
-    if not short_passed:
+    if APPROXIMATE_E2_MICRO:
         run_case(4)
-    run_case(300)
+        run_case(16)
+    else:
+        short_passed = run_case(16)
+        if not short_passed:
+            run_case(4)
+        run_case(300)
     print("MEASUREMENT COMPLETE: operation failures are evidence, not CI infrastructure failures.")
 
 
