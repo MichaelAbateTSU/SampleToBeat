@@ -134,7 +134,40 @@ def _mel_spectrogram(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
 
 def _onset_strength(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
     mel = _mel_spectrogram(mono, hop, **kwargs)
-    return librosa.onset.onset_strength(S=librosa.power_to_db(mel), sr=ASR, hop_length=hop)
+    _power_to_db(mel)
+    output = np.zeros(mel.shape[1], dtype=mel.dtype)
+    shift = 1 + 2048 // (2 * hop)
+    for start in range(0, max(0, mel.shape[1] - shift), 256):
+        end = min(start + 256, mel.shape[1] - shift)
+        novelty = mel[:, start + 1:end + 1] - mel[:, start:end]
+        np.maximum(novelty, 0, out=novelty)
+        output[start + shift:end + shift] = novelty.mean(axis=0)
+    del mel
+    release_unused()
+    return output
+
+
+def _power_to_db(mel: np.ndarray) -> None:
+    """Convert an owned nonnegative mel buffer with the original global 80 dB floor."""
+    flat = mel.reshape(-1)
+    for start in range(0, len(flat), 65536):
+        block = flat[start:start + 65536]
+        np.maximum(block, 1e-10, out=block)
+        np.log10(block, out=block)
+        block *= 10.0
+    np.maximum(mel, mel.max() - 80.0, out=mel)
+
+
+def _mfcc(mono: np.ndarray) -> np.ndarray:
+    mel = _mel_spectrogram(mono, HOP)
+    _power_to_db(mel)
+    output = np.empty((13, mel.shape[1]), dtype=mel.dtype)
+    for start in range(0, mel.shape[1], 256):
+        end = min(start + 256, mel.shape[1])
+        output[:, start:end] = librosa.feature.mfcc(S=mel[:, start:end], sr=ASR, hop_length=HOP, n_mfcc=13)
+    del mel
+    release_unused()
+    return output
 
 
 def _harmonic(mono: np.ndarray) -> np.ndarray:
@@ -146,13 +179,15 @@ def _harmonic(mono: np.ndarray) -> np.ndarray:
     return output
 
 
-def _rms(mono: np.ndarray) -> np.ndarray:
+def _rms(mono: np.ndarray, other: np.ndarray | None = None) -> np.ndarray:
     frames, hop, n_fft = 1 + len(mono) // HOP, HOP, 2048
     output = np.empty(frames, np.float32)
     for start in range(0, frames, 256):
         end = min(start + 256, frames)
         lo, hi = start * hop - n_fft // 2, (end - 1) * hop + n_fft // 2
         audio = mono[max(0, lo):min(len(mono), hi)]
+        if other is not None:
+            audio = audio - other[max(0, lo):min(len(mono), hi)]
         audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
         output[start:end] = librosa.feature.rms(y=audio, hop_length=hop, center=False)[0]
     return output
@@ -237,12 +272,11 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     beats = np.clip(librosa.time_to_frames(beat_times, sr=ASR, hop_length=HOP), 0, n_frames - 1)
 
     progress("structure_features", 0.25)
-    mfcc = librosa.feature.mfcc(S=librosa.power_to_db(_mel_spectrogram(mono, HOP)),
-                               sr=ASR, hop_length=HOP, n_mfcc=13)[:, :n_frames]
+    mfcc = _mfcc(mono)[:, :n_frames]
     rms = _rms(mono)[:n_frames]
     progress("key_harmonic", 0.25)
     harm = _harmonic(mono)
-    rms_p = _rms(mono - harm)[:n_frames]
+    rms_p = _rms(mono, harm)[:n_frames]
     del mono
     release_unused()
     progress("key_chroma", 0.25)

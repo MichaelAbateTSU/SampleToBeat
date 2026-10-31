@@ -93,6 +93,53 @@ def test_bounded_mfcc_preserves_global_db_floor():
     np.testing.assert_allclose(actual, expected, atol=2e-5, rtol=2e-6)
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_owned_mel_db_is_exact_across_blocks_and_quiet_sections(dtype):
+    import librosa
+
+    mel = np.random.default_rng(61).random((128, 2053)).astype(dtype)
+    mel[:, :1000] *= 1e-12
+    mel[:, -20:] *= 100
+    expected = librosa.power_to_db(mel)
+    analysis._power_to_db(mel)
+    np.testing.assert_array_equal(mel, expected)
+
+
+@pytest.mark.parametrize("hop", [analysis.HOP, analysis.BHOP])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_bounded_onset_matches_global_mel_novelty_exactly(hop, dtype):
+    import librosa
+
+    mono = np.random.default_rng(62).normal(0, 0.1, 275777).astype(dtype)
+    mono[:130000] *= 1e-6
+    mel = analysis._mel_spectrogram(mono, hop)
+    expected = librosa.onset.onset_strength(S=librosa.power_to_db(mel), sr=analysis.ASR, hop_length=hop)
+    np.testing.assert_array_equal(analysis._onset_strength(mono, hop), expected)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("length", [130561, 275777])
+def test_bounded_mfcc_matches_global_dct_exactly(dtype, length):
+    import librosa
+
+    mono = np.random.default_rng(63).normal(0, 0.1, length).astype(dtype)
+    mono[:length // 2] *= 1e-6
+    mel = analysis._mel_spectrogram(mono, analysis.HOP)
+    expected = librosa.feature.mfcc(S=librosa.power_to_db(mel), n_mfcc=13)
+    np.testing.assert_array_equal(analysis._mfcc(mono), expected)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("length", [137, 130561, 275777])
+def test_bounded_difference_rms_matches_full_difference_without_mutation(dtype, length):
+    mono = np.random.default_rng(64).normal(0, 0.1, length).astype(dtype)
+    other = np.random.default_rng(65).normal(0, 0.1, length).astype(dtype)
+    original, original_other = mono.copy(), other.copy()
+    np.testing.assert_array_equal(analysis._rms(mono, other), analysis._rms(mono - other))
+    np.testing.assert_array_equal(mono, original)
+    np.testing.assert_array_equal(other, original_other)
+
+
 def test_demo_tempo_key_and_downbeat(demo_analysis):
     doc, feats = demo_analysis
     assert doc["bpm"] == pytest.approx(92, abs=0.5)

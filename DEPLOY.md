@@ -271,8 +271,13 @@ authoritatively referenced asset with the existing checksum and fencing guards. 
 standalone five-asset instrumentation recorded zero GETs for cold metadata, then one whole 3 MiB
 source download for a selected 64-byte HTTP range; repeat playback used the verified local cache.
 A selected harmonic required its own whole 4 MiB download. This is not range-only object transfer.
-All final combined replacement/recovery, protected HTTP and native container checks must be rerun;
-standalone component CI is not combined-state proof, and exact capped full-runtime acceptance remains blocked.
+The final combined hydration runtime `345b442` passed hosted x64/ARM, secret permissions, recovery/SSE,
+[full durable integration and protected HTTP](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41245969662),
+and the TLS S3 boundary checks. Its small-fixture durable acceptance recorded 23 passes and one
+intentional full-DSP skip at 512 MiB/no swap/**1 CPU**, with a 309,714,944-byte lifetime peak and zero
+max/OOM events; separate uncapped full studio/cache destruction and 38 HTTP harness tests passed.
+This is combined-state functional proof, not Render's 0.1 CPU full-audio acceptance or a long-library
+quota test. Exact capped full-runtime acceptance remains blocked.
 A 1,200s stereo 48 kHz PCM16 original/internal/two-stem set still occupies roughly 1.6 GB, even though
 opening its metadata no longer transfers that set. Repeated small-fixture
 replacement success is not evidence of long-library cold-start, disk or 5 GB egress headroom.
