@@ -17,6 +17,7 @@ import wave
 
 import client
 import fixture
+import combined_fixture
 
 
 def budget():
@@ -36,6 +37,35 @@ def budget():
 
 
 class FixtureTests(unittest.TestCase):
+    def test_combined_exact_header_duration_and_small_reference(self):
+        info = combined_fixture.describe()
+        self.assertEqual(info["file_bytes"],1073741824)
+        self.assertEqual(info["duration_seconds"],1200)
+        self.assertEqual(info["pcm_bytes"],921600000)
+        self.assertEqual(info["padding_bytes"],152141772)
+        self.assertEqual(struct.unpack_from("<I",combined_fixture.header(),4)[0]+8,1073741824)
+        self.assertEqual(struct.unpack_from("<I",combined_fixture.header(),40)[0],152141772)
+        small = b"".join(combined_fixture.chunks(1001,12))
+        expected = b"".join(struct.pack("<ii",fixture.sample(i,0)*256,fixture.sample(i,1)*256)
+                            for i in range(1001))
+        with wave.open(io.BytesIO(small),"rb") as wav:
+            self.assertEqual(wav.getnframes(),1001)
+            self.assertEqual(wav.getsampwidth(),4)
+            self.assertEqual(wav.getnchannels(),2)
+            self.assertEqual(wav.readframes(1001),expected)
+        self.assertEqual(len(small),64+1001*8)
+        self.assertGreater(len(set(expected)),10)
+        for size in (-1,1,combined_fixture.PADDING+2):
+            with self.assertRaises(ValueError):
+                combined_fixture.header(padding=size)
+        plan = client.plan(combined_fixture)
+        self.assertEqual(plan["internal_float32_pcm_bytes"],460800000)
+        b = budget()
+        with self.assertRaises(ValueError):
+            client.validate_budget(b,b["origin"],b["final_source_sha"],fixture_module=combined_fixture)
+        b.update(data_available_bytes=5<<30,object_storage_available_bytes=2<<30,
+                 app_egress_available_bytes=2<<30)
+        client.validate_budget(b,b["origin"],b["final_source_sha"],fixture_module=combined_fixture)
     def test_exact_header_independent_riff_lengths(self):
         h = fixture.header(fixture.FRAMES)
         self.assertEqual(len(h), 64)

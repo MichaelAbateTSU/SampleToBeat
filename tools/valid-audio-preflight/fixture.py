@@ -64,13 +64,15 @@ def describe(frames: int = FRAMES) -> dict:
             "pcm_bytes": frames * ALIGN, "max_generator_chunk_bytes": BLOCK_FRAMES * ALIGN}
 
 
-def write(path: Path, frames: int):
+def write(path: Path, frames: int, *, iterator=None, description=None):
     """Exclusive output; only our partial file is removed on failed generation."""
     partial = path.with_name(path.name + ".part")
     if path.exists():
         raise FileExistsError(path)
-    expected = HEADER_BYTES + frames * ALIGN
-    header(frames)
+    info = describe(frames) if description is None else description
+    expected = info["file_bytes"]
+    if iterator is None:
+        header(frames)
     if shutil.disk_usage(path.parent).free < expected + (64 << 20):
         raise OSError("insufficient measured free space for offline fixture plus 64 MiB margin")
     digest, count = hashlib.sha256(), 0
@@ -79,7 +81,7 @@ def write(path: Path, frames: int):
     try:
         with partial.open("xb") as stream:
             created = True
-            for piece in chunks(frames):
+            for piece in (chunks if iterator is None else iterator)(frames):
                 stream.write(piece)
                 digest.update(piece)
                 count += len(piece)
@@ -97,7 +99,7 @@ def write(path: Path, frames: int):
             raise ValueError("fixture size differs from declared header; refusing publication")
         # Hard link provides exclusive destination publication without overwriting.
         os.link(partial, path)
-        return {**describe(frames), "actual_bytes": count, "sha256": digest.hexdigest()}
+        return {**info, "actual_bytes": count, "sha256": digest.hexdigest()}
     finally:
         if created:
             partial.unlink(missing_ok=True)

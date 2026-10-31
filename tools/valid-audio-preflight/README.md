@@ -1,5 +1,38 @@
 # Opt-in exact GiB valid-audio acceptance fixture
 
+## Combined duration/upload option
+
+`python combined_fixture.py` and `python client.py --fixture combined` are offline
+descriptions. `combined_fixture.py --hash --allow-gib-fixture` or
+`--write synthetic-combined.wav --allow-gib-fixture` explicitly generates the
+combined candidate. Execute the same gated client recipe with `--fixture combined`
+only after final-source comparison and measured budget approval.
+
+The combined WAV is stereo PCM32, 96 kHz, **115,200,000 frames / exactly 1,200 s**.
+Its 921,600,000 audio bytes plus a 152,141,772-byte even JUNK payload and 52
+structural bytes give exactly 1,073,741,824 bytes. Padding exercises upload size,
+**not audio-sample volume**. Non-silent signals use quarter-period channel phases,
+so mono summation is not canceled. File SHA-256:
+`2057063a6515a4111624b9e89678f8c4853867b7399086a0138dd52817f0c03b`.
+
+Both profiles use the same 178-byte multipart envelope and max 737,280-byte chunk.
+The four-channel option below remains available and default: it preserves
+four-channel PCM24 and approximately GiB sample-volume coverage; the combined
+option covers both exact limits but uses stereo PCM32 and less sample volume.
+Its internal output has 57,600,000 frames and 460,800,000 PCM bytes, larger than
+the four-channel option. It requires `max_audio_seconds=1200`,
+`data_available_bytes>=3749134336`, and storage/egress approval each
+`>=1534545920` (PCM lower bound plus 4096-byte allowance). Aggregate local
+availability still requires 5 GiB, plus measured additional analysis budgets.
+
+For Linux full validation, add `--fixture combined` to `verify_linux.py`.
+Both profiles are tested independently by the CI matrix. Combined output is
+measured with bounded libsndfile block writes of independently FFmpeg-decoded
+PCM; the small production `write_wav` confirms its header. This does not prove
+the large production ndarray writer or final decode/analysis is safe. Running one
+provider fixture avoids a second upload, but actual egress savings depend on the
+final application's objects/rehydration/retries; no quota saving is measured here.
+
 Test-only preparation, not an application change or a deployment. Default commands
 make no network requests. The full application/provider test requires the final
 integrated source SHA, an explicitly approved **fresh measured free-quota budget**,

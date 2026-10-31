@@ -38,19 +38,24 @@ class PreflightError(RuntimeError):
         self.reason, self.status = reason, status
 
 
-def plan():
-    return {**describe(), "multipart_body_bytes": BODY_BYTES,
-            "internal_stereo_48khz_frames": INTERNAL_FRAMES,
-            "internal_float32_pcm_bytes": INTERNAL_PCM_BYTES,
+def plan(fixture_module=None):
+    details = describe() if fixture_module is None else fixture_module.describe()
+    internal_frames = details["frames"] // 2
+    internal_pcm = internal_frames * 8
+    return {**details, "multipart_body_bytes": BODY_BYTES,
+            "internal_stereo_48khz_frames": internal_frames,
+            "internal_float32_pcm_bytes": internal_pcm,
             "input_ingress_lower_bound_bytes": BODY_BYTES,
-            "durable_object_storage_lower_bound_bytes": FILE_BYTES + INTERNAL_PCM_BYTES,
-            "durable_publish_egress_lower_bound_bytes": FILE_BYTES + INTERNAL_PCM_BYTES,
+            "durable_object_storage_lower_bound_bytes": FILE_BYTES + internal_pcm,
+            "durable_publish_egress_lower_bound_bytes": FILE_BYTES + internal_pcm,
             "approved_local_available_required_bytes": MIN_LOCAL_BYTES,
             "warning": "No integrated/provider success; job/analysis adds unknown storage and egress."}
 
 
-def validate_budget(budget, origin, final_sha, *, now=None, cleanup_only=False):
+def validate_budget(budget, origin, final_sha, *, now=None, cleanup_only=False, fixture_module=None):
     now = now or datetime.now(timezone.utc)
+    details = plan(fixture_module)
+    internal_pcm = details["internal_float32_pcm_bytes"]
     if not re.fullmatch(r"[0-9a-f]{40}", final_sha):
         raise ValueError("supply the exact final deployed source SHA")
     if budget.get("origin") != origin or budget.get("final_source_sha") != final_sha:
@@ -66,9 +71,9 @@ def validate_budget(budget, origin, final_sha, *, now=None, cleanup_only=False):
     requirements = (("max_http_requests", 10),) if cleanup_only else (
         ("input_ingress_bytes", BODY_BYTES), ("available_local_bytes", MIN_LOCAL_BYTES),
         ("tmp_available_bytes", FILE_BYTES + (8 << 20)),
-        ("data_available_bytes", RESERVE_BYTES + FILE_BYTES + INTERNAL_PCM_BYTES + (64 << 20)),
-        ("object_storage_available_bytes", MIN_OBJECT_BYTES),
-        ("app_egress_available_bytes", MIN_OBJECT_BYTES), ("max_http_requests", 260),
+        ("data_available_bytes", RESERVE_BYTES + FILE_BYTES + internal_pcm + (64 << 20)),
+        ("object_storage_available_bytes", FILE_BYTES + internal_pcm + 4096),
+        ("app_egress_available_bytes", FILE_BYTES + internal_pcm + 4096), ("max_http_requests", 260),
     )
     for key, minimum in requirements:
         value = budget.get(key)
@@ -78,7 +83,7 @@ def validate_budget(budget, origin, final_sha, *, now=None, cleanup_only=False):
         raise ValueError("measured quota evidence required")
     if not cleanup_only and budget.get("analysis_extra_budget_acknowledged") is not True:
         raise ValueError("quota evidence and additional analysis-budget acknowledgement required")
-    if not cleanup_only and (budget.get("max_upload_mb") != 1024 or budget.get("max_audio_seconds", 0) < FRAMES / RATE):
+    if not cleanup_only and (budget.get("max_upload_mb") != 1024 or budget.get("max_audio_seconds", 0) < details["duration_seconds"]):
         raise ValueError("final app upload/duration cap cannot accept fixture")
     return budget
 
@@ -110,10 +115,11 @@ def private_password(args):
 
 
 class Transport:
-    def __init__(self, origin, username, password, budget, *, allow_loopback=False):
+    def __init__(self, origin, username, password, budget, *, allow_loopback=False, fixture_module=None):
         self.origin, self.parts, self.budget = origin, urlsplit(origin), budget
         self.calls = 0
         self.password = password
+        self.fixture_module = fixture_module
         if self.parts.username or self.parts.password or self.parts.path not in ("", "/") or self.parts.query or self.parts.fragment:
             raise ValueError("origin only, no embedded credentials, path or query")
         if self.parts.scheme != "https" and not (
@@ -172,7 +178,7 @@ class Transport:
             conn.send(PREFIX)
             body_hash.update(PREFIX)
             sent += len(PREFIX)
-            for piece in chunks():
+            for piece in (chunks() if self.fixture_module is None else self.fixture_module.chunks()):
                 if sent - len(PREFIX) + len(piece) > file_bytes:
                     raise PreflightError("fixture_exceeds_declared_content_length")
                 conn.send(piece)
@@ -224,12 +230,13 @@ def cleanup_owned(transport, state):
             "object_cleanup": "not established by metadata 404; verify durable outbox/object inventory"}
 
 
-def execute(transport, state, persist, expected_digest, *, max_polls=120, sleep=time.sleep):
+def execute(transport, state, persist, expected_digest, *, max_polls=120, sleep=time.sleep, fixture_module=None):
     """Never retry writes; journal identities before upload and retain unknown jobs."""
+    details = plan(fixture_module)
     try:
         state["phase"] = "capabilities"
         capabilities = require(transport.request("GET", "/api/system/capabilities"), 200)
-        if capabilities.get("max_upload_mb") != 1024 or capabilities.get("max_audio_seconds", 0) < FRAMES / RATE:
+        if capabilities.get("max_upload_mb") != 1024 or capabilities.get("max_audio_seconds", 0) < details["duration_seconds"]:
             raise PreflightError("actual_app_caps_incompatible")
         # Coarse public capability value cannot replace measured filesystem budget.
         if capabilities.get("disk_free_gb", 0) * 1e9 < MIN_LOCAL_BYTES:
@@ -266,8 +273,8 @@ def execute(transport, state, persist, expected_digest, *, max_polls=120, sleep=
                     state["job_status"] == "completed"
                     and source.get("content_hash") == expected_digest
                     and source.get("metadata", {}).get("sample_rate") == RATE
-                    and source.get("metadata", {}).get("channels") == 4
-                    and abs(source.get("duration_seconds", 0) - FRAMES / RATE) < 0.01
+                    and source.get("metadata", {}).get("channels") == details["channels"]
+                    and abs(source.get("duration_seconds", 0) - details["duration_seconds"]) < 0.01
                 ) else "terminal_job_not_verified"
                 break
             sleep(15)
@@ -292,6 +299,7 @@ def execute(transport, state, persist, expected_digest, *, max_polls=120, sleep=
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--fixture", choices=("four-channel","combined"),default="four-channel")
     parser.add_argument("--cleanup-receipt", type=Path, help="explicitly retry only verified owned-project metadata cleanup")
     parser.add_argument("--confirm-unknown-upload-ended", action="store_true",
                         help="operator independently verified no request/job is still being created")
@@ -303,13 +311,17 @@ def main():
     parser.add_argument("--username", default="owner")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
+    fixture_module = None
+    if args.fixture == "combined":
+        import combined_fixture
+        fixture_module = combined_fixture
     if not args.execute:
-        print(json.dumps(plan(), indent=2))
+        print(json.dumps(plan(fixture_module), indent=2))
         return 0
     if not all((args.budget, args.origin, args.final_source_sha, args.out or args.cleanup_receipt)):
         parser.error("execution requires budget, final origin/source SHA and private receipt output")
     budget = validate_budget(json.loads(args.budget.read_text()), args.origin, args.final_source_sha,
-                             cleanup_only=bool(args.cleanup_receipt))
+                             cleanup_only=bool(args.cleanup_receipt),fixture_module=fixture_module)
     password = private_password(args)
     if not password:
         parser.error("private password source required")
@@ -333,9 +345,9 @@ def main():
     if args.out.exists():
         parser.error("receipt already exists; refusing to repeat an unknown prior upload")
     digest = hashlib.sha256()
-    for piece in chunks():
+    for piece in (chunks() if fixture_module is None else fixture_module.chunks()):
         digest.update(piece)
-    state = {"plan": plan(), "origin": args.origin, "final_source_sha": args.final_source_sha,
+    state = {"plan": plan(fixture_module), "origin": args.origin, "final_source_sha": args.final_source_sha,
              "expected_file_sha256": digest.hexdigest(),
              "project_name": "valid-gib-preflight-" + secrets.token_hex(16),
              "outcome": "not_started"}
@@ -357,8 +369,8 @@ def main():
                 partial.unlink(missing_ok=True)
     with args.out.open("x", encoding="utf-8") as receipt:
         receipt.write(json.dumps(state, indent=2))
-    transport = Transport(args.origin, args.username, password, budget)
-    execute(transport, state, persist, digest.hexdigest())
+    transport = Transport(args.origin, args.username, password, budget,fixture_module=fixture_module)
+    execute(transport, state, persist, digest.hexdigest(),fixture_module=fixture_module)
     print(json.dumps({"outcome": state["outcome"], "cleanup": state.get("cleanup")}, indent=2))
     return 0 if state["outcome"] == "verified_import" and state.get("cleanup", {}).get("outcome") in (
         "metadata_removed", "already_absent"

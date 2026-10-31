@@ -15,7 +15,7 @@ import numpy as np
 import soundfile as sf
 
 import client
-import fixture
+import fixture as four_channel
 
 
 def main():
@@ -23,7 +23,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--allow-gib-fixture", action="store_true", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--fixture",choices=("four-channel","combined"),default="four-channel")
     args = parser.parse_args()
+    fixture = four_channel
+    if args.fixture == "combined":
+        import combined_fixture
+        fixture = combined_fixture
+    details = client.plan(fixture)
+    internal_frames = details["internal_stereo_48khz_frames"]
+    internal_pcm = details["internal_float32_pcm_bytes"]
+    bits = fixture.describe()["bits_per_sample"]
     if shutil.disk_usage(tempfile.gettempdir()).free < (3 << 30):
         raise RuntimeError("need at least 3 GiB free for disposable offline fixture")
     with tempfile.TemporaryDirectory(prefix="valid-audio-offline-") as work:
@@ -31,7 +40,10 @@ def main():
         written = fixture.write(path, fixture.FRAMES)
         assert path.stat().st_size == fixture.FILE_BYTES
         assert written["actual_bytes"] == fixture.FILE_BYTES
-        assert written["sha256"] == "2f16011c15bf4c0ff6313c154d119030741cf9a6efbd88695fa20da1c7044b46"
+        if args.fixture == "four-channel":
+            assert written["sha256"] == "2f16011c15bf4c0ff6313c154d119030741cf9a6efbd88695fa20da1c7044b46"
+        else:
+            assert written["sha256"] == "2057063a6515a4111624b9e89678f8c4853867b7399086a0138dd52817f0c03b"
         with path.open("rb") as f:
             os.fsync(f.fileno())
             os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
@@ -48,8 +60,8 @@ def main():
         with sf.SoundFile(path) as f:
             info = {"frames":len(f),"samplerate":f.samplerate,"channels":f.channels,
                     "subtype":f.subtype,"format":f.format}
-            assert info == {"frames":89478480,"samplerate":96000,"channels":4,
-                            "subtype":"PCM_24","format":"WAV"}
+            assert info == {"frames":fixture.FRAMES,"samplerate":96000,"channels":fixture.CHANNELS,
+                            "subtype":f"PCM_{bits}","format":"WAV"}
             for block in f.blocks(blocksize=61440, dtype="float32", always_2d=True):
                 assert np.isfinite(block).all()
                 count += len(block)
@@ -64,9 +76,9 @@ def main():
              "stream=codec_name,sample_rate,channels,bits_per_raw_sample,duration_ts,time_base",
              "-of", "json", str(path)], check=True, capture_output=True, text=True)
         stream = json.loads(ffprobe.stdout)["streams"][0]
-        assert stream["codec_name"] == "pcm_s24le"
+        assert stream["codec_name"] == f"pcm_s{bits}le"
         assert int(stream["sample_rate"]) == fixture.RATE
-        assert stream["channels"] == 4 and int(stream["bits_per_raw_sample"]) == 24
+        assert stream["channels"] == fixture.CHANNELS and int(stream["bits_per_raw_sample"]) == bits
         assert int(stream["duration_ts"]) == fixture.FRAMES
         assert stream["time_base"] == "1/96000"
         subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(path),
@@ -75,7 +87,7 @@ def main():
         from choplab import audio_io
         meta = audio_io.probe(path)
         assert meta["decoder"] == "libsndfile"
-        assert meta["sample_rate"] == fixture.RATE and meta["channels"] == 4
+        assert meta["sample_rate"] == fixture.RATE and meta["channels"] == fixture.CHANNELS
         assert meta["duration"] == fixture.FRAMES / fixture.RATE
         small_internal = Path(work) / "internal-small.wav"
         audio_io.write_wav(small_internal, np.zeros((1001, 2), dtype=np.float32))
@@ -103,19 +115,34 @@ def main():
                 proc.stdout.close()
                 if proc.poll() is None:
                     proc.kill(); proc.wait(timeout=30)
-        assert count_raw == client.INTERNAL_PCM_BYTES
+        assert count_raw == internal_pcm
         before_internal_writer_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         mapped = np.memmap(raw_internal, dtype=np.float32, mode="r",
-                           shape=(client.INTERNAL_FRAMES,2))
+                           shape=(internal_frames,2))
         full_internal = Path(work) / "internal-full.wav"
-        audio_io.write_wav(full_internal, mapped)
+        if args.fixture == "four-channel":
+            audio_io.write_wav(full_internal, mapped)
+            writer_label = "production write_wav"
+        else:
+            # Full production ndarray writer is not assumed safe at this size.
+            with sf.SoundFile(full_internal,"w",samplerate=48000,channels=2,subtype="FLOAT") as output:
+                for start in range(0,internal_frames,61440):
+                    output.write(mapped[start:start+61440])
+                    if start % (61440 * 16) == 0:
+                        output.flush()
+                        with full_internal.open("rb") as f:
+                            os.fsync(f.fileno())
+                            os.posix_fadvise(f.fileno(),0,0,os.POSIX_FADV_DONTNEED)
+                        with raw_internal.open("rb") as f:
+                            os.posix_fadvise(f.fileno(),0,0,os.POSIX_FADV_DONTNEED)
+            writer_label = "bounded libsndfile block writer; production write_wav header cross-check only"
         del mapped
         full_internal_info = sf.info(full_internal)
-        assert full_internal_info.frames == client.INTERNAL_FRAMES
+        assert full_internal_info.frames == internal_frames
         assert full_internal_info.samplerate == 48000 and full_internal_info.channels == 2
         assert full_internal_info.subtype == "FLOAT"
         actual_internal_bytes = full_internal.stat().st_size
-        assert actual_internal_bytes == client.INTERNAL_PCM_BYTES + internal_header_bytes
+        assert actual_internal_bytes == internal_pcm + internal_header_bytes
 
         observed = {}
         class Handler(BaseHTTPRequestHandler):
@@ -146,7 +173,7 @@ def main():
             transport = client.Transport(
                 f"http://127.0.0.1:{server.server_port}", "owner", "offline-synthetic",
                 {"max_http_requests":2,"expires_at":(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()},
-                allow_loopback=True)
+                allow_loopback=True,fixture_module=fixture)
             result = transport.upload("offline", written["sha256"])
             assert observed["body_bytes"] == 1073742002
             assert result["sent_file_sha256"] == written["sha256"]
@@ -155,15 +182,15 @@ def main():
             assert observed["file_sha256"] == written["sha256"]
         finally:
             server.shutdown();server.server_close();thread.join()
-        report = {"offline_only":True,"provider_requests":0,"fixture":written,
+        report = {"offline_only":True,"provider_requests":0,"fixture_profile":args.fixture,"fixture":written,
                   "decoded_frame_count":count,"libsndfile":info,"production_probe":meta,
                   "ffprobe":stream,"ffmpeg_full_decode_exit":0,
                   "soundfile_version":sf.__version__,"libsndfile_version":sf.__libsndfile_version__,
                   "production_audio_io_sha256":hashlib.sha256(Path(audio_io.__file__).read_bytes()).hexdigest(),
                   "actual_small_production_internal_wav_header_bytes":internal_header_bytes,
-                  "actual_full_production_written_internal_wav_bytes":actual_internal_bytes,
+                  "actual_full_internal_wav_bytes":actual_internal_bytes,"internal_writer":writer_label,
                   "actual_internal_frame_count":full_internal_info.frames,
-                  "internal_decode":"independent FFmpeg pan first two channels/resample; production write_wav, NOT production decode/analysis",
+                  "internal_decode":"independent FFmpeg pan first two channels/resample; NOT production decode/analysis",
                   "rss_before_full_internal_memmap_writer_kib":before_internal_writer_rss,
                   "non_silent_peak":maximum,"rms":(sumsquares/values)**0.5,
                   "full_loopback_stream":observed,"rss_max_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}

@@ -7,6 +7,9 @@ permissions:
   contents: read
 jobs:
   offline:
+    strategy:
+      matrix:
+        fixture: [four-channel, combined]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -16,12 +19,12 @@ jobs:
           mkdir -p audio-results
           docker run --rm --memory=512m --memory-swap=512m valid-audio python -m unittest -q test_fixture
           docker run --name valid-audio-full --memory=512m --memory-swap=512m valid-audio \
-            python verify_linux.py --allow-gib-fixture --out /tmp/offline-result.json
+            python verify_linux.py --fixture ${{ matrix.fixture }} --allow-gib-fixture --out /tmp/offline-result.json
           docker cp valid-audio-full:/tmp/offline-result.json audio-results/offline-result.json
           docker inspect valid-audio-full --format '{{.State.OOMKilled}}' | grep -q false
           docker rm valid-audio-full
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: valid-audio-offline-results
+          name: valid-audio-offline-${{ matrix.fixture }}
           path: audio-results
