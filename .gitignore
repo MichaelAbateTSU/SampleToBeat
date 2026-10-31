@@ -228,3 +228,6 @@ playwright-report/
 # lock pins an internal package mirror; pyproject floors are the source of truth
 uv.lock
 
+# the Python template's lib/ rule must not swallow frontend source
+!frontend/src/lib/
+.e2e-data/

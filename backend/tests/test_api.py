@@ -116,3 +116,55 @@ def test_full_workflow(c):
 
     assert c.delete(f"/api/projects/{pid}").status_code == 204
     assert c.get(f"/api/projects/{pid}").status_code == 404
+
+
+def test_studio_helpers(c):
+    pid = c.post("/api/projects", json={"name": "helpers"}).json()["id"]
+    r = c.post(f"/api/projects/{pid}/demo").json()
+    done(c, r["job"])
+    s = c.get(f"/api/projects/{pid}/samples").json()[0]
+
+    # chop buffer: same timing contract as the renderer (beat b at pickup/speed + b*ratio*60/bpm)
+    y = wav(c, f"/api/samples/{s['id']}/buffer?bpm=120&ratio=1&pitch=-2")
+    speed = 120 / s["source_bpm"]
+    assert abs(len(y) / 48000 - s["duration"] / speed) < 0.05
+    assert np.abs(y).max() > 0.01
+    assert c.get(f"/api/samples/{s['id']}/buffer?bpm=500").status_code in (400, 422)
+
+    d = c.post("/api/patterns/drums", json={"genre": "trap", "seed": 3, "bars": 2, "variant": "fill"}).json()
+    assert d["length_ticks"] == 3840 and {e["inst"] for e in d["events"]} >= {"kick", "snare", "hat"}
+    assert d == c.post("/api/patterns/drums", json={"genre": "trap", "seed": 3, "bars": 2, "variant": "fill"}).json()
+
+    b = c.post("/api/patterns/bass", json={"genre": "drill", "roots": [9, 5], "kick_ticks": [0, 720, 1920],
+                                           "key": "A minor", "seed": 1}).json()
+    assert b["length_ticks"] == 3840 and b["events"]
+    assert all(e["midi"] % 12 in {9, 11, 0, 2, 4, 5, 7} for e in b["events"])  # diatonic to A minor
+    assert c.delete(f"/api/projects/{pid}").status_code == 204
+
+
+def test_hpss_separation_is_a_real_split(c):
+    import librosa
+
+    pid = c.post("/api/projects", json={"name": "separation"}).json()["id"]
+    r = c.post(f"/api/projects/{pid}/demo").json()
+    done(c, r["job"])
+    sid = r["source"]["id"]
+    assert c.post(f"/api/sources/{sid}/separate", json={"model_id": "nope"}).status_code == 400
+
+    res = done(c, c.post(f"/api/sources/{sid}/separate", json={"model_id": "builtin-hpss"}).json())
+    assert set(res["result"]["stems"]) == {"harmonic", "percussive"}
+    stems = {s["stem_type"]: s for s in c.get(f"/api/sources/{sid}/stems").json()}
+    assert set(stems) == {"harmonic", "percussive"} and stems["harmonic"]["model_id"] == "builtin-hpss"
+
+    mix = wav(c, f"/api/sources/{sid}/audio")
+    h, p = (wav(c, f"/api/stems/{stems[k]['id']}/audio") for k in ("harmonic", "percussive"))
+    assert len(h) == len(p) == len(mix)
+    assert np.sqrt((h ** 2).mean()) > 0.01 and np.sqrt((p ** 2).mean()) > 0.001
+    # an actual inference check: the percussive stem is noisier/more transient than the harmonic one
+    flat = lambda y: float(np.median(librosa.feature.spectral_flatness(y=y.mean(axis=1).astype(np.float32))))
+    assert flat(p) > 2 * flat(h)
+    assert c.get(f"/api/stems/{sid}.vocals/audio").status_code == 404
+
+    # discovery re-ran with the stems available
+    assert any(s.get("stem") not in (None, "mix") for s in c.get(f"/api/sources/{sid}/samples").json())
+    assert c.delete(f"/api/projects/{pid}").status_code == 204

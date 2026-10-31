@@ -240,6 +240,30 @@ class AnalysisOverride(_M):
         return v
 
 
+class DrumPatternRequest(_M):
+    genre: Literal[tuple(drums.GENRES)]  # type: ignore[valid-type]
+    complexity: Annotated[float, Field(ge=0, le=1)] = 0.5
+    seed: Annotated[int, Field(ge=0, le=2 ** 31)] = 0
+    bars: Annotated[int, Field(ge=1, le=8)] = 2
+    variant: Literal["main", "alt", "sparse", "fill"] = "main"
+
+
+class BassPatternRequest(_M):
+    genre: Literal[tuple(drums.GENRES)]  # type: ignore[valid-type]
+    roots: Annotated[list[Annotated[int, Field(ge=0, le=11)]], Field(min_length=1, max_length=64)]
+    kick_ticks: Annotated[list[Tick], Field(max_length=2000)] = []
+    key: str | None = None
+    seed: Annotated[int, Field(ge=0, le=2 ** 31)] = 0
+    complexity: Annotated[float, Field(ge=0, le=1)] = 0.5
+
+    @field_validator("key")
+    @classmethod
+    def _key(cls, v):
+        if v and parse_key(v) is None:
+            raise ValueError("key must look like 'A minor' or 'C# major'")
+        return v
+
+
 class SampleCreate(_M):
     source_id: str
     start: Annotated[float, Field(ge=0)]

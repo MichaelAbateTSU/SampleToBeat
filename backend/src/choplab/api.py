@@ -17,7 +17,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from . import analysis, audio_io, bass, compose, drums, jobs, render, sampling, schemas, separation, store, transform
-from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, cache_key, data_path, log
+from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, TICKS_PER_BAR, cache_key, data_path, log, parse_key
 
 MAX_UPLOAD = 1 << 30  # 1 GiB
 FRONTEND = Path(os.environ.get("CHOPLAB_FRONTEND", Path(__file__).resolve().parents[3] / "frontend" / "dist"))
@@ -484,6 +484,23 @@ def sample_audio(id: str, bpm: float | None = None):
     return FileResponse(_sample_file(_get("sample", id), bpm), media_type="audio/wav")
 
 
+@app.get("/api/samples/{id}/buffer")
+def sample_buffer(id: str, bpm: float, ratio: float = 1.0, pitch: float = 0.0):
+    """The exact grid-locked buffer the renderer slices chops from, so live studio playback matches export.
+    Beat b of the sample sits at (pickup / speed + b * ratio * 60 / bpm) seconds, speed = bpm / (source_bpm * ratio)."""
+    if not 40 <= bpm <= 220 or not 0.1 < ratio <= 8 or abs(pitch) > 24:
+        raise HTTPException(400, "bpm must be 40-220, ratio 0.1-8, pitch within ±24")
+    s = _get("sample", id)
+    src = _get("source", s["source_id"])
+    _, hashes = sampling.resolve(src, s["stems"])
+    t = {**transform.DEFAULT_TRANSFORM, **(s.get("transform") or {})}
+    out = data_path("cache", "previews", cache_key("buf", hashes, s["start"], s["end"], t, round(bpm, 4), round(ratio, 6), round(pitch, 4)) + ".wav")
+    if not out.exists():
+        y, _ = render.sample_buffer(s, src, bpm, ratio, pitch)
+        audio_io.write_wav(out, np.clip(y, -1, 1), subtype="PCM_16")
+    return FileResponse(out, media_type="audio/wav")
+
+
 @app.post("/api/samples/{id}/preview")
 def sample_preview(id: str, body: dict | None = None):
     bpm = (body or {}).get("bpm")
@@ -655,6 +672,23 @@ def reveal(id: str):
     else:
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", folder])
     return {"folder": folder}
+
+
+# ---------------------------------------------------------------- pattern generators (studio "randomize")
+
+@app.post("/api/patterns/drums")
+def gen_drums(body: schemas.DrumPatternRequest):
+    """A fresh genre-aware groove; the studio uses it to re-roll individual lanes."""
+    pats = drums.generate(body.genre, body.complexity, body.seed, body.bars)
+    return {"length_ticks": body.bars * TICKS_PER_BAR, "events": pats[body.variant]}
+
+
+@app.post("/api/patterns/bass")
+def gen_bass(body: schemas.BassPatternRequest):
+    """A key-aware 808 line over the given per-bar roots, locked to the given kick ticks."""
+    kicks = [{"tick": t, "inst": "kick"} for t in body.kick_ticks]
+    notes = bass.generate(body.roots, kicks, body.genre, body.seed, parse_key(body.key), body.complexity)
+    return {"length_ticks": len(body.roots) * TICKS_PER_BAR, "events": notes}
 
 
 # ---------------------------------------------------------------- kits
