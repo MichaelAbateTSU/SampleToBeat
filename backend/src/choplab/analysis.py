@@ -114,7 +114,7 @@ def _tempo(oenv: np.ndarray) -> float:
     return float(librosa.feature.tempo(tg=total / len(oenv), sr=ASR, hop_length=BHOP)[0])
 
 
-def _onset_strength(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
+def _mel_spectrogram(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
     """Keep the identical centered mel frames/global dB floor, with a bounded STFT workspace."""
     n_fft, frames = 2048, 1 + len(mono) // hop
     mel = np.empty((kwargs.get("n_mels", 128), frames), dtype=mono.dtype)
@@ -126,6 +126,11 @@ def _onset_strength(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
             audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
         mel[:, start:end] = librosa.feature.melspectrogram(
             y=audio, sr=ASR, n_fft=n_fft, hop_length=hop, center=False, **kwargs)
+    return mel
+
+
+def _onset_strength(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
+    mel = _mel_spectrogram(mono, hop, **kwargs)
     return librosa.onset.onset_strength(S=librosa.power_to_db(mel), sr=ASR, hop_length=hop)
 
 
@@ -230,7 +235,8 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     onsets = librosa.onset.onset_detect(onset_envelope=oenv, sr=ASR, hop_length=HOP, units="time", backtrack=True)
 
     progress("structure", 0.7)
-    mfcc = librosa.feature.mfcc(y=mono, sr=ASR, hop_length=HOP, n_mfcc=13)[:, :n_frames]
+    mfcc = librosa.feature.mfcc(S=librosa.power_to_db(_mel_spectrogram(mono, HOP)),
+                               sr=ASR, hop_length=HOP, n_mfcc=13)[:, :n_frames]
     rms = librosa.feature.rms(y=mono, hop_length=HOP)[0][:n_frames]
     rms_p = librosa.feature.rms(y=mono - harm, hop_length=HOP)[0][:n_frames]
     mfcc_b = _sync(mfcc, beats)

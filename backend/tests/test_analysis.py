@@ -41,6 +41,17 @@ def test_bounded_onset_frames_match_full_spectrogram(hop, kwargs):
     np.testing.assert_allclose(actual, expected, atol=2e-6, rtol=2e-6)
 
 
+def test_bounded_mfcc_preserves_global_db_floor():
+    import librosa
+
+    mono = np.random.default_rng(16).normal(0, 0.1, 275777).astype(np.float32)
+    mono[:130000] *= 0.000001
+    expected = librosa.feature.mfcc(y=mono, sr=analysis.ASR, hop_length=analysis.HOP, n_mfcc=13)
+    actual = librosa.feature.mfcc(S=librosa.power_to_db(analysis._mel_spectrogram(mono, analysis.HOP)),
+                                 sr=analysis.ASR, hop_length=analysis.HOP, n_mfcc=13)
+    np.testing.assert_allclose(actual, expected, atol=2e-5, rtol=2e-6)
+
+
 def test_demo_tempo_key_and_downbeat(demo_analysis):
     doc, feats = demo_analysis
     assert doc["bpm"] == pytest.approx(92, abs=0.5)
