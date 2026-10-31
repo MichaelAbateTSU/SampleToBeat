@@ -36,11 +36,19 @@ def ffmpeg_exe() -> str | None:
         return None
 
 
+def _release_file_cache(path: Path) -> None:
+    if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+        with open(path, "rb") as f:
+            os.fsync(f.fileno())
+            os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+
+
 def file_hash(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
+    _release_file_cache(path)
     return h.hexdigest()
 
 
@@ -113,6 +121,7 @@ def decode(path: Path, sr: int = SR) -> np.ndarray:
         raise AudioError(f"Recording is longer than {MAX_SECONDS} seconds; trim it before importing.")
     if not np.isfinite(y).all():
         y = np.nan_to_num(y)
+    _release_file_cache(path)
     return y
 
 
@@ -143,6 +152,7 @@ def write_wav(path: Path, y: np.ndarray, sr: int = SR, subtype: str = "FLOAT") -
     os.close(fd)
     try:
         sf.write(tmp, y, sr, subtype=subtype)
+        _release_file_cache(Path(tmp))
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
@@ -179,6 +189,7 @@ def write_mp3(path: Path, y: np.ndarray, sr: int = SR, bitrate: str = "320k") ->
                 errors.seek(max(0, errors.tell() - 300))
                 detail = errors.read().decode(errors="replace")
                 raise AudioError(f"MP3 encoding failed: {detail or broken}") from broken
+        _release_file_cache(tmp)
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)

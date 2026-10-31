@@ -245,3 +245,28 @@ def test_export_releases_unused_buffers_before_encoding_and_verification(tmp_pat
     result = render.export({}, {}, {}, tmp_path, fmt="mp3")
     assert result["metrics"] == {"sentinel": 1}
     assert result["files"][0]["check"] == {"verified": True}
+
+
+def test_long_streamed_loudness_preserves_iir_state_and_gates():
+    import pyloudnorm
+    from choplab import render
+
+    y = sine(443, 60.137, amp=0.1)
+    y[:48000 * 20] *= 0.001
+    y[48000 * 40:] *= 0.3
+    expected = pyloudnorm.Meter(48000).integrated_loudness(y.astype(np.float64))
+    assert render.loudness(y) == pytest.approx(expected, abs=1e-10)
+
+
+def test_cache_release_syncs_before_kernel_advice(tmp_path, monkeypatch):
+    path = tmp_path / "written.wav"
+    path.write_bytes(b"synthetic")
+    calls = []
+    monkeypatch.setattr(audio_io.os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    monkeypatch.setattr(audio_io.os, "fsync", lambda fd: calls.append(("sync", fd)))
+    monkeypatch.setattr(audio_io.os, "posix_fadvise",
+                        lambda fd, offset, length, advice: calls.append(("advice", fd, offset, length, advice)),
+                        raising=False)
+    audio_io._release_file_cache(path)
+    assert calls == [("sync", calls[0][1]), ("advice", calls[0][1], 0, 0, 4)]
+    assert path.read_bytes() == b"synthetic"
