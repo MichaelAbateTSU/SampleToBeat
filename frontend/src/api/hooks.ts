@@ -60,7 +60,9 @@ export const useJobs = create<JobState>((set, get) => ({
     }
   },
   track: (job) => {
+    const first = !get().jobs[job.id];
     get().update(job);
+    if (first && !TERMINAL.has(job.status)) invalidateFor(job);
     if (TERMINAL.has(job.status) || streams.has(job.id)) return;
     if (typeof EventSource !== "undefined") {
       const es = new EventSource(urls.jobEvents(job.id));

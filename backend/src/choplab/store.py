@@ -179,6 +179,22 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+def bind_job_volume(volume_id: str) -> None:
+    """One PostgreSQL library must have one audio volume and one job runtime."""
+    if not _DATABASE_URL:
+        return
+    with _lock, _conn() as con:
+        raw = json.dumps({"id": "job_runtime_volume", "volume_id": volume_id})
+        con.execute(
+            "INSERT INTO docs(id,kind,created,updated,doc) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+            ("job_runtime_volume", "runtime", now(), now(), raw))
+        row = con.execute("SELECT doc FROM docs WHERE id=? AND kind=?", ("job_runtime_volume", "runtime")).fetchone()
+        if not row or json.loads(row[0]).get("volume_id") != volume_id:
+            raise StoreConfigurationError(
+                "PostgreSQL jobs belong to another audio volume. Stop all runtimes and restore the matching "
+                "audio volume (including jobs.lock); refusing cross-host recovery or concurrent workers.")
+
+
 def now() -> float:
     return round(time.time(), 3)
 

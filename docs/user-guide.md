@@ -119,3 +119,32 @@ silent). Download them from the export list, or open the export folder.
 * the drum kits: audition every sound, replace it with your own file, or reset it
 
 **Clear render cache** frees cached renders.
+
+## Interrupted jobs and retries
+
+After a restart, queued/running jobs and their pending analysis, separation, or export records show
+**interrupted**, with an explanation and a **Retry** action. No work is retried automatically.
+Saved analysis, stems, samples, arrangements, and export files are retained, including results saved
+before a job stopped. Retry runs the operation again; generation may create additional variations,
+and export uses the current saved arrangement. A failed initial import can also be retried with
+**Retry analysis**. If the original audio is missing, import it again.
+
+Only one application runtime may use an audio volume. Keep `jobs.lock` with that volume and its backup;
+do not delete or replace it while the application is running. Startup refuses a second runtime, and
+waits for draining jobs before releasing ownership on a graceful shutdown. Stop older application
+versions before upgrading; they do not participate in this lock. Do not run independent copies of
+the same audio-volume backup concurrently. PostgreSQL metadata is
+bound to the same audio-volume identity: a different volume, or old pending PostgreSQL jobs without
+verifiable ownership, disables processing rather than guessing another host stopped. The studio
+shows an operator warning; `/api/system/recovery` reports the reason and read-only status.
+Stop every runtime and restore matching metadata/audio backups before resolving ownership offline.
+After backing up metadata and verifying that all workers are stopped, run
+`python -m choplab.metadata recover-jobs --confirm-all-runtimes-stopped` on the matching audio volume,
+then restart. This explicit command adopts stopped legacy jobs and interrupts their pending records
+without submitting retries. It cannot bypass another runtime's volume lock or another volume's
+PostgreSQL binding; restore the original `jobs.lock` with the matching audio backup for the latter.
+Multiple hosts with independent audio volumes require a distributed worker/fencing and shared-audio
+architecture, not automatic recovery based on job age.
+
+Retrying an older analysis, separation, or export is rejected if newer work owns its target.
+Wait for active source work to finish, then retry the latest job or start a new operation.

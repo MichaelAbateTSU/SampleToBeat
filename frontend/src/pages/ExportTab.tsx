@@ -90,11 +90,12 @@ export default function ExportTab({ project, jobs }: { project: Project; jobs: J
                 <div className="flex items-center gap-2 text-sm">
                   <span className="font-medium">{e.request.filename}</span>
                   <Badge>{e.request.format}</Badge>
-                  <Badge tone={e.status === "completed" ? "good" : e.status === "failed" ? "bad" : "accent"}>{e.status}</Badge>
+                  <Badge tone={e.status === "completed" || e.status === "done" ? "good" : ["failed", "interrupted", "canceled"].includes(e.status) ? "bad" : "accent"}>{e.status}</Badge>
                   {e.metrics && <span className="text-xs text-ink-400">{e.metrics.lufs.toFixed(1)} LUFS · {e.metrics.true_peak_dbfs.toFixed(1)} dBTP</span>}
                   <span className="ml-auto text-xs text-ink-400">{new Date(e.created_at * 1000).toLocaleString()}</span>
                   {e.folder && caps.data && !caps.data.hosted && <Button size="sm" variant="ghost" onClick={() => reveal.mutate(e.id)}><FolderOpen className="size-3.5" /> Show folder</Button>}
                 </div>
+                <ErrorBanner error={e.error} />
                 <div className="flex flex-wrap gap-1.5">
                   {e.files?.map((f) => (
                     <a key={f.name} data-testid="download-link" href={urls.download(e.id, f.name)} download={f.name}

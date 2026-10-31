@@ -32,12 +32,24 @@ FRONTEND = Path(os.environ.get("CHOPLAB_FRONTEND", Path(__file__).resolve().pare
 @asynccontextmanager
 async def lifespan(app):
     store.initialize()
-    jobs.recover_interrupted()
-    yield
+    with jobs.runtime():
+        yield
 
 
 app = FastAPI(title="ChopLab AI", version="0.1.0", lifespan=lifespan,
               description="Single-owner sample-based beat generator.")
+@app.middleware("http")
+async def recovery_boundary(request: Request, call_next):
+    path = request.url.path
+    if jobs.recovery_error and path.startswith("/api/"):
+        inspection = path in ("/api/health", "/api/system/recovery", "/api/system/capabilities", "/api/projects")
+        inspection = inspection or bool(re.fullmatch(r"/api/projects/[^/]+(?:/jobs)?", path))
+        inspection = inspection or bool(re.fullmatch(r"/api/jobs/[^/]+", path))
+        if request.method != "GET" or not inspection:
+            return JSONResponse({"detail": jobs.recovery_error}, 503)
+    return await call_next(request)
+
+
 app.add_middleware(OwnerAccess)
 if HOSTING:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(HOSTING.origin).hostname, "localhost", "127.0.0.1"])
@@ -397,6 +409,8 @@ def source_analysis(id: str):
 @app.post("/api/sources/{id}/analyze", status_code=202)
 def reanalyze(id: str):
     s = _get("source", id)
+    if not s.get("internal_audio_path"):
+        return jobs.submit("import", s["project_id"], {"source_id": id})
     return jobs.submit("analyze", s["project_id"], {"source_id": id, "override": (s.get("analysis") or {}).get("override")})
 
 
@@ -420,7 +434,6 @@ def separate(id: str, body: dict):
         raise HTTPException(409, why)
     if not s.get("analysis"):
         raise HTTPException(409, "Wait for analysis to finish first.")
-    store.update("source", id, separation_status="queued")
     return jobs.submit("separate", s["project_id"], {"source_id": id, "model_id": model})
 
 
@@ -820,12 +833,20 @@ def database_ready():
     return store.check_ready()
 
 
+@app.get("/api/system/recovery")
+def recovery_status():
+    if jobs.recovery_error:
+        return JSONResponse({"ok": False, "read_only": True, "detail": jobs.recovery_error}, 409)
+    return {"ok": True, "read_only": False}
+
+
 @app.get("/api/system/capabilities")
 def capabilities():
     """Also serves as UI configuration: genres, strategies, kits and default settings come from here."""
     free = shutil.disk_usage(DATA_DIR).free
     return {"ffmpeg": audio_io.ffmpeg_exe() is not None, "sample_rate": SR, "data_dir": str(DATA_DIR),
             "hosted": HOSTING is not None, "max_upload_mb": MAX_UPLOAD // (1 << 20),
+            "job_recovery_error": jobs.recovery_error,
             "metadata_store": store.backend_name(),
             "max_audio_seconds": audio_io.MAX_SECONDS,
             "disk_free_gb": round(free / 1e9, 1), "schema_version": SCHEMA_VERSION,
