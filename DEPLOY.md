@@ -3,8 +3,9 @@
 **No live deployment is configured.** The user selected Render for application compute and Neon for data,
 instead of the initially investigated VM host.
 The protected container now supports Neon-compatible PostgreSQL metadata, but Neon does not host the Python
-app or frontend. Private production Neon configuration and adequate authorized Python/container compute
-are still required; a temporary synthetic test database is not a deployed studio or permanent production database.
+app or frontend. The dedicated Free Neon project and private audio bucket have been provisioned, but their production
+credentials are not wired to an app host. Render sign-in and suitable compute remain unresolved.
+A temporary synthetic test database is not a deployed studio or permanent production database.
 
 ## What Neon can host
 
@@ -40,7 +41,8 @@ container, avoiding cross-origin auth, SSE, download and audio-range complicatio
 
 * [Render free](https://render.com/docs/free) is the selected application host, but its
   [0.1 CPU / 512 MB](https://render.com/docs/compute-plans) limit, sleep and ephemeral disk remain
-  validation blockers, not a production-ready deployment.
+  hard blockers: controlled tests OOM-killed generation from both 4-second and 16-second inputs and
+  a five-minute import. It is not a production-ready deployment for the unchanged audio engine.
 * [Hugging Face Spaces](https://huggingface.co/docs/hub/spaces-overview) requires a paid plan to create a
   Docker Space; CPU Basic's zero hourly price does not make a new Docker Space $0. Its default storage is
   ephemeral and unused compute sleeps.
@@ -57,9 +59,10 @@ container, avoiding cross-origin auth, SSE, download and audio-range complicatio
   upgrade or service has been created.
 
 No verified provider currently satisfies **Neon + unchanged full audio functionality + durable data +
-guaranteed $0 ongoing compute** with the available authorized accounts. Required next steps are a claimed
-Neon Free PostgreSQL project and an authorized adequate free Python compute host with durable disk, followed
-by remote studio validation. No Neon Object Storage bucket is needed for the current volume-backed path.
+guaranteed $0 ongoing compute** with the available authorized accounts. A dedicated permanent Free
+Neon project and private bucket are provisioned; the remaining decision is suitable compute that can run
+the full audio engine. Do not switch providers, select a paid Render plan or remove features without user
+approval. Remote studio validation is still required. No Neon Object Storage bucket is needed for the current volume-backed path.
 An ephemeral host would require a separate complete audio-storage integration. Signing up for Neon alone
 does not resolve the compute blocker.
 Credentials must be configured privately in host/repository secrets, never in frontend variables, git or chat.
@@ -75,6 +78,12 @@ Caddy/Compose stack on Render: Render supplies TLS, and Compose's persistent vol
 This is a **conditional deployment contract, not a deploy-ready Blueprint**. Do not create a full studio on
 an ephemeral disk or call it durable because the metadata uses Neon:
 
+* An independent controlled Linux container benchmark applied Render Free's documented 512 MiB RAM and
+  0.1 CPU limits. Generation from both four-second and sixteen-second recordings, and a five-minute
+  import, were OOM-killed. These are supported studio workflows, not optional Demucs tests. Port handling,
+  successful startup or a healthy endpoint does not establish Free-tier suitability. **Do not deploy the
+  unchanged full studio to Render Free.** Neon object storage cannot fix an audio computation's memory
+  requirement; an unvalidated storage rewrite is not a solution to these measured failures.
 * Free web services lose uploaded/generated files on every restart, redeploy and 15-minute idle spin-down.
   They cannot attach persistent disks, run one-off jobs or use dashboard/SSH shells. The full app currently
   needs `/data` files and has no Neon Object Storage integration; an empty bucket is not automatic persistence.
@@ -90,7 +99,8 @@ an ephemeral disk or call it durable because the metadata uses Neon:
   Signed private URLs can reduce Render traffic, but cannot bypass Neon quotas. Bucket versioning/lifecycle
   settings are not enforced; they are not backups or retention guarantees.
 
-When the compute and durable-audio requirements have actually been validated, sign in to Render and connect
+Only after the user approves a viable compute approach and the compute/durable-audio requirements have
+actually been validated, sign in to Render and connect
 the public repository with the reviewed hosting branch (not older `main`), select Docker and **Free**, and
 configure `CHOPLAB_MODE=hosted`, the real `CHOPLAB_PUBLIC_URL=https://...onrender.com`, owner-hash secret file,
 private Neon connection settings and `/api/health` liveness. The password hash file path must match the
