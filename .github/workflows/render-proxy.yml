@@ -1,0 +1,37 @@
+name: Render authentication proxy checks
+on:
+  push:
+    paths:
+      - "Dockerfile"
+      - "backend/src/choplab/hosting.py"
+      - "backend/src/choplab/api.py"
+      - "frontend/scripts/verify_render_proxy.mjs"
+      - ".github/workflows/render-proxy.yml"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "backend/src/choplab/hosting.py"
+      - "backend/src/choplab/api.py"
+      - "frontend/scripts/verify_render_proxy.mjs"
+      - ".github/workflows/render-proxy.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  proxy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build production image with no secrets
+        run: docker build -t choplab:proxy-check .
+      - name: Restore existing browser test tooling
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Check actual Uvicorn and Chromium against measured Render headers
+        run: node frontend/scripts/verify_render_proxy.mjs choplab:proxy-check
