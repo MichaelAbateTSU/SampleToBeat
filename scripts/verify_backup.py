@@ -31,7 +31,8 @@ def main():
         import sys
 
         snapshot = json.load(sys.stdin)
-        assert store.export_snapshot()["rows"] == snapshot["rows"], "Restored metadata differs from backup."
+        restored_rows = json.loads(json.dumps(store.export_snapshot()["rows"]))
+        assert restored_rows == snapshot["rows"], "Restored metadata differs from backup."
         assert store.get("project", "backup-test")["audio_path"] == str(audio)
         with wave.open(str(audio), "rb") as restored:
             assert restored.getframerate() == 44100
