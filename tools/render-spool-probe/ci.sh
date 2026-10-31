@@ -19,6 +19,8 @@ run_case() {
     fi
     sleep 1
   done
+  test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:10000/status)" = 401
+  test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:10000/probe)" = 401
   python3 tools/render-spool-probe/client.py --url http://127.0.0.1:10000 \
     --allow-http --status --out "spool-results/$name-status.json"
   python3 tools/render-spool-probe/client.py --url http://127.0.0.1:10000 \

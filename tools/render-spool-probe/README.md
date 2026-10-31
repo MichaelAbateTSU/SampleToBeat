@@ -102,6 +102,11 @@ An edge rejection lacks the `X-Upload-Probe` marker; an app 413/507/400 includes
 `production_status`, `phase`, original response and filesystem snapshots.
 The wrapper does not test durable publication, jobs, audio decode, warm model
 caches or existing library occupancy.
+The disposable image includes a source checkout and omits the production frontend
+build/Numba warm-up. Its filesystem free bytes measure **that temporary service**;
+image layers and occupancy can differ in the final service. Confirm final `/tmp`
+and `/data` identity/free capacity as well as parser versions before extrapolating
+a capacity result. No provider-specific ephemeral capacity is assumed.
 
 ## Temporary Render deployment (coordinator only)
 
