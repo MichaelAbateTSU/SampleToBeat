@@ -280,9 +280,7 @@ def run_case(seconds):
         if not measurement.run("generate_one_eight_bar_variation", generate, 360):
             case["skipped"] = "HQ/WAV/MP3: generation failed"
             return False
-        if ORIGINAL_LIMIT:
-            run_case(1200)
-        elif APPROXIMATE_E2_MICRO:
+        if APPROXIMATE_E2_MICRO:
             variation = api("GET", f"/api/projects/{pid}/variations")[0]
             audio = request("GET", f"/api/variations/{variation['id']}/audio")
             assert audio.startswith(b"RIFF") and len(audio) > 100
@@ -345,7 +343,9 @@ def main():
     (OUT / "hash").chmod(0o644)
     RESULTS["docker_version"] = command("docker", "version", "--format", "{{json .}}")
     save()
-    if APPROXIMATE_E2_MICRO:
+    if ORIGINAL_LIMIT:
+        run_case(1200)
+    elif APPROXIMATE_E2_MICRO:
         run_case(4)
         run_case(16)
     else:
