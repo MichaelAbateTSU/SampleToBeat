@@ -17,7 +17,8 @@ class Ledger:
 
     def record(self, category, **fields):
         with self.lock, self.path.open("a", encoding="utf-8") as out:
-            out.write(json.dumps({"category": category, **fields}, allow_nan=False) + "\n")
+            out.write(json.dumps({"category": category, "monotonic": time.monotonic(), **fields},
+                                 allow_nan=False) + "\n")
 
 
 class MeasuredBody:

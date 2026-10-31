@@ -28,6 +28,32 @@ def main():
             return self.body.__exit__(*args)
 
     class Client(L.client_type(H)):
+        def json(self, method, path, *args, **kwargs):
+            result = super().json(method, path, *args, **kwargs)
+            if method == "GET" and path.startswith("/api/jobs/") and isinstance(result, dict):
+                status = result.get("status")
+                stage = result.get("stage")
+                safe_stage = stage if isinstance(stage, str) and H.re.fullmatch(r"[a-zA-Z_-]{1,48}", stage) else "other_or_unavailable"
+                ledger.record("job_observation", status=status if status in
+                              ("queued", "running", "completed", "failed", "canceled", "interrupted") else "unknown",
+                              stage=safe_stage)
+            return result
+
+        def wait(self, job):
+            start = time.monotonic()
+            kind = job.get("job_type")
+            safe_kind = kind if kind in ("import", "generate", "export") else "other"
+            ledger.record("job_wait", kind=safe_kind, outcome="started")
+            try:
+                result = super().wait(job)
+                ledger.record("job_wait", kind=safe_kind, outcome="completed",
+                              seconds=time.monotonic() - start)
+                return result
+            except Exception:
+                ledger.record("job_wait", kind=safe_kind, outcome="failed_or_timeout",
+                              seconds=time.monotonic() - start)
+                raise
+
         def open(self, method, path, **kwargs):
             identity = {"request": __import__("os").urandom(8).hex(), "method": method}
             start = time.monotonic()

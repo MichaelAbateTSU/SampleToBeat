@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -16,11 +17,20 @@ from budget_probe import disk_bytes, summarize
 SHA = "2057063a6515a4111624b9e89678f8c4853867b7399086a0138dd52817f0c03b"
 
 
+class CommandFailure(RuntimeError):
+    def __init__(self, program, result):
+        super().__init__("Synthetic subprocess failed")
+        kinds = re.findall(r"^([A-Za-z]+Error):", result.stderr, re.MULTILINE)
+        allowed = {"PermissionError", "FileNotFoundError", "RuntimeError", "ValueError", "TypeError"}
+        self.evidence = {"program": Path(program).name, "exit_code": result.returncode,
+                         "exception_class": next((kind for kind in reversed(kinds) if kind in allowed), "other")}
+
+
 def execute(args, *, timeout=120, check=True, stdout=None):
     result = subprocess.run(args, timeout=timeout, check=False,
                             stdout=stdout or subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if check and result.returncode:
-        raise RuntimeError("Synthetic subprocess failed: " + Path(args[0]).name)
+        raise CommandFailure(args[0], result)
     return result
 
 
@@ -92,14 +102,16 @@ def main():
                   "100ms anon/file/disk samples miss between-sample and open-unlinked/outside-cache transients.",
                   "Payload consumed or buffered/declared attempts are not acknowledged wire bytes or provider metering.",
                   "Synthetic inventory/deletion/forced expired lease do not establish Neon retention or provider replacement.",
-                  "Journey is import/analysis, one-bar generation, studio preview, WAV16+project export and selected exact downloads.",
+                  "Journey is import/analysis, four-bar generation, one-bar studio preview, WAV16+project export and selected exact downloads.",
                   "HPSS, eight-bar maximum arrangements, MP3 and every library asset are not exercised by this journey.",
                   "Health observer requests add inbound synthetic test traffic; not idle/sleep/quota proof.",
               ]}
     app = None
     started = time.monotonic()
+    report["host_monotonic_start"] = started
     stop = threading.Event()
     current = {"name": None, "cache": None, "temp": None, "cgroup": None}
+    action = "initializing"
     lock = threading.Lock()
     common = ["--network", "durable-acceptance", "--no-healthcheck", "--read-only",
               "--env-file", str(root / "synthetic.env"),
@@ -205,6 +217,9 @@ def main():
                 record = {"name": app}
                 report["app_containers"].append(record)
             record["before_stop"] = state(app)
+            if record["before_stop"]["state"]["OOMKilled"] or not record["before_stop"]["state"]["Running"]:
+                report["success"] = False
+                raise RuntimeError("App unexpectedly stopped before intentional replacement/teardown")
             execute(["docker", "kill", app], check=False)
             record["after_stop"] = state(app)
 
@@ -230,11 +245,17 @@ def main():
             raise RuntimeError("External client failed; inspect sanitized phase log, no retry")
 
     try:
+        action = "generate-fixture"
         report["fixture"] = generate(root, args.mode)
+        action = "admin-initialize"
         admin("initialize")
+        action = "start-first-app"
         start(0)
+        action = "client-prepare"
         client("prepare")
+        action = "inventory-prepared"
         snapshot("prepared")
+        action = "intentional-cold-stop"
         finish_app()
         execute(["docker", "rm", app])
         app = None
@@ -243,11 +264,16 @@ def main():
         for name in ("cache0", "temp0"):
             shutil.rmtree(root / name)
         report["cold_cache_destroyed"] = True
-        admin("expire")
+        action = "admin-expire"
+        admin("expire", cache="cache1")
+        action = "start-replacement"
         start(1)
+        action = "client-verify"
         client("verify")
+        action = "inventory-replacement"
         snapshot("verified-after-cold-replacement")
         begin = time.monotonic()
+        action = "admin-original-read"
         admin("original", cache="cache1")
         report["optional_original_read"] = {"seconds": time.monotonic() - begin,
                                           "traffic": summarize(events(root / "app-evidence/admin-object-events.jsonl")),
@@ -255,7 +281,10 @@ def main():
         report["success"] = True
     except Exception as error:
         report["failure"] = {"class": type(error).__name__,
+                             "action": action,
                              "message": "Synthetic run stopped; no mutation retry or provider success inferred."}
+        if isinstance(error, CommandFailure):
+            report["failure"]["subprocess"] = error.evidence
         snapshot("failed")
     finally:
         if app:
@@ -275,7 +304,7 @@ def main():
                 shutil.copyfile(source, evidence / name)
         report["app_object_traffic"] = summarize(events(root / "app-evidence/object-events.jsonl"))
         peaks = {}
-        for line in (evidence / "resource-samples.jsonl").read_text().splitlines():
+        for line in (evidence / "resource-samples.jsonl").open():
             sample = json.loads(line)
             if not sample.get("app"):
                 continue
