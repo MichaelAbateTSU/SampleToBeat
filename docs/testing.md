@@ -75,3 +75,11 @@ generation.
   * Demucs separation. The adapter is implemented but needs the optional extra and model downloads, and the
     tests don't run it.
   * Musical quality. Producing a valid audio file is not proof that it sounds good, so judge results by ear.
+
+## Hosted multipart cache
+
+`bash backend/upload_tests/ci.sh` compares standard and route-scoped spool
+behavior under Linux Docker (512 MiB, 0.1 CPU, no swap), with byte-exact 1 GiB
+multipart/save digests, cgroup `memory.stat`, lifetime peak, concurrent five-second
+health probes, and parser/cancellation/disk-full cleanup cases. See
+`backend/upload_tests/README.md` for tradeoffs and parser upgrade checks.

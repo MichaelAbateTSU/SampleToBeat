@@ -1,0 +1,19 @@
+name: spool-cache
+on:
+  push:
+    branches: [michaelabatetsu-spool-cache, michaelabatetsu-upload-spool-cache, michaelabatetsu-upload-spooling]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash backend/upload_tests/ci.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spool-cache-results
+          path: upload-results
