@@ -7,7 +7,7 @@ import numpy as np
 from fastapi.testclient import TestClient
 
 from test_durable import remote, replace_volume, write
-from choplab import api, audio_io, durable, jobs, sampling, separation, store
+from choplab import api, audio_io, bass, drums, durable, jobs, sampling, separation, store
 from choplab.object_storage import S3ByteStorage, StorageError
 
 
@@ -161,6 +161,7 @@ def test_discovery_restores_features_and_cached_separation_only_its_stems(remote
         store.update("source", s)
     successor = replace_volume(remote, monkeypatch, destroy_old=True)
     with jobs.runtime():
+        store.put("job", {"id": "discovery-only", "status": "running", "owner_volume": "durable"})
         def discover(source, analysis, features, **kwargs):
             np.testing.assert_array_equal(features["energy"], [1, 2])
             assert not Path(source["internal_audio_path"]).exists()
@@ -188,10 +189,43 @@ def test_cold_reanalysis_restores_decoded_input_not_original_or_old_features(rem
                              "stems": {"harmonic": write(root, "harmonic.wav", b"unused-stem")}})
     successor = replace_volume(remote, monkeypatch, destroy_old=True)
     with jobs.runtime():
-        monkeypatch.setattr(api.analysis, "analyze", lambda y, *args: ({"bpm": 100}, {"energy": [1, 2]}))
+        monkeypatch.setattr(api.analysis, "analyze", lambda y, *args: ({"bpm": 100, "key": "C"}, {"energy": [1, 2]}))
         monkeypatch.setattr(api, "_discover", lambda *args: 0)
         api._analyze(jobs.JobContext("cold-reanalysis"), "reanalyze")
         assert traffic == {"gets": 1, "bytes": (successor / "internal.wav").stat().st_size}
         assert not (successor / "original.wav").exists()
         assert not (successor / "features.npz").exists()
         assert not (successor / "harmonic.wav").exists()
+
+
+def test_import_retry_hydrates_only_original_and_custom_instruments_are_selective(remote, monkeypatch, traffic):
+    root, _, _ = remote
+    with jobs.runtime():
+        p = api.create_project(api.schemas.ProjectCreate(name="inputs-synthetic"))["id"]
+        original = audio_io.write_wav(root / "original.wav", np.zeros((480, 2), dtype=np.float32))
+        size = original.stat().st_size
+        store.put("source", {"id": "import-again", "project_id": p, "original_file_path": str(original),
+                             "internal_audio_path": write(root, "unused-internal.wav", b"old-unused"),
+                             "features_path": write(root, "unused-features.npz", b"old-unused")})
+        for kind, id, relative, field in (
+            ("kit", "kit-trap-kick", "kits/custom.wav", "audio_path"),
+            ("sound", "bass-synthetic", "sounds/bass.wav", "sample_path"),
+        ):
+            file = root / relative
+            file.parent.mkdir(parents=True, exist_ok=True)
+            audio_io.write_wav(file, np.zeros((480, 2), dtype=np.float32))
+            store.put(kind, {"id": id, field: str(file)})
+    successor = replace_volume(remote, monkeypatch, destroy_old=True)
+    with jobs.runtime():
+        store.put("job", {"id": "retry-import", "status": "running", "owner_volume": "durable"})
+        monkeypatch.setattr(api, "_analyze", lambda ctx, sid, y: {"samples": 0})
+        assert api.job_import(jobs.JobContext("retry-import"), "import-again") == {"samples": 0}
+        assert traffic == {"gets": 1, "bytes": size}
+        assert not (successor / "unused-internal.wav").exists()
+        assert not (successor / "unused-features.npz").exists()
+        assert not (successor / "sounds/bass.wav").exists()
+        assert drums.sound("trap", "kick").shape == (480, 2)
+        assert traffic == {"gets": 2, "bytes": size * 2}
+        settings = {**bass.DEFAULT_808, "mode": "sample", "sample_path": str(successor / "sounds/bass.wav")}
+        assert bass._render_sample([], 92, 480, settings).shape == (480,)
+        assert traffic == {"gets": 3, "bytes": size * 3}
