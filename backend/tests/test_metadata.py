@@ -77,3 +77,24 @@ def test_database_errors_are_explicit_but_liveness_does_not_query_database(monke
         res = c.get("/api/system/database")
         assert res.status_code == 503 and res.headers["retry-after"] == "10"
         assert "no fallback" in res.json()["detail"]
+
+
+@pytest.mark.parametrize("mode", [None, "require", "verify-ca", "verify-full"])
+def test_postgres_tls_always_authenticates_host_and_system_trust(mode, monkeypatch):
+    monkeypatch.delenv("PGSSLMODE", raising=False)
+    monkeypatch.delenv("PGSSLROOTCERT", raising=False)
+    settings = {} if mode is None else {"sslmode": mode}
+    assert store._postgres_tls(settings) == {"sslmode": "verify-full", "sslrootcert": "system"}
+
+
+def test_postgres_tls_preserves_custom_trust_and_rejects_unsafe_configuration(tmp_path, monkeypatch):
+    root = tmp_path / "private-ca.pem"
+    root.write_text("Synthetic unit-test CA placeholder")
+    monkeypatch.setenv("PGSSLROOTCERT", str(root))
+    assert store._postgres_tls({"sslmode": "require"})["sslrootcert"] == str(root)
+    assert store._postgres_tls({"sslrootcert": "system"})["sslrootcert"] == "system"
+    for mode in ("disable", "allow", "prefer", "unknown"):
+        with pytest.raises(store.StoreConfigurationError, match="authenticated TLS"):
+            store._postgres_tls({"sslmode": mode})
+    with pytest.raises(store.StoreConfigurationError, match="trust root"):
+        store._postgres_tls({"sslrootcert": str(tmp_path / "missing")})

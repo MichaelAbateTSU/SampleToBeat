@@ -102,7 +102,10 @@ jobs:
           export CHOPLAB_DOMAIN=localhost ACME_EMAIL=check@example.com CHOPLAB_IMAGE=choplab:check
           mkdir -p "$PG_TEST_CERT_DIR" "$RUNNER_TEMP/choplab-pg-state"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=postgres' \
+            -addext 'subjectAltName=DNS:postgres' \
             -keyout "$PG_TEST_CERT_DIR/server.key" -out "$PG_TEST_CERT_DIR/server.crt" 2>/dev/null
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=untrusted' \
+            -keyout "$PG_TEST_CERT_DIR/untrusted.key" -out "$PG_TEST_CERT_DIR/untrusted.crt" 2>/dev/null
           sudo chown 999:999 "$PG_TEST_CERT_DIR/server.key"
           sudo chmod 600 "$PG_TEST_CERT_DIR/server.key"
           printf '%s\n' 'postgresql://choplab:container-test-database-password@postgres:5432/choplab?sslmode=require' > deploy/secrets/database_url
@@ -111,7 +114,7 @@ jobs:
           compose=(docker compose --project-directory deploy -f deploy/compose.yaml -f deploy/compose.neon.yaml -f deploy/compose.postgres-test.yaml)
           trap '"${compose[@]}" logs --tail 100; "${compose[@]}" down' EXIT
           "${compose[@]}" up -d --wait --wait-timeout 90 postgres
-          for phase in crud restart migration migration-restart restore; do
+          for phase in tls crud restart migration migration-restart restore; do
             "${compose[@]}" run -T --rm --no-deps \
               -v "$PWD/scripts/verify_postgres.py:/verify_postgres.py:ro" \
               -v "$RUNNER_TEMP/choplab-pg-state:/checks" \

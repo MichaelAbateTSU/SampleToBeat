@@ -2,6 +2,7 @@
 import argparse
 import json
 import sqlite3
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
@@ -13,9 +14,42 @@ from choplab.core import DATA_DIR
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("state", type=Path)
-    parser.add_argument("phase", choices=["crud", "restart", "migration", "migration-restart", "restore"])
+    parser.add_argument("phase", choices=["tls", "crud", "restart", "migration", "migration-restart", "restore"])
     args = parser.parse_args()
     assert store.backend_name() == "postgres", "These tests require explicitly configured PostgreSQL."
+
+    if args.phase == "tls":
+        import psycopg
+
+        original = store._DATABASE_URL
+        settings = psycopg.conninfo.conninfo_to_dict(original)
+        verified = store._postgres_tls(settings)
+        assert verified["sslmode"] == "verify-full"
+        with store._postgres_conn() as con:
+            assert con.connection.pgconn.ssl_in_use
+            assert con.connection.info.get_parameters()["sslmode"] == "verify-full"
+        hostaddr = socket.gethostbyname(settings["host"])
+        cases = [
+            ({"sslrootcert": "/run/secrets/postgres_untrusted_ca"}, "certificate verify failed"),
+            ({"host": "hostname-mismatch.invalid", "hostaddr": hostaddr}, "does not match host name"),
+        ]
+        for overrides, reason in cases:
+            store._DATABASE_URL = psycopg.conninfo.make_conninfo(original, **overrides)
+            bad_settings = psycopg.conninfo.conninfo_to_dict(store._DATABASE_URL)
+            try:
+                with psycopg.connect(store._DATABASE_URL, connect_timeout=10,
+                                     **store._postgres_tls(bad_settings)):
+                    raise AssertionError("Unsafe PostgreSQL TLS peer was accepted.")
+            except psycopg.OperationalError as error:
+                assert reason in str(error), "Failure was not the expected certificate verification rejection."
+            try:
+                with store._postgres_conn():
+                    raise AssertionError("Store accepted unsafe PostgreSQL TLS peer.")
+            except store.StoreUnavailable as error:
+                assert "hostname-mismatch" not in str(error), "Private connection details leaked."
+        store._DATABASE_URL = original
+        print("Verified TLS accepted trusted/matched PostgreSQL and rejected untrusted and hostname-mismatched peers.")
+        return
 
     if args.phase == "crud":
         assert store.check_ready() == {"ok": True, "metadata_store": "postgres"}

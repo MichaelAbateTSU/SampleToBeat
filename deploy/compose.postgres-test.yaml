@@ -1,5 +1,11 @@
 # CI only: disposable TLS PostgreSQL, never a production database or published port.
 services:
+  app:
+    secrets:
+      - postgres_ca
+      - postgres_untrusted_ca
+    environment:
+      PGSSLROOTCERT: /run/secrets/postgres_ca
   postgres:
     image: postgres:17-bookworm
     environment:
@@ -25,3 +31,8 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+secrets:
+  postgres_ca:
+    file: ${PG_TEST_CERT_DIR:?Set disposable CI certificate directory}/server.crt
+  postgres_untrusted_ca:
+    file: ${PG_TEST_CERT_DIR:?Set disposable CI certificate directory}/untrusted.crt

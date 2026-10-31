@@ -14,7 +14,7 @@ RUN uv venv /opt/venv && uv pip install --python /opt/venv/bin/python ".[postgre
     && uv pip freeze --python /opt/venv/bin/python > /opt/requirements-installed.txt
 
 FROM python:3.12-slim-bookworm AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 libatomic1 \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg libsndfile1 libgomp1 libatomic1 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 choplab && useradd --uid 10001 --gid choplab --create-home choplab \
     && mkdir -p /data && chown choplab:choplab /data

@@ -114,7 +114,8 @@ make the backend an internet-facing port.
 
 1. Sign in at [Neon](https://console.neon.tech), select the permanent **Free** plan, and create a dedicated
    project/database. Do not reuse another app's database or upgrade to paid. Copy the pooled PostgreSQL
-   connection URL privately from the console; it should include `sslmode=require`.
+   connection URL privately from the console. Standard Neon `sslmode=require` URLs are upgraded by the
+   backend to `verify-full` with system CA trust, authenticating both certificate chain and hostname.
 2. On the chosen host, put that URL on one line in `/opt/choplab/secrets/database_url` with no quotes.
    Do not paste it into chat, git, frontend settings or command-line arguments:
 
@@ -156,7 +157,13 @@ make the backend an internet-facing port.
 For non-container local testing, install `cd backend && uv sync --extra postgres` and configure a private
 `CHOPLAB_DATABASE_URL_FILE`, `CHOPLAB_DATABASE_URL`, or `DATABASE_URL` (file and inline configuration are
 mutually exclusive). Without any database configuration, existing SQLite behavior is unchanged. Connections
-require TLS and disable automatic prepared statements for Neon PgBouncer transaction pooling. Only one
+always enforce `sslmode=verify-full` and disable automatic prepared statements for Neon PgBouncer transaction
+pooling. A URL using `require` or `verify-ca` is upgraded, never used as an insecure fallback; `disable`,
+`allow` and `prefer` are rejected. The container includes system CA certificates and uses libpq's `system`
+trust by default. For an isolated/private PostgreSQL server, explicitly configure a trusted certificate
+file with URL `sslrootcert` or `PGSSLROOTCERT`, readable inside the container. Certificate-chain or hostname
+mismatches fail the connection; do not bypass these checks or use an untrusted CA to fix connectivity.
+Only one
 ChopLab backend process is supported; this is not a multi-user/multi-writer SaaS migration.
 
 The authenticated `/api/system/database` endpoint performs an **on-demand** connection check. Do not poll it
@@ -169,7 +176,8 @@ versions in `/opt/requirements-installed.txt`. Retain a built image tag for repe
 rebuilding later can resolve newer dependencies. The workflow `Hosted container checks` builds and smoke-tests
 the container, authentication, SPA serving, native demo/HPSS/generation/HQ/WAV+MP3/range/SSE workflow,
 persistence across restart, Caddy/Compose configuration, and real TLS PostgreSQL metadata CRUD/job updates/
-migration/restore checks on x86-64 and ARM64. It executes the real deployment backup script for both SQLite
+migration/restore checks on x86-64 and ARM64, including real trusted/hostname-matched TLS success and untrusted
+CA/hostname-mismatch rejection. It executes the real deployment backup script for both SQLite
 and PostgreSQL, restores exact metadata and synthetic audio into a fresh volume/database, and exercises
 export/invalid-JSON/archive/recovery failures, overlapping backups and intentionally stopped service state.
 Ordinary CI uses a disposable local PostgreSQL container.

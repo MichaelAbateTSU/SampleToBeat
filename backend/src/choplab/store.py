@@ -67,6 +67,17 @@ class _Postgres:
         return self.connection.execute(query.replace("?", "%s"), params)
 
 
+def _postgres_tls(settings: dict) -> dict:
+    mode = settings.get("sslmode", os.environ.get("PGSSLMODE", "require"))
+    if mode not in ("require", "verify-ca", "verify-full"):
+        raise StoreConfigurationError("PostgreSQL requires authenticated TLS; remove insecure sslmode settings.")
+    root = settings.get("sslrootcert") or os.environ.get("PGSSLROOTCERT") or "system"
+    if root != "system" and not Path(root).expanduser().is_file():
+        raise StoreConfigurationError("Configured PostgreSQL trust root is not a readable certificate file.")
+    # libpq 16+ supports system trust. Never downgrade certificate or hostname checks.
+    return {"sslmode": "verify-full", "sslrootcert": root}
+
+
 @contextmanager
 def _postgres_conn():
     try:
@@ -75,12 +86,10 @@ def _postgres_conn():
         raise StoreConfigurationError("PostgreSQL is configured but unavailable; install uv sync --extra postgres.") from None
     try:
         # Neon pooled URLs use PgBouncer transaction mode. Avoid session-scoped
-        # prepared statements; require encrypted connections even if the URL omits TLS.
+        # prepared statements. Standard Neon sslmode=require URLs still need peer verification.
         settings = psycopg.conninfo.conninfo_to_dict(_DATABASE_URL)
-        sslmode = settings.get("sslmode", "require")
-        if sslmode not in ("require", "verify-ca", "verify-full"):
-            raise StoreConfigurationError("PostgreSQL connections require sslmode=require, verify-ca or verify-full.")
-        with psycopg.connect(_DATABASE_URL, connect_timeout=10, prepare_threshold=None, sslmode=sslmode) as con:
+        with psycopg.connect(_DATABASE_URL, connect_timeout=10, prepare_threshold=None,
+                             **_postgres_tls(settings)) as con:
             yield _Postgres(con)
     except psycopg.Error as e:
         log.error("Configured PostgreSQL operation failed (%s); check private database settings.", type(e).__name__)

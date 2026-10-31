@@ -18,6 +18,9 @@ cp deploy/secrets/owner_password_hash "$root/secrets/"
 compose=(docker compose --project-name choplab --project-directory "$root" --env-file "$root/.env" -f "$release/compose.yaml")
 if [[ "$mode" == postgres ]]; then
   cp deploy/secrets/database_url "$root/secrets/database_url"
+  # Give the actual backup script's Compose invocation the isolated test CA too.
+  docker compose --project-directory deploy -f deploy/compose.yaml \
+    -f deploy/compose.postgres-test.yaml config > "$release/compose.yaml"
   compose+=(-f "$release/compose.neon.yaml")
 fi
 app=$("${compose[@]}" ps --all --quiet app)
