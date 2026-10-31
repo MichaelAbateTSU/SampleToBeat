@@ -90,17 +90,18 @@ it("does not stop a healthy job when another exhausts its failure budget", async
 });
 
 it("bounds disconnected SSE fallback traffic while hidden and closes tracking on recovered completion", async () => {
-  let stream!: { close: () => void; onerror?: () => void };
   const close = vi.fn();
-  vi.stubGlobal("EventSource", class {
+  class MockEventSource {
+    static instances: MockEventSource[] = [];
     close = close;
     onerror?: () => void;
-    constructor() { stream = this; }
-  });
+    constructor() { MockEventSource.instances.push(this); }
+  }
+  vi.stubGlobal("EventSource", MockEventSource);
   const request = vi.spyOn(api, "job").mockRejectedValue(new Error("connection lost"));
   act(() => useJobs.getState().track(job));
   renderHook(() => useBackgroundJobs(true));
-  act(() => stream.onerror?.());
+  act(() => MockEventSource.instances[0].onerror?.());
   expect(close).toHaveBeenCalledOnce();
   await tick(20 * 60_000);
   expect(request).toHaveBeenCalledTimes(3);
