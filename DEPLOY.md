@@ -41,8 +41,9 @@ container, avoiding cross-origin auth, SSE, download and audio-range complicatio
 
 * [Render free](https://render.com/docs/free) is the selected application host, but its
   [0.1 CPU / 512 MB](https://render.com/docs/compute-plans) limit, sleep and ephemeral disk remain
-  hard blockers: controlled tests OOM-killed generation from both 4-second and 16-second inputs and
-  a five-minute import. It is not a production-ready deployment for the unchanged audio engine.
+  hard blockers: the baseline OOM-killed short generation and five-minute import. Targeted memory reductions
+  now pass the measured short full workflows, but five-minute import still OOM-kills and short MP3 reaches
+  the cap. It is not a production-ready deployment for the full supported studio.
 * [Hugging Face Spaces](https://huggingface.co/docs/hub/spaces-overview) requires a paid plan to create a
   Docker Space; CPU Basic's zero hourly price does not make a new Docker Space $0. Its default storage is
   ephemeral and unused compute sleeps.
@@ -93,6 +94,14 @@ an ephemeral disk or call it durable because the metadata uses Neon:
   successful startup or a healthy endpoint does not establish Free-tier suitability. **Do not deploy the
   unchanged full studio to Render Free.** Neon object storage cannot fix an audio computation's memory
   requirement; an unvalidated storage rewrite is not a solution to these measured failures.
+* Behavior-preserving allocation reductions were subsequently measured at code `f3dc8be` in
+  [the capped memory workflow](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41227718272).
+  All tested 4s and 16s import, HPSS, eight-bar generation, HQ two-bar preview, WAV24 and MP3 export/download
+  stages passed. Short generation peaks fell to 450.01/469.84 MiB, respectively. However, 16s MP3 reached
+  512 MiB, and 300s import was OOM-killed (exit 137) at 511.98 MiB after 209.129 seconds; its downstream
+  stages were skipped. There is no reliable headroom or five-minute support established at the cap.
+  Default longer/multiple-variation generation, alternate effects and concurrent requests remain untested
+  at these limits. A green measurement workflow records failures as evidence, not production readiness.
 * Free web services lose uploaded/generated files on every restart, redeploy and 15-minute idle spin-down.
   They cannot attach persistent disks, run one-off jobs or use dashboard/SSH shells. The full app currently
   needs `/data` files and has no Neon Object Storage integration; an empty bucket is not automatic persistence.
