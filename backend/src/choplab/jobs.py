@@ -2,16 +2,25 @@
 serialized through their own single-worker pool so two models never run at once."""
 from __future__ import annotations
 
+import os
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Callable
 
 from . import store
 from .core import log
 
 TERMINAL = {"completed", "failed", "canceled", "interrupted"}
-_pools = {"default": ThreadPoolExecutor(max_workers=2, thread_name_prefix="job"),
+WORKERS = int(os.environ.get("CHOPLAB_JOB_WORKERS", "1" if os.environ.get("CHOPLAB_MODE") == "hosted" else "2"))
+MAX_PENDING = int(os.environ.get("CHOPLAB_MAX_PENDING_JOBS", "8" if os.environ.get("CHOPLAB_MODE") == "hosted" else "64"))
+if not 1 <= WORKERS <= 8 or not 1 <= MAX_PENDING <= 256:
+    raise ValueError("CHOPLAB_JOB_WORKERS must be 1-8 and CHOPLAB_MAX_PENDING_JOBS must be 1-256")
+_compute = threading.BoundedSemaphore(WORKERS)
+_pending = threading.BoundedSemaphore(MAX_PENDING)
+_pools = {"default": ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="job"),
           "separation": ThreadPoolExecutor(max_workers=1, thread_name_prefix="sep")}
 _cancel: set[str] = set()
 _handlers: dict[str, Callable] = {}
@@ -19,6 +28,20 @@ _handlers: dict[str, Callable] = {}
 
 class Canceled(Exception):
     pass
+
+
+class Busy(Exception):
+    pass
+
+
+@contextmanager
+def compute_slot(*, wait: bool = False):
+    if not _compute.acquire(blocking=wait):
+        raise Busy("Audio engine is busy; wait for the running job and try again.")
+    try:
+        yield
+    finally:
+        _compute.release()
 
 
 class JobContext:
@@ -39,25 +62,38 @@ def handler(job_type: str, pool: str = "default"):
 
 
 def submit(job_type: str, project_id: str | None, params: dict) -> dict:
-    job = store.put("job", {"id": store.new_id("job"), "project_id": project_id, "job_type": job_type,
+    if not _pending.acquire(blocking=False):
+        # Upload/export records already exist when the job is submitted.
+        if job_type == "import":
+            store.update("source", params["source_id"], analysis_status="failed", error="Job queue is full; reanalyze to retry.")
+        elif job_type == "separate":
+            store.update("source", params["source_id"], separation_status="failed", separation_error="Job queue is full.")
+        elif job_type == "export":
+            store.update("export", params["export_id"], status="failed", error="Job queue is full; export again.")
+        raise Busy("Job queue is full; wait for a job to finish and try again.")
+    try:
+        fn, pool = _handlers[job_type]
+        job = store.put("job", {"id": store.new_id("job"), "project_id": project_id, "job_type": job_type,
                             "params": params, "status": "queued", "progress": 0.0, "current_stage": "queued",
                             "started_at": None, "completed_at": None, "error_message": None, "result": None},
                     parent=project_id)
-    fn, pool = _handlers[job_type]
-    _pools[pool].submit(_run, job["id"], fn, params)
-    return job
+        _pools[pool].submit(_run, job["id"], fn, params)
+        return job
+    except Exception:
+        _pending.release()
+        raise
 
 
 def _run(job_id: str, fn: Callable, params: dict) -> None:
-    if job_id in _cancel:
-        store.update("job", job_id, status="canceled", completed_at=store.now())
-        return
-    store.update("job", job_id, status="running", started_at=store.now())
-    t0 = time.perf_counter()
     try:
-        result = fn(JobContext(job_id), **params)
-        store.update("job", job_id, status="completed", progress=1.0, current_stage="done", result=result,
-                     completed_at=store.now(), duration_s=round(time.perf_counter() - t0, 2))
+        with compute_slot(wait=True):
+            if job_id in _cancel:
+                raise Canceled()
+            store.update("job", job_id, status="running", started_at=store.now())
+            t0 = time.perf_counter()
+            result = fn(JobContext(job_id), **params)
+            store.update("job", job_id, status="completed", progress=1.0, current_stage="done", result=result,
+                         completed_at=store.now(), duration_s=round(time.perf_counter() - t0, 2))
     except Canceled:
         store.update("job", job_id, status="canceled", completed_at=store.now())
     except Exception as e:  # surfaced to the UI; full trace in the log
@@ -66,6 +102,7 @@ def _run(job_id: str, fn: Callable, params: dict) -> None:
                      completed_at=store.now())
     finally:
         _cancel.discard(job_id)
+        _pending.release()
 
 
 def cancel(job_id: str) -> dict:

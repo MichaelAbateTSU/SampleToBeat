@@ -5,6 +5,8 @@ let ChopLab analyze it and find loopable phrases and chops, generate several com
 drums and 808s), then edit one in the browser studio and export a mastered WAV or MP3.
 
 * **Local and private.** A Python audio engine and a web studio on `127.0.0.1`. No accounts, no uploads.
+* **Optional hosted studio.** An owner-protected HTTPS container serves both frontend and backend with persistent
+  audio storage. [DEPLOY.md](DEPLOY.md) explains readiness and why Neon still needs a separate Python host.
 * **Explainable.** Tempo, key and sample choices come with confidences and reasons, and you can correct them.
 * **Editable.** Arrangement timeline, drum step sequencer, 808 piano roll, chop editor, mixer and FX.
 * **One render path.** Previews and exports use the same offline renderer (-14 LUFS, -1 dBTP).

@@ -1,0 +1,74 @@
+name: Hosted container checks
+on:
+  push:
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "deploy/**"
+      - ".github/workflows/container.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "deploy/**"
+      - ".github/workflows/container.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build -t choplab:check .
+      - name: Smoke test protected image and persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/choplab-test"
+          python3 - <<'PY'
+          import hashlib, os, pathlib, secrets
+          salt = secrets.token_bytes(16)
+          digest = hashlib.pbkdf2_hmac("sha256", b"workflow-test-password", salt, 600000)
+          pathlib.Path(os.environ["RUNNER_TEMP"], "choplab-test", "hash").write_text(
+              f"pbkdf2_sha256$600000${salt.hex()}${digest.hex()}")
+          PY
+          docker run -d --name choplab-check --read-only --tmpfs /tmp:uid=10001,gid=10001 \
+            --env CHOPLAB_MODE=hosted --env CHOPLAB_PUBLIC_URL=https://localhost \
+            --env CHOPLAB_PROXY_IPS='*' \
+            --env CHOPLAB_PASSWORD_HASH_FILE=/run/secrets/hash \
+            -v "$RUNNER_TEMP/choplab-test/hash:/run/secrets/hash:ro" \
+            -v choplab_test:/data -p 127.0.0.1:8765:8765 choplab:check
+          trap 'docker logs choplab-check; docker rm -f choplab-check' EXIT
+          for i in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:8765/api/health; then break; fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:8765/api/health
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/)" = 400
+          test "$(curl -s -H 'X-Forwarded-Proto: https' -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/)" = 401
+          curl --fail --silent -H 'X-Forwarded-Proto: https' -u owner:workflow-test-password http://127.0.0.1:8765/ | grep -q '<div id="root">'
+          curl --fail --silent -H 'X-Forwarded-Proto: https' -u owner:workflow-test-password \
+            -H 'Content-Type: application/json' -d '{"name":"Persistence check"}' \
+            http://127.0.0.1:8765/api/projects > "$RUNNER_TEMP/choplab-test/project.json"
+          docker restart choplab-check
+          for i in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:8765/api/health; then break; fi
+            sleep 2
+          done
+          curl --fail --silent -H 'X-Forwarded-Proto: https' -u owner:workflow-test-password \
+            http://127.0.0.1:8765/api/projects | grep -q 'Persistence check'
+      - name: Validate TLS proxy and Compose configuration
+        run: |
+          set -euo pipefail
+          mkdir -p deploy/secrets
+          cp "$RUNNER_TEMP/choplab-test/hash" deploy/secrets/owner_password_hash
+          export CHOPLAB_DOMAIN=localhost ACME_EMAIL=check@example.com CHOPLAB_IMAGE=choplab:check
+          docker compose --project-directory deploy -f deploy/compose.yaml config --quiet
+          docker compose --project-directory deploy -f deploy/compose.yaml run --rm --no-deps proxy \
+            caddy validate --config /etc/caddy/Caddyfile

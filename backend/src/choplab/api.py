@@ -1,5 +1,5 @@
 """FastAPI service (spec 22). Heavy work runs as persistent background jobs; the UI follows them over SSE.
-Run: uv run choplab  (binds 127.0.0.1 only - this is a local, single-user app)."""
+Run: uv run choplab (local by default; protected HTTPS hosting is opt-in)."""
 from __future__ import annotations
 
 import asyncio
@@ -15,11 +15,17 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from urllib.parse import urlsplit
 
 from . import analysis, audio_io, bass, compose, drums, jobs, render, sampling, schemas, separation, store, transform
 from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, TICKS_PER_BAR, cache_key, data_path, log, parse_key
+from .hosting import HOSTING, OwnerAccess
 
-MAX_UPLOAD = 1 << 30  # 1 GiB
+MAX_UPLOAD = int(os.environ.get("CHOPLAB_MAX_UPLOAD_MB", "100" if HOSTING else "1024")) * (1 << 20)
+MIN_FREE = int(os.environ.get("CHOPLAB_MIN_FREE_MB", "2048" if HOSTING else "0")) * (1 << 20)
+if MAX_UPLOAD <= 0 or MIN_FREE < 0:
+    raise ValueError("Upload limit must be positive and free-space reserve nonnegative")
 FRONTEND = Path(os.environ.get("CHOPLAB_FRONTEND", Path(__file__).resolve().parents[3] / "frontend" / "dist"))
 
 
@@ -30,7 +36,15 @@ async def lifespan(app):
 
 
 app = FastAPI(title="ChopLab AI", version="0.1.0", lifespan=lifespan,
-              description="Local sample-based beat generator. All audio stays on this machine.")
+              description="Single-owner sample-based beat generator.")
+app.add_middleware(OwnerAccess)
+if HOSTING:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(HOSTING.origin).hostname, "localhost", "127.0.0.1"])
+
+
+@app.exception_handler(jobs.Busy)
+async def _busy(_, e):
+    return JSONResponse({"detail": str(e)}, 429, headers={"Retry-After": "5"})
 
 
 @app.exception_handler(ValueError)  # includes AudioError and pydantic ValidationError
@@ -70,19 +84,21 @@ async def _save_upload(f: UploadFile, dest: Path) -> int:
     """Stream to disk under a generated name (the user's file name is metadata only)."""
     n = 0
     tmp = dest.with_suffix(".part")
-    with open(tmp, "wb") as out:
-        while chunk := await f.read(1 << 20):
-            n += len(chunk)
-            if n > MAX_UPLOAD:
-                out.close()
-                tmp.unlink()
-                raise HTTPException(413, "File is larger than 1 GiB.")
-            out.write(chunk)
-    if n == 0:
-        tmp.unlink()
-        raise HTTPException(400, "Uploaded file is empty.")
-    tmp.replace(dest)
-    return n
+    try:
+        with open(tmp, "wb") as out:
+            while chunk := await f.read(1 << 20):
+                n += len(chunk)
+                if n > MAX_UPLOAD:
+                    raise HTTPException(413, f"File is larger than {MAX_UPLOAD // (1 << 20)} MiB.")
+                if shutil.disk_usage(DATA_DIR).free < MIN_FREE + len(chunk):
+                    raise HTTPException(507, "Storage reserve reached; delete old projects or clear the cache.")
+                out.write(chunk)
+        if n == 0:
+            raise HTTPException(400, "Uploaded file is empty.")
+        tmp.replace(dest)
+        return n
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _ext(name: str | None) -> str:
@@ -314,7 +330,9 @@ async def upload_source(id: str, file: UploadFile = File(...)):
     dest = _dir(id, "sources", sid) / f"original{_ext(file.filename)}"
     await _save_upload(file, dest)
     try:
-        audio_io.probe(dest)  # reject non-audio before queueing work
+        meta = audio_io.probe(dest)  # reject non-audio before queueing work
+        if meta["duration"] > audio_io.MAX_SECONDS:
+            raise audio_io.AudioError(f"Recording is longer than {audio_io.MAX_SECONDS} seconds; trim it first.")
     except audio_io.AudioError:
         shutil.rmtree(dest.parent, ignore_errors=True)
         raise
@@ -472,7 +490,8 @@ def _sample_file(s: dict, bpm: float | None) -> Path:
     paths, hashes = sampling.resolve(src, s["stems"])
     t = {**transform.DEFAULT_TRANSFORM, **(s.get("transform") or {})}
     speed = (bpm / s["source_bpm"] / transform.tape_rate(t)) if bpm else 1.0  # with bpm: locked to that tempo
-    y = transform.cached_transform(paths, hashes, s["start"], s["end"], t, speed)
+    with jobs.compute_slot():
+        y = transform.cached_transform(paths, hashes, s["start"], s["end"], t, speed)
     out = data_path("cache", "previews", cache_key("smp", hashes, s["start"], s["end"], t, round(speed, 6)) + ".wav")
     return out if out.exists() else audio_io.write_wav(out, np.clip(y, -1, 1), subtype="PCM_16")
 
@@ -496,8 +515,9 @@ def sample_buffer(id: str, bpm: float, ratio: float = 1.0, pitch: float = 0.0):
     t = {**transform.DEFAULT_TRANSFORM, **(s.get("transform") or {})}
     out = data_path("cache", "previews", cache_key("buf", hashes, s["start"], s["end"], t, round(bpm, 4), round(ratio, 6), round(pitch, 4)) + ".wav")
     if not out.exists():
-        y, _ = render.sample_buffer(s, src, bpm, ratio, pitch)
-        audio_io.write_wav(out, np.clip(y, -1, 1), subtype="PCM_16")
+        with jobs.compute_slot():
+            y, _ = render.sample_buffer(s, src, bpm, ratio, pitch)
+            audio_io.write_wav(out, np.clip(y, -1, 1), subtype="PCM_16")
     return FileResponse(out, media_type="audio/wav")
 
 
@@ -594,7 +614,8 @@ def preview(id: str, body: schemas.PreviewRequest):
     """Renders through the same engine as export, so what you hear is what you export."""
     p = _get("project", id)
     arr = schemas.arrangement(body.arrangement or p.get("arrangement") or {})
-    res = render.render(arr, {s["id"]: s for s in _samples(p)}, _sources(p), body.scope, body.loop_start_bar, body.loop_bars)
+    with jobs.compute_slot():
+        res = render.render(arr, {s["id"]: s for s in _samples(p)}, _sources(p), body.scope, body.loop_start_bar, body.loop_bars)
     d = _dir(id, "previews")
     for old in d.glob("studio_*.wav"):  # keep one studio preview on disk
         old.unlink(missing_ok=True)
@@ -620,8 +641,12 @@ async def bass_sample(id: str, file: UploadFile = File(...)):
     _get("project", id)
     tmp = _dir(id, "sounds") / f"upload{_ext(file.filename)}"
     await _save_upload(file, tmp)
-    y = audio_io.decode(tmp)[: SR * 4]
-    tmp.unlink()
+    try:
+        with jobs.compute_slot():
+            y = await asyncio.to_thread(audio_io.decode, tmp)
+            y = y[: SR * 4]
+    finally:
+        tmp.unlink(missing_ok=True)
     out = audio_io.write_wav(_dir(id, "sounds") / f"808_{store.new_id('s')}.wav", y)
     return {"sample_path": str(out)}
 
@@ -664,6 +689,8 @@ def download(id: str, name: str | None = None):
 
 @app.post("/api/exports/{id}/reveal")
 def reveal(id: str):
+    if HOSTING:
+        raise HTTPException(409, "Hosted exports are on the server; use Download to save them to your device.")
     folder = _get("export", id).get("folder")
     if not folder or not Path(folder).is_dir():
         raise HTTPException(409, "Export folder not available.")
@@ -716,7 +743,8 @@ async def kit_upload(kit: str, inst: str, file: UploadFile = File(...)):
     tmp = data_path("kits", "_upload" + _ext(file.filename))
     await _save_upload(file, tmp)
     try:
-        drums.import_sound(kit, inst, tmp)
+        with jobs.compute_slot():
+            await asyncio.to_thread(drums.import_sound, kit, inst, tmp)
     finally:
         tmp.unlink(missing_ok=True)
     return {"kit": kit, "inst": inst, "custom": True}
@@ -785,6 +813,8 @@ def capabilities():
     """Also serves as UI configuration: genres, strategies, kits and default settings come from here."""
     free = shutil.disk_usage(DATA_DIR).free
     return {"ffmpeg": audio_io.ffmpeg_exe() is not None, "sample_rate": SR, "data_dir": str(DATA_DIR),
+            "hosted": HOSTING is not None, "max_upload_mb": MAX_UPLOAD // (1 << 20),
+            "max_audio_seconds": audio_io.MAX_SECONDS,
             "disk_free_gb": round(free / 1e9, 1), "schema_version": SCHEMA_VERSION,
             "genres": {k: {**v, "bpm": list(v["bpm"]), "swing": list(v["swing"])} for k, v in drums.GENRES.items()},
             "strategies": compose.STRATEGIES, "kits": list(drums.KITS), "instruments": drums.INSTRUMENTS,
@@ -835,4 +865,10 @@ def main():
     logging_level = os.environ.get("CHOPLAB_LOG", "info")
     port = int(os.environ.get("CHOPLAB_PORT", "8765"))
     log.info("ChopLab data dir: %s", DATA_DIR)
-    uvicorn.run("choplab.api:app", host="127.0.0.1", port=port, log_level=logging_level)
+    host = os.environ.get("CHOPLAB_HOST", "0.0.0.0" if HOSTING else "127.0.0.1")
+    if not HOSTING and host not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("Non-loopback binding requires protected CHOPLAB_MODE=hosted")
+    uvicorn.run("choplab.api:app", host=host, port=port, log_level=logging_level,
+                workers=1, proxy_headers=bool(HOSTING),
+                forwarded_allow_ips=os.environ.get("CHOPLAB_PROXY_IPS", "127.0.0.1"),
+                limit_concurrency=32 if HOSTING else None)

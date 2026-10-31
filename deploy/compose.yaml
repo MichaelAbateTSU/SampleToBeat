@@ -1,0 +1,80 @@
+name: choplab
+services:
+  app:
+    image: ${CHOPLAB_IMAGE:-choplab:local}
+    restart: unless-stopped
+    init: true
+    environment:
+      CHOPLAB_MODE: hosted
+      CHOPLAB_PUBLIC_URL: https://${CHOPLAB_DOMAIN:?Set CHOPLAB_DOMAIN in .env}
+      CHOPLAB_USERNAME: ${CHOPLAB_USERNAME:-owner}
+      CHOPLAB_PASSWORD_HASH_FILE: /run/secrets/owner_password_hash
+      CHOPLAB_HOST: 0.0.0.0
+      CHOPLAB_PROXY_IPS: "*"
+      CHOPLAB_JOB_WORKERS: "1"
+      CHOPLAB_MAX_PENDING_JOBS: "8"
+      CHOPLAB_MAX_UPLOAD_MB: "100"
+      CHOPLAB_MAX_AUDIO_SECONDS: "300"
+      CHOPLAB_MIN_FREE_MB: "2048"
+    secrets:
+      - owner_password_hash
+    volumes:
+      - audio:/data
+    tmpfs:
+      - /tmp:size=256m,uid=10001,gid=10001
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 9g
+    cpus: 1.75
+    pids_limit: 256
+    stop_grace_period: 60s
+    networks:
+      - private
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+  proxy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      CHOPLAB_DOMAIN: ${CHOPLAB_DOMAIN:?Set CHOPLAB_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ${CADDY_CONFIG:-./Caddyfile}:/etc/caddy/Caddyfile:ro
+      - tls:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: 0.25
+    networks:
+      - private
+      - public
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+secrets:
+  owner_password_hash:
+    file: ./secrets/owner_password_hash
+volumes:
+  audio:
+    name: choplab_audio
+  tls:
+    name: choplab_tls
+  caddy_config:
+    name: choplab_caddy_config
+networks:
+  private:
+    internal: true
+  public:

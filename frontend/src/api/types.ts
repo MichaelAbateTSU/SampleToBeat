@@ -344,6 +344,9 @@ export interface GenreInfo {
 }
 
 export interface Capabilities {
+  hosted?: boolean;
+  max_upload_mb?: number;
+  max_audio_seconds?: number;
   ffmpeg: boolean;
   sample_rate: number;
   data_dir: string;

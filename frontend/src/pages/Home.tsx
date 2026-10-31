@@ -43,7 +43,7 @@ export default function HomePage() {
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Projects</h1>
-          <p className="text-sm text-ink-400">Import a sample, let ChopLab analyze and chop it, then generate and edit beats — all locally.</p>
+          <p className="text-sm text-ink-400">Import a sample, let ChopLab analyze and chop it, then generate and edit beats in your private studio.</p>
         </div>
         <Button variant="primary" data-testid="new-project" onClick={() => setCreating(true)}><Plus className="size-4" /> New project</Button>
       </div>

@@ -41,6 +41,12 @@ def test_full_workflow(c):
     assert abs(an["bpm"] - 92) < 0.5 and an["key"] == "A minor"
     assert len(c.get(f"/api/sources/{sid}/waveform").json()["peaks"]) > 100
     wav(c, f"/api/sources/{sid}/audio")
+    seek = c.get(f"/api/sources/{sid}/audio", headers={"Range": "bytes=0-63"})
+    assert seek.status_code == 206 and len(seek.content) == 64
+    assert seek.headers["content-range"].startswith("bytes 0-63/")
+    events = c.get(f"/api/jobs/{r['job']['id']}/events")
+    assert events.headers["content-type"].startswith("text/event-stream")
+    assert '"status": "completed"' in events.text
 
     samples = c.get(f"/api/projects/{pid}/samples").json()
     assert len(samples) >= 6 and all(s["explanation"] for s in samples)
@@ -101,6 +107,8 @@ def test_full_workflow(c):
     assert not next(f for f in e["files"] if f["kind"] == "mix")["check"]["silent"]
     master = next(f["name"] for f in e["files"] if f["kind"] == "mix")
     y = wav(c, f"/api/exports/{r['export_id']}/download?name={master}")
+    seek = c.get(f"/api/exports/{r['export_id']}/download?name={master}", headers={"Range": "bytes=0-63"})
+    assert seek.status_code == 206 and len(seek.content) == 64
     assert np.abs(y).max() <= 10 ** (-0.99 / 20)
     assert c.get(f"/api/exports/{r['export_id']}/download?name=../../store.db").status_code == 404
 

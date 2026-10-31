@@ -15,7 +15,9 @@ from scipy.signal import resample_poly
 
 from .core import SR
 
-MAX_SECONDS = 20 * 60
+MAX_SECONDS = int(os.environ.get("CHOPLAB_MAX_AUDIO_SECONDS", "300" if os.environ.get("CHOPLAB_MODE") == "hosted" else "1200"))
+if not 1 <= MAX_SECONDS <= 1200:
+    raise ValueError("CHOPLAB_MAX_AUDIO_SECONDS must be 1-1200")
 
 
 class AudioError(ValueError):
@@ -85,22 +87,30 @@ def probe(path: Path) -> dict:
 
 def decode(path: Path, sr: int = SR) -> np.ndarray:
     """Decode any supported file to (n, 2) float32 at `sr`."""
+    meta = probe(path)
+    if meta["duration"] > MAX_SECONDS:
+        raise AudioError(f"Recording is longer than {MAX_SECONDS} seconds; trim it before importing.")
     try:
-        y, file_sr = sf.read(str(path), dtype="float32", always_2d=True)
+        y, file_sr = sf.read(str(path), dtype="float32", always_2d=True,
+                             frames=(MAX_SECONDS + 1) * meta["sample_rate"])
         y = resample(_to_stereo(y), file_sr, sr)
     except Exception:
         exe = ffmpeg_exe()
         if not exe:
             raise AudioError("Cannot decode file: unsupported format and FFmpeg unavailable.")
-        r = subprocess.run([exe, "-v", "error", "-i", str(path), "-f", "f32le", "-ac", "2", "-ar", str(sr), "-"],
-                           capture_output=True)
+        try:
+            r = subprocess.run([exe, "-v", "error", "-i", str(path), "-t", str(MAX_SECONDS + 1),
+                                "-f", "f32le", "-ac", "2", "-ar", str(sr), "-"],
+                               capture_output=True, timeout=180)
+        except subprocess.TimeoutExpired as e:
+            raise AudioError("Audio decoding timed out; trim or convert this recording and retry.") from e
         if r.returncode != 0 or not r.stdout:
             raise AudioError(f"Decoding failed: {r.stderr.decode(errors='replace')[-300:] or 'no audio'}")
         y = np.frombuffer(r.stdout, dtype=np.float32).reshape(-1, 2).copy()
     if len(y) == 0:
         raise AudioError("Audio file is empty (zero length).")
     if len(y) / sr > MAX_SECONDS:
-        raise AudioError(f"Recording is longer than {MAX_SECONDS // 60} minutes; trim it before importing.")
+        raise AudioError(f"Recording is longer than {MAX_SECONDS} seconds; trim it before importing.")
     if not np.isfinite(y).all():
         y = np.nan_to_num(y)
     return y

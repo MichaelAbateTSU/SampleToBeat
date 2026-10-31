@@ -1,5 +1,12 @@
 # Testing
 
+Hosted access regression tests cover owner authentication across API/docs/audio/download/SSE surfaces,
+HTTPS enforcement, cross-site and Host validation, failed-login throttling, upload/duration limits,
+partial-upload cleanup, shared compute slots and bounded background-job admission. The HTTP workflow also
+checks audio/download byte ranges and completed-job SSE. `.github/workflows/container.yml` adds Docker,
+SPA, restart-persistence and TLS/Compose configuration checks. These checks do not provision a live Neon
+deployment; see [DEPLOY.md](../DEPLOY.md) for the remaining provider/account constraints.
+
 All automated tests use synthetic audio (the generated demo song and in-test signals). No copyrighted audio
 is needed.
 

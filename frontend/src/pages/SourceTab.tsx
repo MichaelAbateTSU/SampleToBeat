@@ -2,7 +2,7 @@ import { useMutation } from "@tanstack/react-query";
 import { AlertTriangle, FileAudio, Layers, Upload, Wand2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api, urls } from "../api/client";
-import { keys, queryClient, useJobs, useModels } from "../api/hooks";
+import { keys, queryClient, useCapabilities, useJobs, useModels } from "../api/hooks";
 import type { Job, Project, Source } from "../api/types";
 import { PlayButton } from "../components/Audio";
 import { JobList } from "../components/JobProgress";
@@ -13,6 +13,7 @@ import { navigate, projectPath } from "../router";
 
 export default function SourceTab({ project, jobs }: { project: Project; jobs: Job[] }) {
   const sources = project.sources ?? [];
+  const caps = useCapabilities();
   const [sel, setSel] = useState<string | null>(null);
   const track = useJobs((s) => s.track);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -56,12 +57,13 @@ export default function SourceTab({ project, jobs }: { project: Project; jobs: J
         )}
       </div>
       <ErrorBanner error={upload.error ?? demo.error} />
+      {caps.data?.hosted && <p className="text-xs text-ink-400">Hosted imports: up to {caps.data.max_upload_mb} MiB and {Math.floor((caps.data.max_audio_seconds ?? 300) / 60)} minutes. Audio processing is shared; wait for running jobs before rendering HQ.</p>}
       <JobList jobs={jobs} types={["import", "analyze", "separate"]} />
 
       {!current ? (
         <div className={cx("rounded-lg transition-colors", drag && "bg-accent-soft")}>
           <Empty icon={<FileAudio className="size-8" />} title="Drop an audio file here">
-            WAV, MP3, FLAC, OGG, AIFF or M4A up to 15 minutes. Only use audio you own or have permission to sample.
+            WAV, MP3, FLAC, OGG, AIFF or M4A up to {Math.floor((caps.data?.max_audio_seconds ?? 1200) / 60)} minutes. Only use audio you own or have permission to sample.
           </Empty>
         </div>
       ) : (
