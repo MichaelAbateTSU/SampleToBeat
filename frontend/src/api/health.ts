@@ -8,7 +8,7 @@ export const HEALTH_IDLE_MS = 60_000;
 /** Hosted health traffic follows interaction, not merely an open visible tab. */
 export function useHealth() {
   const queryClient = useQueryClient();
-  const hosted = useCapabilities().data?.hosted !== false;
+  const hosted = useCapabilities().data?.hosted === true;
   const busy = useJobs((s) => Object.values(s.jobs).some((job) => !TERMINAL.has(job.status)));
   const [awake, setAwake] = useState(document.visibilityState === "visible");
   const awakeRef = useRef(awake);

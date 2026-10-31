@@ -1,0 +1,34 @@
+name: Isolated hosted idle health checks
+on:
+  push:
+    branches: [michaelabatetsu-render-free-feasibility]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/idle-health.yml"
+permissions:
+  contents: read
+jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Overlay frontend-only change on pinned hosting frontend
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin 345b44235d3343b73ee55b266e1b1b6ddd2c81ae
+          mkdir "$RUNNER_TEMP/idle-health"
+          git archive 345b44235d3343b73ee55b266e1b1b6ddd2c81ae frontend | tar -x -C "$RUNNER_TEMP/idle-health"
+          cp frontend/src/App.tsx frontend/src/App.test.tsx "$RUNNER_TEMP/idle-health/frontend/src/"
+          cp frontend/src/api/health.ts frontend/src/api/health.test.tsx "$RUNNER_TEMP/idle-health/frontend/src/api/"
+      - name: Restore missing dependencies and validate frontend
+        working-directory: ${{ runner.temp }}/idle-health/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm run typecheck
+          npm run lint
+          npm run build

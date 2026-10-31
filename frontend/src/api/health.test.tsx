@@ -1,5 +1,5 @@
 import { act, renderHook } from "@testing-library/react";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "./client";
 import { queryClient, useJobs } from "./hooks";
@@ -15,6 +15,7 @@ async function tick(ms = 0) {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  focusManager.setFocused(true);
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   queryClient.clear();
   queryClient.setQueryData(["capabilities"], { hosted: true });
@@ -25,6 +26,7 @@ beforeEach(() => {
 afterEach(() => {
   queryClient.clear();
   vi.restoreAllMocks();
+  focusManager.setFocused(undefined);
   vi.useRealTimers();
 });
 
@@ -111,6 +113,47 @@ describe("hosted health activity", () => {
     await tick(20_000);
     expect(vi.mocked(api.health).mock.calls.length).toBeGreaterThan(count);
     expect(hook.result.current.paused).toBe(false);
+  });
+
+  it("automatically recovers an unknown-mode backend after more than a minute without activity", async () => {
+    queryClient.removeQueries({ queryKey: ["capabilities"] });
+    vi.spyOn(api, "capabilities").mockRejectedValue(new Error("offline"));
+    vi.mocked(api.health).mockRejectedValue(new Error("offline"));
+    const hook = renderHook(useHealth, { wrapper });
+    await tick(90_100);
+    expect(hook.result.current.isError).toBe(true);
+    expect(hook.result.current.paused).toBe(false);
+    const count = vi.mocked(api.health).mock.calls.length;
+    vi.mocked(api.health).mockResolvedValue({ ok: true, engine: "2", version: "1" });
+    await tick(10_000);
+    expect(vi.mocked(api.health).mock.calls.length).toBeGreaterThan(count);
+    expect(hook.result.current.isError).toBe(false);
+  });
+
+  it("does not promise background health keepalives for a hidden nonterminal job", async () => {
+    const job: Job = {
+      id: "j", project_id: "p", job_type: "export", status: "running",
+      progress: .2, current_stage: "rendering", error_message: null, result: null,
+    };
+    useJobs.setState({ jobs: { j: job } });
+    renderHook(useHealth, { wrapper });
+    await tick(100);
+    act(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      focusManager.setFocused(false);
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await tick(100);
+    const count = vi.mocked(api.health).mock.calls.length;
+    await tick(20 * 60_000);
+    expect(api.health).toHaveBeenCalledTimes(count);
+    act(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      focusManager.setFocused(true);
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await tick(100);
+    expect(vi.mocked(api.health).mock.calls.length).toBeGreaterThan(count);
   });
 
   it("removes activity listeners and health observation on unmount", async () => {

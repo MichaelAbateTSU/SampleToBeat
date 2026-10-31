@@ -7,7 +7,7 @@ import App from "./App";
 vi.mock("./api/client", () => ({ api: { health: vi.fn() } }));
 vi.mock("./api/hooks", async (original) => ({
   ...await original<typeof import("./api/hooks")>(),
-  useCapabilities: () => ({ data: undefined }),
+  useCapabilities: () => ({ data: { hosted: true } }),
 }));
 vi.mock("./components/Audio", () => ({ NowPlaying: () => null }));
 vi.mock("./pages/Home", () => ({ default: () => null }));
