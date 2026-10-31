@@ -119,8 +119,18 @@ def test_recovery_requires_lock_and_never_interrupts_local_workers(library):
             jobs._active.clear()
 
 
-def test_lock_contention_from_another_process_is_rejected(library):
-    env = {**os.environ, "CHOPLAB_DATA": str(library)}
+def subprocess_database_env(database, library):
+    real_url = os.environ.get("CHOPLAB_TEST_POSTGRES_URL")
+    if database == "postgres" and not real_url:
+        pytest.skip("Concurrent PostgreSQL processes require the real isolated CI server")
+    env = {**os.environ, "CHOPLAB_DATA": str(library), "DATABASE_URL": "",
+           "CHOPLAB_DATABASE_URL": real_url if database == "postgres" else ""}
+    env.pop("CHOPLAB_DATABASE_URL_FILE", None)
+    return env
+
+
+def test_lock_contention_from_another_process_is_rejected(database, library):
+    env = subprocess_database_env(database, library)
     code = "from choplab import jobs\nwith jobs.runtime():\n print('unexpected')"
     with jobs.runtime():
         contender = subprocess.run([sys.executable, "-c", code], env=env,
@@ -131,8 +141,8 @@ def test_lock_contention_from_another_process_is_rejected(library):
         assert not jobs.recovery_error
 
 
-def test_abrupt_process_restart_recovers_import_separation_and_export(library):
-    env = {**os.environ, "CHOPLAB_DATA": str(library)}
+def test_abrupt_process_restart_recovers_import_separation_and_export(database, library):
+    env = subprocess_database_env(database, library)
     code = """
 import json, threading, time
 from choplab import jobs, store
