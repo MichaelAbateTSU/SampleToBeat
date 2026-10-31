@@ -1,6 +1,7 @@
 """Real isolated PostgreSQL + TLS S3 acceptance; never uses production targets."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -68,12 +69,15 @@ def raw(kind, id):
         return json.loads(con.execute("SELECT doc FROM docs WHERE kind=? AND id=?", (kind, id)).fetchone()[0])
 
 
-def replace_volume(remote, monkeypatch):
+def replace_volume(remote, monkeypatch, *, destroy_old=False):
     root, _, _ = remote
     successor = root.parent / "replacement"
     successor.mkdir()
     for module in (core, api, schemas):
         monkeypatch.setattr(module, "DATA_DIR", successor)
+    if destroy_old:
+        shutil.rmtree(root)
+        assert not root.exists()
     return successor
 
 
@@ -99,7 +103,7 @@ def test_all_asset_fields_restore_after_volume_replacement(remote, monkeypatch):
         saved = raw("source", "source")
         assert str(root) not in json.dumps(saved)
         assert len(saved["_assets"]) == 4
-    successor = replace_volume(remote, monkeypatch)
+    successor = replace_volume(remote, monkeypatch, destroy_old=True)
     with jobs.runtime():
         assert jobs.recovery_error is None
         restored = store.get("source", "source")
@@ -178,7 +182,7 @@ def test_offline_snapshot_restore_preserves_live_assets_and_tombstones(remote, m
         durable.reconcile()
         snapshot = store.export_snapshot()
         old_fence = durable._fence
-    replace_volume(remote, monkeypatch)
+    replace_volume(remote, monkeypatch, destroy_old=True)
     with store._conn() as con:
         con.execute("DELETE FROM docs")
         con.execute("DELETE FROM choplab_asset_links")
@@ -238,7 +242,7 @@ with jobs.runtime():
         process.communicate(timeout=10)
         with store._conn() as con:
             con.execute("UPDATE choplab_runtime SET expires=0 WHERE id=1")
-        replace_volume(remote, monkeypatch)
+        replace_volume(remote, monkeypatch, destroy_old=True)
         with TestClient(api.app) as client:
             assert client.get("/api/system/recovery").json()["ok"]
             for id in ("analyze", "separate", "export"):
@@ -280,7 +284,7 @@ def test_authenticated_range_download_restores_missing_cache(remote, monkeypatch
     data = b"RIFFsynthetic-range-audio"
     with jobs.runtime():
         store.put("source", {"id": "range", "internal_audio_path": write(root, "source/range.wav", data)})
-    replace_volume(remote, monkeypatch)
+    replace_volume(remote, monkeypatch, destroy_old=True)
     with TestClient(api.app) as client:
         response = client.get("/api/sources/range/audio", headers={"Range": "bytes=4-8"})
         assert response.status_code == 206 and response.content == data[4:9]
@@ -497,7 +501,7 @@ def test_studio_audio_workflow_survives_replacement_with_custom_sounds(remote, m
         original_audio = client.get(f"/api/sources/{source}/audio").content
         original_mix = client.get(f"/api/exports/{export}/download").content
         analysis = client.get(f"/api/sources/{source}/analysis").json()
-    replace_volume(remote, monkeypatch)
+    replace_volume(remote, monkeypatch, destroy_old=True)
     with TestClient(api.app) as client:
         assert client.get(f"/api/sources/{source}/audio").content == original_audio
         assert client.get(f"/api/exports/{export}/download").content == original_mix
