@@ -1,0 +1,149 @@
+name: Disposable durable audio integration
+on:
+  workflow_dispatch:
+    inputs:
+      http_only:
+        description: Run only the HTTP harness acceptance against disposable services
+        type: boolean
+        default: false
+  push:
+    branches: [michaelabatetsu-interrupted-job-recovery]
+    paths: [".github/workflows/durable-integration.yml"]
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build production engine and disposable acceptance runner
+        run: |
+          set -euo pipefail
+          docker build -t choplab:durable .
+          printf '%s\n' 'FROM choplab:durable' 'USER root' \
+            'RUN /opt/venv/bin/python -m ensurepip && /opt/venv/bin/python -m pip install pytest httpx' \
+            'USER choplab' > "$RUNNER_TEMP/Acceptance.Dockerfile"
+          docker build -t choplab:durable-test -f "$RUNNER_TEMP/Acceptance.Dockerfile" "$RUNNER_TEMP"
+      - name: Start isolated authenticated TLS PostgreSQL and S3 services
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/durable-pg" "$RUNNER_TEMP/durable-s3" "$RUNNER_TEMP/durable-service" "$RUNNER_TEMP/durable-evidence"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=postgres' \
+            -addext 'subjectAltName=DNS:postgres' \
+            -keyout "$RUNNER_TEMP/durable-pg/server.key" -out "$RUNNER_TEMP/durable-pg/server.crt" 2>/dev/null
+          sudo chown 999:999 "$RUNNER_TEMP/durable-pg/server.key"
+          sudo chmod 600 "$RUNNER_TEMP/durable-pg/server.key"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=s3' \
+            -addext 'subjectAltName=DNS:s3,DNS:localhost' \
+            -keyout "$RUNNER_TEMP/durable-s3/private.key" -out "$RUNNER_TEMP/durable-s3/public.crt" 2>/dev/null
+          release=RELEASE.2025-09-07T16-13-09Z
+          binary=minio.linux-amd64.$release
+          curl --fail --silent --show-error --location \
+            "https://github.com/minio/minio/releases/download/$release/$binary" -o "$RUNNER_TEMP/durable-service/minio"
+          curl --fail --silent --show-error --location \
+            "https://github.com/minio/minio/releases/download/$release/$binary.sha256sum" -o "$RUNNER_TEMP/durable-service/checksum"
+          printf '%s  %s\n' "$(awk '{print $1}' "$RUNNER_TEMP/durable-service/checksum")" \
+            "$RUNNER_TEMP/durable-service/minio" | sha256sum --check
+          chmod 755 "$RUNNER_TEMP/durable-service/minio"
+          docker network create durable-acceptance
+          docker volume create durable-working
+          docker run --rm -u root -v durable-working:/working choplab:durable-test chown 10001:10001 /working
+          docker run -d --name postgres --network durable-acceptance \
+            --tmpfs /var/lib/postgresql/data:uid=999,gid=999 \
+            -e POSTGRES_USER=choplab_test -e POSTGRES_DB=choplab_recovery_test \
+            -e POSTGRES_PASSWORD=synthetic-ci-password \
+            -v "$RUNNER_TEMP/durable-pg:/certs:ro" postgres:17-bookworm \
+            postgres -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
+          docker run -d --name durable-s3 --network durable-acceptance --network-alias s3 \
+            -u root --memory=1536m --memory-swap=1536m \
+            -e MINIO_ROOT_USER=synthetic-access -e MINIO_ROOT_PASSWORD=synthetic-secret \
+            -v "$RUNNER_TEMP/durable-s3:/certs:ro" \
+            -v "$RUNNER_TEMP/durable-service/minio:/minio:ro" \
+            -p 127.0.0.1:9000:9000 --entrypoint /minio choplab:durable-test \
+            server /tmp/minio --certs-dir /certs
+          for i in {1..60}; do
+            if docker exec postgres pg_isready -U choplab_test -d choplab_recovery_test \
+              && curl --fail --silent --cacert "$RUNNER_TEMP/durable-s3/public.crt" https://localhost:9000/minio/health/ready; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Verify replacements expired workers reference retirement and range serving under 512 MiB
+        if: ${{ !inputs.http_only }}
+        run: |
+          set -euo pipefail
+          docker create --name durable-check --network durable-acceptance --entrypoint python \
+            --memory=512m --memory-swap=512m --cpus=1 --read-only --tmpfs /tmp:size=32m,uid=10001,gid=10001 \
+            -e CHOPLAB_DISPOSABLE_POSTGRES_TEST=yes \
+            -e CHOPLAB_TEST_POSTGRES_URL='postgresql://choplab_test:synthetic-ci-password@postgres:5432/choplab_recovery_test?sslmode=verify-full' \
+            -e CHOPLAB_TEST_S3_CA=/s3/public.crt -e PGSSLROOTCERT=/pg/server.crt \
+            -v "$RUNNER_TEMP/durable-pg/server.crt:/pg/server.crt:ro" \
+            -v "$RUNNER_TEMP/durable-s3/public.crt:/s3/public.crt:ro" \
+            -v "$PWD/backend:/workspace/backend:ro" -v "$PWD/scripts:/workspace/scripts:ro" \
+            -v durable-working:/working choplab:durable-test \
+            /workspace/backend/storage_tests/run_durable_acceptance.py \
+            -q -s -p no:cacheprovider --basetemp=/working/tests \
+            /workspace/backend/storage_tests/test_durable.py \
+            /workspace/backend/storage_tests/test_selective_hydration.py
+          set +e
+          docker start -a durable-check | tee "$RUNNER_TEMP/durable-evidence/tests.log"
+          code=${PIPESTATUS[0]}
+          set -e
+          docker inspect durable-check > "$RUNNER_TEMP/durable-evidence/container.json"
+          docker cp durable-check:/working/evidence.json "$RUNNER_TEMP/durable-evidence/memory.json"
+          test "$code" -eq 0
+          python3 - <<'PY'
+          import json, os, pathlib
+          path = pathlib.Path(os.environ["RUNNER_TEMP"], "durable-evidence", "container.json")
+          container = json.loads(path.read_text())[0]
+          assert not container["State"]["OOMKilled"]
+          assert container["HostConfig"]["Memory"] == 512*1024*1024
+          assert container["HostConfig"]["MemorySwap"] == 512*1024*1024
+          PY
+      - name: Verify full studio workflow and exact outputs after replacement (not memory-capped)
+        if: ${{ !inputs.http_only }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network durable-acceptance --entrypoint python \
+            --read-only --tmpfs /tmp:uid=10001,gid=10001 \
+            -e CHOPLAB_DISPOSABLE_POSTGRES_TEST=yes -e CHOPLAB_FULL_DURABLE_AUDIO=yes \
+            -e CHOPLAB_TEST_POSTGRES_URL='postgresql://choplab_test:synthetic-ci-password@postgres:5432/choplab_recovery_test?sslmode=verify-full' \
+            -e CHOPLAB_TEST_S3_CA=/s3/public.crt -e PGSSLROOTCERT=/pg/server.crt \
+            -v "$RUNNER_TEMP/durable-pg/server.crt:/pg/server.crt:ro" \
+            -v "$RUNNER_TEMP/durable-s3/public.crt:/s3/public.crt:ro" \
+            -v "$PWD/backend:/workspace/backend:ro" -v "$PWD/scripts:/workspace/scripts:ro" \
+            -v durable-working:/working choplab:durable-test \
+            -m pytest -q -p no:cacheprovider --basetemp=/working/audio-tests \
+            /workspace/backend/storage_tests/test_durable.py -k studio_audio_workflow \
+            | tee "$RUNNER_TEMP/durable-evidence/studio-tests.log"
+      - name: Verify two-phase protected HTTP harness with real disposable cache loss (uncapped)
+        run: |
+          set -euo pipefail
+          docker run --rm --network durable-acceptance --entrypoint python \
+            --read-only --tmpfs /tmp:uid=10001,gid=10001 \
+            -e CHOPLAB_DISPOSABLE_POSTGRES_TEST=yes -e CHOPLAB_FULL_DURABLE_AUDIO=yes \
+            -e CHOPLAB_TEST_POSTGRES_URL='postgresql://choplab_test:synthetic-ci-password@postgres:5432/choplab_recovery_test?sslmode=verify-full' \
+            -e CHOPLAB_TEST_S3_CA=/s3/public.crt -e PGSSLROOTCERT=/pg/server.crt \
+            -v "$RUNNER_TEMP/durable-pg/server.crt:/pg/server.crt:ro" \
+            -v "$RUNNER_TEMP/durable-s3/public.crt:/s3/public.crt:ro" \
+            -v "$PWD/backend:/workspace/backend:ro" -v "$PWD/scripts:/workspace/scripts:ro" \
+            -v durable-working:/working choplab:durable-test \
+            -m pytest -q -p no:cacheprovider --basetemp=/working/http-tests \
+            /workspace/backend/tests/test_durable_http_harness.py \
+            /workspace/backend/storage_tests/test_durable_http_live.py \
+            | tee "$RUNNER_TEMP/durable-evidence/http-harness-tests.log"
+      - name: Preserve acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: durable-integration-evidence
+          path: ${{ runner.temp }}/durable-evidence/
+          retention-days: 7
+      - name: Clean up disposable resources only
+        if: always()
+        run: |
+          docker logs postgres || true
+          docker logs durable-s3 || true
+          docker rm -f durable-check durable-s3 postgres || true
+          docker network rm durable-acceptance || true
+          docker volume rm durable-working || true

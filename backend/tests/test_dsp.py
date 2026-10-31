@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from choplab import bass, drums, transform
+from choplab import audio_io, bass, drums, render, transform
 from choplab.core import SR, TICKS_PER_BAR, midi_to_hz, ticks_to_samples
 from conftest import dominant_hz
 
@@ -97,3 +97,275 @@ def test_kit_sounds_are_valid(kit):
         y = drums.sound(kit, inst)
         assert y.ndim == 2 and y.shape[1] == 2 and len(y) > 100
         assert np.isfinite(y).all() and 0.05 < np.abs(y).max() <= 1.0
+
+
+@pytest.mark.parametrize("length", [17, SR - 1, SR, SR + 1, 3 * SR + 7])
+def test_blockwise_true_peak_matches_full_polyphase_filter(length):
+    from scipy.signal import resample_poly
+
+    y = np.random.default_rng(91).normal(0, 0.2, (length, 2)).astype(np.float32)
+    for position in (0, SR - 1, SR, SR + 1, length - 1):
+        if position < length:
+            y[position] = [1.0, -0.9]
+    expected = float(np.abs(resample_poly(y, 4, 1, axis=0)).max())
+    assert render.true_peak(y) == pytest.approx(expected, abs=1e-7)
+    assert render.true_peak(y[:0]) == 0
+
+
+def test_partial_region_reads_match_aligned_stem_sum_without_source_cache(tmp_path, monkeypatch):
+    a = sine(220, 2)
+    b = sine(440, 2, amp=0.1)
+    paths = tuple(str(audio_io.write_wav(tmp_path / f"{i}.wav", y)) for i, y in enumerate((a, b)))
+    def no_full_read(*_):
+        raise AssertionError("Region reads should not load an entire internal source.")
+    monkeypatch.setattr(transform, "source_audio", no_full_read)
+    result = transform.region(paths, 0.25, 1.25)
+    np.testing.assert_array_equal(result, (a + b)[SR // 4:5 * SR // 4])
+    assert result.dtype == np.float32
+    with pytest.raises(ValueError, match="bounds"):
+        transform.region(paths, 0, 3)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("rate", [22050, 44100, 96000])
+def test_resample_preserves_original_polyphase_samples(dtype, rate):
+    from scipy.signal import resample_poly
+
+    y = np.random.default_rng(715).normal(0, 0.2, (7001, 2)).astype(dtype)
+    original = y.copy()
+    divisor = np.gcd(rate, SR)
+    expected = resample_poly(y, SR // divisor, rate // divisor, axis=0).astype(np.float32)
+    actual = audio_io.resample(y, rate)
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(y, original)
+    assert actual.dtype == np.float32 and actual.flags.c_contiguous
+
+
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize("bins", [1, 2000, 2400])
+def test_bounded_waveform_and_sample_peaks_are_exact(channels, bins, monkeypatch):
+    y = np.random.default_rng(716).normal(0, 0.2, (180003, channels)).astype(np.float32)
+    if channels == 1:
+        y = y[:, 0]
+    y[65536] = -0.99
+    mono = np.abs(y).max(axis=1) if channels == 2 else np.abs(y)
+    edges = np.linspace(0, len(y), bins + 1).astype(int)
+    expected = [round(float(mono[a:b].max()), 4) for a, b in zip(edges[:-1], edges[1:])]
+    original_abs = np.abs
+
+    def bounded_abs(chunk):
+        assert len(chunk) <= 65536
+        return original_abs(chunk)
+
+    monkeypatch.setattr(np, "abs", bounded_abs)
+    assert audio_io.sample_peak(y) == float(mono.max())
+    assert audio_io.peaks(y, bins) == expected
+    assert audio_io.sample_peak(y[:0]) == 0
+    assert audio_io.peaks(y[:0]) == []
+
+
+def test_pedalboard_output_views_preserve_samples_and_input():
+    import pedalboard as pb
+
+    y = sine(220, 0.51, amp=0.2)
+    original = y.copy()
+    expected = pb.Pedalboard([pb.HighpassFilter(180)])(np.ascontiguousarray(y.T), SR).T.astype(np.float32)
+    actual = transform._pb(y, pb.Pedalboard([pb.HighpassFilter(180)]))
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(y, original)
+    assert not np.shares_memory(actual, y)
+    expected_stretch = pb.time_stretch(np.ascontiguousarray(y.T), SR, stretch_factor=1.1,
+                                      pitch_shift_in_semitones=0.3, high_quality=True,
+                                      preserve_formants=False).T.astype(np.float32)
+    actual_stretch = transform.pitch_stretch(y, 0.3, 1.1)
+    np.testing.assert_array_equal(actual_stretch, expected_stretch)
+    np.testing.assert_array_equal(y, original)
+    assert not np.shares_memory(actual_stretch, y)
+
+
+def test_render_owned_buffer_cleanup_matches_copying_reference(monkeypatch):
+    body = ticks_to_samples(TICKS_PER_BAR, 120)
+    raw = sine(220, (body + int(render.TAIL_S * SR)) / SR, amp=0.2)
+    raw[123] = np.nan
+    original = raw.copy()
+    monkeypatch.setattr(render, "_sample_track", lambda *_: raw)
+    arr = {"bars": 1, "bpm": 120, "tracks": [
+        {"id": "sample", "kind": "sample", "pan": 0.2, "volume_db": -3,
+         "clips": [{"pattern_id": "p", "start_bar": 0, "bars": 1}]}],
+        "patterns": {"p": {"length_ticks": TICKS_PER_BAR, "events": [{"tick": 0}]}}}
+    actual = render.render(arr, {}, {})
+    original_nan_to_num = np.nan_to_num
+    monkeypatch.setattr(np, "nan_to_num", lambda y, **_: original_nan_to_num(y, copy=True))
+    expected = render.render(arr, {}, {})
+    np.testing.assert_array_equal(actual["master"], expected["master"])
+    np.testing.assert_array_equal(actual["stems"]["sample"], expected["stems"]["sample"])
+    np.testing.assert_array_equal(raw, original)
+    assert actual["metrics"] == expected["metrics"]
+
+
+def test_master_stem_gain_and_metrics_preserve_dsp(tmp_path):
+    y = sine(220, 2.1, amp=0.2)
+    original = {"left": y.copy(), "right": y * np.float32(0.4)}
+    mix = np.sum(list(original.values()), axis=0)
+    result = render._master(mix, {k: v.copy() for k, v in original.items()}, -14)
+    gain = np.float32(10 ** (result["metrics"]["master_gain_db"] / 20))
+    # Gain in the reported metric is rounded; compare at the corresponding tolerance.
+    trim = np.float32(10 ** (result["metrics"]["stem_trim_db"] / 20))
+    for name, stem in result["stems"].items():
+        np.testing.assert_allclose(stem, original[name] * gain * trim, atol=5e-4)
+    assert result["metrics"]["clipped_samples"] == 0
+    assert result["metrics"]["true_peak_dbfs"] <= -0.9
+
+
+@pytest.mark.parametrize("seconds,amplitude", [(0.51, 0.2), (1.73, 0.4), (3.05, 0.01), (1, 0)])
+def test_channelwise_loudness_matches_bs1770_meter(seconds, amplitude):
+    import pyloudnorm
+
+    y = sine(220, seconds, amp=amplitude)
+    y[len(y)//3:len(y)//2] *= 0.01
+    y[:, 1] *= 0.37
+    reference = pyloudnorm.Meter(SR).integrated_loudness(y.astype(np.float64))
+    measured = render.loudness(y)
+    if not np.isfinite(reference) or reference < -70:
+        assert measured is None
+    else:
+        assert measured == pytest.approx(reference, abs=1e-10)
+
+
+def test_streamed_beat_rms_matches_full_source_reduceat(tmp_path, monkeypatch):
+    from choplab import sampling
+
+    y = sine(220, 2.13)
+    path = str(audio_io.write_wav(tmp_path / "rms.wav", y))
+    beats = np.array([0.0, 0.21, 0.21, 0.93, 1.37, 2.12])
+    indices = np.clip((beats * SR).astype(int), 0, len(y) - 1)
+    mono = y.mean(axis=1)
+    expected = np.sqrt(np.add.reduceat(mono.astype(np.float64) ** 2, indices)
+                       / np.maximum(1, np.diff(np.append(indices, len(y)))))
+    def full_read(*_):
+        raise AssertionError("Internal beat RMS must not retain a full-source cache.")
+    monkeypatch.setattr(transform, "source_audio", full_read)
+    np.testing.assert_allclose(sampling._beat_rms((path,), beats), expected, atol=1e-14)
+
+
+@pytest.mark.parametrize("fail", [False, True, "pipe"])
+def test_mp3_uses_exact_bounded_pcm_and_cleans_partial_files(tmp_path, monkeypatch, fail):
+    from io import BytesIO
+    from pathlib import Path
+
+    y = sine(220, 2.1, amp=1.2)
+    expected = np.clip(y, -1, 1).astype(np.float32).tobytes()
+    original = y.copy()
+    monkeypatch.setattr(audio_io, "ffmpeg_exe", lambda: "synthetic-ffmpeg")
+    class Input(BytesIO):
+        def write(self, block):
+            assert len(block) <= 65536 * 2 * 4
+            if fail == "pipe":
+                raise BrokenPipeError("synthetic closed encoder")
+            return super().write(block)
+
+        def close(self):
+            if fail != "pipe":
+                assert self.getvalue() == expected
+
+    class Encoder:
+        def __init__(self, args, **kwargs):
+            assert args[args.index("-i") + 1] == "-"
+            self.stdin = Input()
+            Path(args[-1]).write_bytes(b"synthetic mp3")
+            kwargs["stderr"].write(b"synthetic encoding error")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def wait(self):
+            return int(fail is True)
+
+    monkeypatch.setattr(audio_io.subprocess, "Popen", Encoder)
+    target = tmp_path / "out.mp3"
+    if fail:
+        with pytest.raises(audio_io.AudioError, match="encoding failed"):
+            audio_io.write_mp3(target, y)
+        assert not target.exists()
+    else:
+        assert audio_io.write_mp3(target, y).read_bytes() == b"synthetic mp3"
+    np.testing.assert_array_equal(y, original)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ([] if fail else ["out.mp3"])
+
+
+def test_export_releases_unused_buffers_before_encoding_and_verification(tmp_path, monkeypatch):
+    import weakref
+    from choplab import render
+
+    references = []
+    def render_audio(*args):
+        master = np.zeros((1000, 2), np.float32)
+        stem = master.copy()
+        references.extend([weakref.ref(master), weakref.ref(stem)])
+        return {"master": master, "stems": {"track": stem}, "metrics": {"sentinel": 1}}
+
+    def write(path, audio, fmt):
+        assert references[1]() is None
+        assert references[0]() is audio
+        return path
+
+    def verify(path):
+        assert references[0]() is None
+        return {"verified": True}
+
+    monkeypatch.setattr(render, "render", render_audio)
+    monkeypatch.setattr(render, "write_audio", write)
+    monkeypatch.setattr(render, "verify", verify)
+    result = render.export({}, {}, {}, tmp_path, fmt="mp3")
+    assert result["metrics"] == {"sentinel": 1}
+    assert result["files"][0]["check"] == {"verified": True}
+
+
+def test_long_streamed_loudness_preserves_iir_state_and_gates():
+    import pyloudnorm
+    from choplab import render
+
+    y = sine(443, 60.137, amp=0.1)
+    y[:48000 * 20] *= 0.001
+    y[48000 * 40:] *= 0.3
+    expected = pyloudnorm.Meter(48000).integrated_loudness(y.astype(np.float64))
+    assert render.loudness(y) == pytest.approx(expected, abs=1e-10)
+
+
+def test_cache_release_syncs_before_kernel_advice(tmp_path, monkeypatch):
+    path = tmp_path / "written.wav"
+    path.write_bytes(b"synthetic")
+    calls = []
+    monkeypatch.setattr(audio_io.os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    monkeypatch.setattr(audio_io.os, "fsync", lambda fd: calls.append(("sync", fd)))
+    monkeypatch.setattr(audio_io.os, "posix_fadvise",
+                        lambda fd, offset, length, advice: calls.append(("advice", fd, offset, length, advice)),
+                        raising=False)
+    audio_io._release_file_cache(path)
+    assert calls == [("sync", calls[0][1]), ("advice", calls[0][1], 0, 0, 4)]
+    assert path.read_bytes() == b"synthetic"
+
+
+def test_transform_cache_evicts_by_bytes_without_changing_audio(tmp_path, monkeypatch):
+    from choplab import transform
+
+    transform._mem.clear()
+    monkeypatch.setattr(transform, "_MEMORY_CACHE_BYTES", 100)
+    monkeypatch.setattr(transform, "data_path", lambda *args: tmp_path / args[-1])
+    monkeypatch.setattr(transform, "region", lambda *args: np.arange(12, dtype=np.float32).reshape(6, 2))
+    monkeypatch.setattr(transform, "transform", lambda y, *args: y)
+    a = transform.cached_transform(("source",), ("a",), 0, 1, {})
+    b = transform.cached_transform(("source",), ("b",), 0, 1, {})
+    assert len(transform._mem) == 2
+    np.testing.assert_array_equal(a, b)
+    transform.cached_transform(("source",), ("a",), 0, 1, {})
+    transform.cached_transform(("source",), ("c",), 0, 1, {})
+    assert len(transform._mem) == 2
+    assert sum(y.nbytes for y in transform._mem.values()) <= 100
+    np.testing.assert_array_equal(transform.cached_transform(("source",), ("b",), 0, 1, {}), b)
+    monkeypatch.setattr(transform, "_MEMORY_CACHE_BYTES", 4)
+    np.testing.assert_array_equal(transform.cached_transform(("source",), ("large",), 0, 1, {}), a)
+    assert not transform._mem

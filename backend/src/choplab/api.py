@@ -1,5 +1,5 @@
 """FastAPI service (spec 22). Heavy work runs as persistent background jobs; the UI follows them over SSE.
-Run: uv run choplab  (binds 127.0.0.1 only - this is a local, single-user app)."""
+Run: uv run choplab (local by default; protected HTTPS hosting is opt-in)."""
 from __future__ import annotations
 
 import asyncio
@@ -15,22 +15,72 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from .responses import AudioFileResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from urllib.parse import urlsplit
 
-from . import analysis, audio_io, bass, compose, drums, jobs, render, sampling, schemas, separation, store, transform
-from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, cache_key, data_path, log
+from . import analysis, audio_io, bass, compose, drums, durable, jobs, render, sampling, schemas, separation, store, transform
+from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, TICKS_PER_BAR, cache_key, data_path, log, parse_key
+from .hosting import HOSTING, OwnerAccess, listening_port
 
-MAX_UPLOAD = 1 << 30  # 1 GiB
+MAX_UPLOAD = int(os.environ.get("CHOPLAB_MAX_UPLOAD_MB", "100" if HOSTING else "1024")) * (1 << 20)
+MIN_FREE = int(os.environ.get("CHOPLAB_MIN_FREE_MB", "2048" if HOSTING else "0")) * (1 << 20)
+if MAX_UPLOAD <= 0 or MIN_FREE < 0:
+    raise ValueError("Upload limit must be positive and free-space reserve nonnegative")
 FRONTEND = Path(os.environ.get("CHOPLAB_FRONTEND", Path(__file__).resolve().parents[3] / "frontend" / "dist"))
 
 
 @asynccontextmanager
 async def lifespan(app):
-    jobs.recover_interrupted()
-    yield
+    store.initialize()
+    durable.configure()
+    # PostgreSQL/storage startup can involve slow network calls.
+    runtime = jobs.runtime()
+    await asyncio.to_thread(runtime.__enter__)
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(runtime.__exit__, None, None, None)
 
 
 app = FastAPI(title="ChopLab AI", version="0.1.0", lifespan=lifespan,
-              description="Local sample-based beat generator. All audio stays on this machine.")
+              description="Single-owner sample-based beat generator.")
+@app.middleware("http")
+async def recovery_boundary(request: Request, call_next):
+    path = request.url.path
+    if durable.enabled() and path.startswith("/api/") and path not in ("/api/health", "/api/system/recovery", "/api/system/capabilities"):
+        try:
+            await asyncio.to_thread(durable.check)
+        except (durable.StorageError, store.StoreUnavailable) as e:
+            return JSONResponse({"detail": str(e)}, 503, headers={"Retry-After": "10"})
+    if jobs.recovery_error and path.startswith("/api/"):
+        inspection = path in ("/api/health", "/api/system/recovery", "/api/system/capabilities", "/api/projects")
+        inspection = inspection or bool(re.fullmatch(r"/api/projects/[^/]+(?:/jobs)?", path))
+        inspection = inspection or bool(re.fullmatch(r"/api/jobs/[^/]+", path))
+        if request.method != "GET" or not inspection:
+            return JSONResponse({"detail": jobs.recovery_error}, 503)
+    return await call_next(request)
+
+
+app.add_middleware(OwnerAccess)
+if HOSTING:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(HOSTING.origin).hostname, "localhost", "127.0.0.1"])
+
+
+@app.exception_handler(store.StoreUnavailable)
+async def _database_unavailable(_, e):
+    return JSONResponse({"detail": str(e)}, 503, headers={"Retry-After": "10"})
+
+
+@app.exception_handler(jobs.Busy)
+async def _busy(_, e):
+    return JSONResponse({"detail": str(e)}, 429, headers={"Retry-After": "5"})
+
+
+@app.exception_handler(durable.StorageError)
+async def _storage_error(_, e):
+    log.error("Durable storage operation failed: %s", e)
+    return JSONResponse({"detail": str(e)}, 503, headers={"Retry-After": "10"})
 
 
 @app.exception_handler(ValueError)  # includes AudioError and pydantic ValidationError
@@ -70,19 +120,27 @@ async def _save_upload(f: UploadFile, dest: Path) -> int:
     """Stream to disk under a generated name (the user's file name is metadata only)."""
     n = 0
     tmp = dest.with_suffix(".part")
-    with open(tmp, "wb") as out:
-        while chunk := await f.read(1 << 20):
-            n += len(chunk)
-            if n > MAX_UPLOAD:
-                out.close()
-                tmp.unlink()
-                raise HTTPException(413, "File is larger than 1 GiB.")
-            out.write(chunk)
-    if n == 0:
-        tmp.unlink()
-        raise HTTPException(400, "Uploaded file is empty.")
-    tmp.replace(dest)
-    return n
+    try:
+        with open(tmp, "wb") as out:
+            while chunk := await f.read(1 << 20):
+                n += len(chunk)
+                if n > MAX_UPLOAD:
+                    raise HTTPException(413, f"File is larger than {MAX_UPLOAD // (1 << 20)} MiB.")
+                if shutil.disk_usage(DATA_DIR).free < MIN_FREE + len(chunk):
+                    raise HTTPException(507, "Storage reserve reached; delete old projects or clear the cache.")
+                await asyncio.to_thread(out.write, chunk)
+                if durable.enabled() and n % (8 << 20) < len(chunk):
+                    from .object_storage import _release_file_cache
+                    await asyncio.to_thread(_release_file_cache, out, written=True)
+            if durable.enabled():
+                from .object_storage import _release_file_cache
+                await asyncio.to_thread(_release_file_cache, out, written=True)
+        if n == 0:
+            raise HTTPException(400, "Uploaded file is empty.")
+        tmp.replace(dest)
+        return n
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _ext(name: str | None) -> str:
@@ -115,6 +173,8 @@ def _with_slices(s: dict, src: dict | None) -> dict:
 
 
 def _features_path(src: dict) -> Path:
+    if durable.enabled() and src.get("features_path"):
+        return Path(src["features_path"])
     return _dir(src["project_id"], "sources", src["id"]) / "features.npz"
 
 
@@ -129,10 +189,11 @@ def job_import(ctx, source_id: str):
     src = _get("source", source_id)
     try:
         ctx.progress("decoding", 0.02)
-        orig = Path(src["original_file_path"])
+        orig = durable.ensure_path(src["original_file_path"], src)
         meta = audio_io.probe(orig)
         y = audio_io.decode(orig)
-        internal = audio_io.write_wav(Path(src["original_file_path"]).with_name("audio.wav"), y)
+        internal_name = f"audio-{ctx.id}.wav" if durable.enabled() else "audio.wav"
+        internal = audio_io.write_wav(Path(src["original_file_path"]).with_name(internal_name), y)
         src = store.update("source", source_id, internal_audio_path=str(internal), content_hash=audio_io.file_hash(orig),
                            duration_seconds=round(len(y) / SR, 3), sample_rate=meta["sample_rate"],
                            channel_count=meta["channels"], metadata=meta, peaks=audio_io.peaks(y, 2400),
@@ -155,10 +216,13 @@ def job_analyze(ctx, source_id: str, override: dict | None = None):
 
 def _analyze(ctx, source_id, y=None, override=None):
     src = _get("source", source_id)
-    y = audio_io.load(Path(src["internal_audio_path"])) if y is None else y
+    y = audio_io.load(durable.ensure_path(src["internal_audio_path"], src)) if y is None else y
     doc, f = analysis.analyze(y, _sub(ctx, 0.05, 0.7), override)
-    np.savez(_features_path(src), **{k: np.asarray(v) for k, v in f.items()})
-    store.update("source", source_id, analysis=doc, analysis_status="analyzed", error=None)
+    features = (_dir(src["project_id"], "sources", source_id) / f"features-{ctx.id}.npz"
+                if durable.enabled() else _features_path(src))
+    np.savez(features, **{k: np.asarray(v) for k, v in f.items()})
+    store.update("source", source_id, analysis=doc, analysis_status="analyzed", error=None,
+                 features_path=str(features))
     n = _discover(ctx, source_id)
     return {"bpm": doc["bpm"], "key": doc["key"], "samples": n}
 
@@ -166,7 +230,7 @@ def _analyze(ctx, source_id, y=None, override=None):
 def _discover(ctx, source_id) -> int:
     ctx.progress("finding samples", 0.75)
     src = _get("source", source_id)
-    f = dict(np.load(_features_path(src)))
+    f = dict(np.load(durable.ensure_path(_features_path(src), src)))
     keep = _referenced(src["project_id"])
     for s in store.list_("sample", source_id):
         if s["origin"] == "auto" and s["id"] not in keep and not s.get("favorite"):
@@ -181,7 +245,8 @@ def _discover(ctx, source_id) -> int:
 def job_separate(ctx, source_id: str, model_id: str):
     store.update("source", source_id, separation_status="running")
     try:
-        stems = separation.separate(_get("source", source_id), model_id, _sub(ctx, 0.0, 0.7))
+        stems = separation.separate(_get("source", source_id), model_id, _sub(ctx, 0.0, 0.7),
+                                    working_id=ctx.id if durable.enabled() else None)
         store.update("source", source_id, stems=stems, stem_model=model_id, separation_status="done")
     except Exception as e:
         store.update("source", source_id, separation_status="failed", separation_error=str(e))
@@ -249,6 +314,9 @@ def job_export(ctx, project_id: str, export_id: str, request: dict):
     used = {e["sample_id"] for pat in arr["patterns"].values() for e in pat["events"] if e["type"] == "chop"}
     pj = {"choplab_schema": SCHEMA_VERSION, "engine": ENGINE_VERSION, "project": {k: v for k, v in p.items() if k != "arrangement"},
           "arrangement": arr, "samples": [samples[i] for i in sorted(used) if i in samples]} if request["project_json"] else None
+    if pj and durable.enabled():
+        pj["sources"] = list(sources.values())
+        pj = durable.portable_project(pj)
     try:
         out = render.export(arr, samples, sources, _dir(project_id, "exports", export_id), request["filename"], request["format"],
                             request["scope"], request["loop_start_bar"], request["loop_bars"], request["stems"], pj, ctx.progress)
@@ -298,7 +366,7 @@ def delete_project(id: str):
         for s in store.list_("sample", sid):
             store.delete("sample", s["id"])
         store.delete("source", sid)
-    for kind in ("variation", "export", "job"):
+    for kind in ("variation", "export", "job", "sound", "preview"):
         for d in store.list_(kind, id):
             store.delete(kind, d["id"])
     store.delete("project", id)
@@ -309,21 +377,23 @@ def delete_project(id: str):
 
 @app.post("/api/projects/{id}/sources", status_code=202)
 async def upload_source(id: str, file: UploadFile = File(...)):
-    _get("project", id)
+    await asyncio.to_thread(_get, "project", id)
     sid = store.new_id("src")
     dest = _dir(id, "sources", sid) / f"original{_ext(file.filename)}"
     await _save_upload(file, dest)
     try:
-        audio_io.probe(dest)  # reject non-audio before queueing work
+        meta = await asyncio.to_thread(audio_io.probe, dest)
+        if meta["duration"] > audio_io.MAX_SECONDS:
+            raise audio_io.AudioError(f"Recording is longer than {audio_io.MAX_SECONDS} seconds; trim it first.")
     except audio_io.AudioError:
         shutil.rmtree(dest.parent, ignore_errors=True)
         raise
-    src = store.put("source", {"id": sid, "project_id": id, "original_filename": (file.filename or "upload")[:200],
+    src = await asyncio.to_thread(store.put, "source", {"id": sid, "project_id": id, "original_filename": (file.filename or "upload")[:200],
                                "original_file_path": str(dest), "internal_audio_path": None, "content_hash": None,
                                "analysis_status": "queued", "stems": {}, "separation_status": None}, parent=id)
-    p = _get("project", id)
-    store.update("project", id, source_ids=p["source_ids"] + [sid])
-    job = jobs.submit("import", id, {"source_id": sid})
+    p = await asyncio.to_thread(_get, "project", id)
+    await asyncio.to_thread(store.update, "project", id, source_ids=p["source_ids"] + [sid])
+    job = await asyncio.to_thread(jobs.submit, "import", id, {"source_id": sid})
     return {"source": src, "job": job}
 
 
@@ -353,7 +423,7 @@ def source_audio(id: str):
     s = _get("source", id)
     if not s.get("internal_audio_path"):
         raise HTTPException(409, "Audio is still being imported.")
-    return FileResponse(s["internal_audio_path"], media_type="audio/wav")
+    return AudioFileResponse(durable.ensure_path(s["internal_audio_path"], s), media_type="audio/wav")
 
 
 @app.get("/api/sources/{id}/waveform")
@@ -373,6 +443,8 @@ def source_analysis(id: str):
 @app.post("/api/sources/{id}/analyze", status_code=202)
 def reanalyze(id: str):
     s = _get("source", id)
+    if not s.get("internal_audio_path"):
+        return jobs.submit("import", s["project_id"], {"source_id": id})
     return jobs.submit("analyze", s["project_id"], {"source_id": id, "override": (s.get("analysis") or {}).get("override")})
 
 
@@ -396,7 +468,6 @@ def separate(id: str, body: dict):
         raise HTTPException(409, why)
     if not s.get("analysis"):
         raise HTTPException(409, "Wait for analysis to finish first.")
-    store.update("source", id, separation_status="queued")
     return jobs.submit("separate", s["project_id"], {"source_id": id, "model_id": model})
 
 
@@ -410,10 +481,11 @@ def stems(id: str):
 @app.get("/api/stems/{stem_id}/audio")
 def stem_audio(stem_id: str):
     sid, _, name = stem_id.rpartition(".")
-    path = (_get("source", sid).get("stems") or {}).get(name)
+    source = _get("source", sid)
+    path = (source.get("stems") or {}).get(name)
     if not path:
         raise HTTPException(404, "No such stem")
-    return FileResponse(path, media_type="audio/wav")
+    return AudioFileResponse(durable.ensure_path(path, source), media_type="audio/wav")
 
 
 # ---------------------------------------------------------------- samples
@@ -472,7 +544,8 @@ def _sample_file(s: dict, bpm: float | None) -> Path:
     paths, hashes = sampling.resolve(src, s["stems"])
     t = {**transform.DEFAULT_TRANSFORM, **(s.get("transform") or {})}
     speed = (bpm / s["source_bpm"] / transform.tape_rate(t)) if bpm else 1.0  # with bpm: locked to that tempo
-    y = transform.cached_transform(paths, hashes, s["start"], s["end"], t, speed)
+    with jobs.compute_slot():
+        y = transform.cached_transform(paths, hashes, s["start"], s["end"], t, speed)
     out = data_path("cache", "previews", cache_key("smp", hashes, s["start"], s["end"], t, round(speed, 6)) + ".wav")
     return out if out.exists() else audio_io.write_wav(out, np.clip(y, -1, 1), subtype="PCM_16")
 
@@ -481,7 +554,25 @@ def _sample_file(s: dict, bpm: float | None) -> Path:
 def sample_audio(id: str, bpm: float | None = None):
     if bpm is not None and not 40 <= bpm <= 220:
         raise HTTPException(400, "bpm must be 40-220")
-    return FileResponse(_sample_file(_get("sample", id), bpm), media_type="audio/wav")
+    return AudioFileResponse(_sample_file(_get("sample", id), bpm), media_type="audio/wav")
+
+
+@app.get("/api/samples/{id}/buffer")
+def sample_buffer(id: str, bpm: float, ratio: float = 1.0, pitch: float = 0.0):
+    """The exact grid-locked buffer the renderer slices chops from, so live studio playback matches export.
+    Beat b of the sample sits at (pickup / speed + b * ratio * 60 / bpm) seconds, speed = bpm / (source_bpm * ratio)."""
+    if not 40 <= bpm <= 220 or not 0.1 < ratio <= 8 or abs(pitch) > 24:
+        raise HTTPException(400, "bpm must be 40-220, ratio 0.1-8, pitch within ±24")
+    s = _get("sample", id)
+    src = _get("source", s["source_id"])
+    _, hashes = sampling.resolve(src, s["stems"])
+    t = {**transform.DEFAULT_TRANSFORM, **(s.get("transform") or {})}
+    out = data_path("cache", "previews", cache_key("buf", hashes, s["start"], s["end"], t, round(bpm, 4), round(ratio, 6), round(pitch, 4)) + ".wav")
+    if not out.exists():
+        with jobs.compute_slot():
+            y, _ = render.sample_buffer(s, src, bpm, ratio, pitch)
+            audio_io.write_wav(out, np.clip(y, -1, 1), subtype="PCM_16")
+    return AudioFileResponse(out, media_type="audio/wav")
 
 
 @app.post("/api/samples/{id}/preview")
@@ -526,7 +617,8 @@ def get_variation(id: str):
 
 @app.get("/api/variations/{id}/audio")
 def variation_audio(id: str):
-    return FileResponse(_get("variation", id)["preview_path"], media_type="audio/wav")
+    doc = _get("variation", id)
+    return AudioFileResponse(durable.ensure_path(doc["preview_path"], doc), media_type="audio/wav")
 
 
 @app.post("/api/variations/{id}/regenerate", status_code=202)
@@ -577,12 +669,15 @@ def preview(id: str, body: schemas.PreviewRequest):
     """Renders through the same engine as export, so what you hear is what you export."""
     p = _get("project", id)
     arr = schemas.arrangement(body.arrangement or p.get("arrangement") or {})
-    res = render.render(arr, {s["id"]: s for s in _samples(p)}, _sources(p), body.scope, body.loop_start_bar, body.loop_bars)
+    with jobs.compute_slot():
+        res = render.render(arr, {s["id"]: s for s in _samples(p)}, _sources(p), body.scope, body.loop_start_bar, body.loop_bars)
     d = _dir(id, "previews")
     for old in d.glob("studio_*.wav"):  # keep one studio preview on disk
         old.unlink(missing_ok=True)
     name = f"studio_{store.new_id('r')}"
     render.write_preview(d / name, res["master"])
+    if durable.enabled():
+        store.put("preview", {"id": name, "project_id": id, "preview_path": str(d / f"{name}.wav")}, parent=id)
     return {"url": f"/api/projects/{id}/preview/{name}.wav", "metrics": res["metrics"],
             "start_bar": body.loop_start_bar if body.scope == "loop" else 0}
 
@@ -591,21 +686,32 @@ def preview(id: str, body: schemas.PreviewRequest):
 def preview_file(id: str, name: str):
     if not re.fullmatch(r"studio_r_[0-9a-f]{12}\.wav", name):
         raise HTTPException(404)
-    f = DATA_DIR / "projects" / id / "previews" / name
+    if durable.enabled():
+        doc = _get("preview", name.removesuffix(".wav"))
+        f = durable.ensure_path(doc["preview_path"], doc)
+    else:
+        f = DATA_DIR / "projects" / id / "previews" / name
     if not f.exists():
         raise HTTPException(404, "Preview expired; render again.")
-    return FileResponse(f, media_type="audio/wav")
+    return AudioFileResponse(f, media_type="audio/wav")
 
 
 @app.post("/api/projects/{id}/bass-sample", status_code=201)
 async def bass_sample(id: str, file: UploadFile = File(...)):
     """A custom 808 one-shot (tuned from its root note at render time)."""
-    _get("project", id)
-    tmp = _dir(id, "sounds") / f"upload{_ext(file.filename)}"
+    await asyncio.to_thread(_get, "project", id)
+    tmp = _dir(id, "sounds") / f"{store.new_id('upload')}{_ext(file.filename)}"
     await _save_upload(file, tmp)
-    y = audio_io.decode(tmp)[: SR * 4]
-    tmp.unlink()
-    out = audio_io.write_wav(_dir(id, "sounds") / f"808_{store.new_id('s')}.wav", y)
+    try:
+        with jobs.compute_slot():
+            y = await asyncio.to_thread(audio_io.decode, tmp)
+            y = y[: SR * 4]
+    finally:
+        tmp.unlink(missing_ok=True)
+    sound_id = store.new_id("s")
+    out = await asyncio.to_thread(audio_io.write_wav, _dir(id, "sounds") / f"808_{sound_id}.wav", y)
+    if durable.enabled():
+        await asyncio.to_thread(store.put, "sound", {"id": sound_id, "project_id": id, "sample_path": str(out)}, parent=id)
     return {"sample_path": str(out)}
 
 
@@ -642,11 +748,13 @@ def download(id: str, name: str | None = None):
     name = name or next(iter(files))
     if name not in files:  # only files this export produced: no path traversal
         raise HTTPException(404, "No such file in this export")
-    return FileResponse(files[name], filename=name)
+    return AudioFileResponse(durable.ensure_path(files[name], e), filename=name)
 
 
 @app.post("/api/exports/{id}/reveal")
 def reveal(id: str):
+    if HOSTING:
+        raise HTTPException(409, "Hosted exports are on the server; use Download to save them to your device.")
     folder = _get("export", id).get("folder")
     if not folder or not Path(folder).is_dir():
         raise HTTPException(409, "Export folder not available.")
@@ -657,10 +765,30 @@ def reveal(id: str):
     return {"folder": folder}
 
 
+# ---------------------------------------------------------------- pattern generators (studio "randomize")
+
+@app.post("/api/patterns/drums")
+def gen_drums(body: schemas.DrumPatternRequest):
+    """A fresh genre-aware groove; the studio uses it to re-roll individual lanes."""
+    pats = drums.generate(body.genre, body.complexity, body.seed, body.bars)
+    return {"length_ticks": body.bars * TICKS_PER_BAR, "events": pats[body.variant]}
+
+
+@app.post("/api/patterns/bass")
+def gen_bass(body: schemas.BassPatternRequest):
+    """A key-aware 808 line over the given per-bar roots, locked to the given kick ticks."""
+    kicks = [{"tick": t, "inst": "kick"} for t in body.kick_ticks]
+    notes = bass.generate(body.roots, kicks, body.genre, body.seed, parse_key(body.key), body.complexity)
+    return {"length_ticks": len(body.roots) * TICKS_PER_BAR, "events": notes}
+
+
 # ---------------------------------------------------------------- kits
 
 @app.get("/api/kits")
 def kits():
+    if durable.enabled():
+        return {k: {i: store.get("kit", f"kit-{k}-{i}") is not None for i in drums.INSTRUMENTS}
+                for k in drums.KITS}
     return {k: {i: drums.kit_path(k, i).parent.name == "custom" for i in drums.INSTRUMENTS} for k in drums.KITS}
 
 
@@ -672,25 +800,32 @@ def _kit_inst(kit, inst):
 @app.get("/api/kits/{kit}/{inst}/audio")
 def kit_audio(kit: str, inst: str):
     _kit_inst(kit, inst)
+    if durable.enabled():
+        durable.restore_kits()
     drums.sound(kit, inst)  # materialize the synthesized default
-    return FileResponse(drums.kit_path(kit, inst), media_type="audio/wav")
+    return AudioFileResponse(drums.kit_path(kit, inst), media_type="audio/wav")
 
 
 @app.post("/api/kits/{kit}/{inst}", status_code=201)
 async def kit_upload(kit: str, inst: str, file: UploadFile = File(...)):
     _kit_inst(kit, inst)
-    tmp = data_path("kits", "_upload" + _ext(file.filename))
+    tmp = data_path("kits", store.new_id("upload") + _ext(file.filename))
     await _save_upload(file, tmp)
     try:
-        drums.import_sound(kit, inst, tmp)
+        with jobs.compute_slot():
+            path = await asyncio.to_thread(drums.import_sound, kit, inst, tmp)
     finally:
         tmp.unlink(missing_ok=True)
+    if durable.enabled():
+        await asyncio.to_thread(store.put, "kit", {"id": f"kit-{kit}-{inst}", "audio_path": str(path)})
     return {"kit": kit, "inst": inst, "custom": True}
 
 
 @app.delete("/api/kits/{kit}/{inst}", status_code=204)
 def kit_reset(kit: str, inst: str):
     _kit_inst(kit, inst)
+    if durable.enabled():
+        store.delete("kit", f"kit-{kit}-{inst}")
     drums.reset_sound(kit, inst)
 
 
@@ -708,12 +843,12 @@ def project_jobs(id: str):
 
 @app.get("/api/jobs/{id}/events")
 async def job_events(id: str, request: Request):
-    _get("job", id)
+    await asyncio.to_thread(_get, "job", id)
 
     async def stream():
         last = None
         while not await request.is_disconnected():
-            job = store.get("job", id)
+            job = await asyncio.to_thread(_get, "job", id)
             s = json.dumps(job)
             if s != last:
                 yield f"data: {s}\n\n"
@@ -746,11 +881,38 @@ def health():
     return {"ok": True, "version": app.version, "engine": ENGINE_VERSION}
 
 
+@app.get("/api/system/database")
+def database_ready():
+    """Explicit owner-requested readiness check; health probes must not keep Neon awake."""
+    return store.check_ready()
+
+
+@app.get("/api/system/recovery")
+def recovery_status():
+    if durable.readiness_error():
+        return JSONResponse({"ok": False, "read_only": True, "detail": durable.readiness_error()}, 409)
+    if jobs.recovery_error:
+        return JSONResponse({"ok": False, "read_only": True, "detail": jobs.recovery_error}, 409)
+    return {"ok": True, "read_only": False}
+
+
+@app.post("/api/system/storage/reconcile")
+def storage_reconcile():
+    if not durable.enabled():
+        raise HTTPException(409, "Durable object storage is not configured.")
+    durable.reconcile()
+    return {"ok": True, "note": "Retired objects reconciled. Provider soft deletion may not immediately reclaim quota."}
+
+
 @app.get("/api/system/capabilities")
 def capabilities():
     """Also serves as UI configuration: genres, strategies, kits and default settings come from here."""
     free = shutil.disk_usage(DATA_DIR).free
     return {"ffmpeg": audio_io.ffmpeg_exe() is not None, "sample_rate": SR, "data_dir": str(DATA_DIR),
+            "hosted": HOSTING is not None, "max_upload_mb": MAX_UPLOAD // (1 << 20),
+            "job_recovery_error": jobs.recovery_error or durable.readiness_error(),
+            "metadata_store": store.backend_name(),
+            "max_audio_seconds": audio_io.MAX_SECONDS,
             "disk_free_gb": round(free / 1e9, 1), "schema_version": SCHEMA_VERSION,
             "genres": {k: {**v, "bpm": list(v["bpm"]), "swing": list(v["swing"])} for k, v in drums.GENRES.items()},
             "strategies": compose.STRATEGIES, "kits": list(drums.KITS), "instruments": drums.INSTRUMENTS,
@@ -799,6 +961,12 @@ def main():
     import uvicorn
 
     logging_level = os.environ.get("CHOPLAB_LOG", "info")
-    port = int(os.environ.get("CHOPLAB_PORT", "8765"))
+    port = listening_port()
     log.info("ChopLab data dir: %s", DATA_DIR)
-    uvicorn.run("choplab.api:app", host="127.0.0.1", port=port, log_level=logging_level)
+    host = os.environ.get("CHOPLAB_HOST", "0.0.0.0" if HOSTING else "127.0.0.1")
+    if not HOSTING and host not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("Non-loopback binding requires protected CHOPLAB_MODE=hosted")
+    uvicorn.run("choplab.api:app", host=host, port=port, log_level=logging_level,
+                workers=1, proxy_headers=bool(HOSTING),
+                forwarded_allow_ips=os.environ.get("CHOPLAB_PROXY_IPS", "127.0.0.1"),
+                limit_concurrency=32 if HOSTING else None)

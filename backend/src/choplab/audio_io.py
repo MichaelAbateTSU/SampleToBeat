@@ -15,7 +15,9 @@ from scipy.signal import resample_poly
 
 from .core import SR
 
-MAX_SECONDS = 20 * 60
+MAX_SECONDS = int(os.environ.get("CHOPLAB_MAX_AUDIO_SECONDS", "300" if os.environ.get("CHOPLAB_MODE") == "hosted" else "1200"))
+if not 1 <= MAX_SECONDS <= 1200:
+    raise ValueError("CHOPLAB_MAX_AUDIO_SECONDS must be 1-1200")
 
 
 class AudioError(ValueError):
@@ -34,11 +36,19 @@ def ffmpeg_exe() -> str | None:
         return None
 
 
+def _release_file_cache(path: Path) -> None:
+    if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+        with open(path, "rb") as f:
+            os.fsync(f.fileno())
+            os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+
+
 def file_hash(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
+    _release_file_cache(path)
     return h.hexdigest()
 
 
@@ -54,7 +64,7 @@ def resample(y: np.ndarray, sr_in: int, sr_out: int = SR) -> np.ndarray:
     if sr_in == sr_out:
         return y
     g = np.gcd(int(sr_in), int(sr_out))
-    return resample_poly(y, sr_out // g, sr_in // g, axis=0).astype(np.float32)
+    return resample_poly(y, sr_out // g, sr_in // g, axis=0).astype(np.float32, copy=False)
 
 
 def probe(path: Path) -> dict:
@@ -85,30 +95,57 @@ def probe(path: Path) -> dict:
 
 def decode(path: Path, sr: int = SR) -> np.ndarray:
     """Decode any supported file to (n, 2) float32 at `sr`."""
+    meta = probe(path)
+    if meta["duration"] > MAX_SECONDS:
+        raise AudioError(f"Recording is longer than {MAX_SECONDS} seconds; trim it before importing.")
     try:
-        y, file_sr = sf.read(str(path), dtype="float32", always_2d=True)
+        y, file_sr = sf.read(str(path), dtype="float32", always_2d=True,
+                             frames=(MAX_SECONDS + 1) * meta["sample_rate"])
         y = resample(_to_stereo(y), file_sr, sr)
     except Exception:
         exe = ffmpeg_exe()
         if not exe:
             raise AudioError("Cannot decode file: unsupported format and FFmpeg unavailable.")
-        r = subprocess.run([exe, "-v", "error", "-i", str(path), "-f", "f32le", "-ac", "2", "-ar", str(sr), "-"],
-                           capture_output=True)
+        try:
+            r = subprocess.run([exe, "-v", "error", "-i", str(path), "-t", str(MAX_SECONDS + 1),
+                                "-f", "f32le", "-ac", "2", "-ar", str(sr), "-"],
+                               capture_output=True, timeout=180)
+        except subprocess.TimeoutExpired as e:
+            raise AudioError("Audio decoding timed out; trim or convert this recording and retry.") from e
         if r.returncode != 0 or not r.stdout:
             raise AudioError(f"Decoding failed: {r.stderr.decode(errors='replace')[-300:] or 'no audio'}")
         y = np.frombuffer(r.stdout, dtype=np.float32).reshape(-1, 2).copy()
     if len(y) == 0:
         raise AudioError("Audio file is empty (zero length).")
     if len(y) / sr > MAX_SECONDS:
-        raise AudioError(f"Recording is longer than {MAX_SECONDS // 60} minutes; trim it before importing.")
-    if not np.isfinite(y).all():
-        y = np.nan_to_num(y)
+        raise AudioError(f"Recording is longer than {MAX_SECONDS} seconds; trim it before importing.")
+    for start in range(0, len(y), 65536):
+        chunk = y[start:start + 65536]
+        if not np.isfinite(chunk).all():
+            chunk[:] = np.nan_to_num(chunk)
+    _release_file_cache(path)
     return y
 
 
 def load(path: Path) -> np.ndarray:
     y, sr = sf.read(str(path), dtype="float32", always_2d=True)
     return resample(_to_stereo(y), sr, SR)
+
+
+def load_region(path: Path, start: int, end: int) -> np.ndarray:
+    """Read just an internal 48 kHz region; preserve the existing resampler for other rates."""
+    with sf.SoundFile(str(path)) as f:
+        if f.samplerate != SR:
+            y = load(path)
+            if not 0 <= start < end <= len(y) + 1:
+                raise ValueError("Invalid sample bounds for audio.")
+            return y[start:end].copy()
+        if not 0 <= start < end <= len(f) + 1:
+            raise ValueError("Invalid sample bounds for audio.")
+        f.seek(start)
+        result = _to_stereo(f.read(end - start, dtype="float32", always_2d=True))
+    _release_file_cache(path)
+    return result
 
 
 def write_wav(path: Path, y: np.ndarray, sr: int = SR, subtype: str = "FLOAT") -> Path:
@@ -119,6 +156,7 @@ def write_wav(path: Path, y: np.ndarray, sr: int = SR, subtype: str = "FLOAT") -
     os.close(fd)
     try:
         sf.write(tmp, y, sr, subtype=subtype)
+        _release_file_cache(Path(tmp))
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
@@ -132,19 +170,46 @@ def write_mp3(path: Path, y: np.ndarray, sr: int = SR, bitrate: str = "320k") ->
         raise AudioError("MP3 export requires FFmpeg.")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp.mp3")
-    pcm = np.clip(y, -1, 1).astype(np.float32).tobytes()
-    r = subprocess.run([exe, "-v", "error", "-y", "-f", "f32le", "-ar", str(sr), "-ac", "2", "-i", "-",
-                        "-codec:a", "libmp3lame", "-b:a", bitrate, str(tmp)], input=pcm, capture_output=True)
-    if r.returncode != 0:
-        raise AudioError(f"MP3 encoding failed: {r.stderr.decode(errors='replace')[-300:]}")
-    os.replace(tmp, path)
+    # Stream exact float32 PCM; a temporary PCM file would also count against cgroup page-cache RAM.
+    try:
+        with tempfile.TemporaryFile() as errors:
+            with subprocess.Popen([exe, "-v", "error", "-y", "-f", "f32le", "-ar", str(sr), "-ac", "2",
+                                   "-i", "-", "-codec:a", "libmp3lame", "-b:a", bitrate, str(tmp)],
+                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=errors) as encoder:
+                broken = None
+                try:
+                    for start in range(0, len(y), 65536):
+                        encoder.stdin.write(np.clip(y[start:start + 65536], -1, 1).astype(np.float32).tobytes())
+                except BrokenPipeError as exc:
+                    broken = exc
+                finally:
+                    try:
+                        encoder.stdin.close()
+                    except BrokenPipeError as exc:
+                        broken = exc
+                code = encoder.wait()
+            if code != 0 or broken is not None:
+                errors.seek(0, os.SEEK_END)
+                errors.seek(max(0, errors.tell() - 300))
+                detail = errors.read().decode(errors="replace")
+                raise AudioError(f"MP3 encoding failed: {detail or broken}") from broken
+        _release_file_cache(tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
     return path
 
 
+def sample_peak(y: np.ndarray) -> float:
+    peak = 0.0
+    for start in range(0, len(y), 65536):
+        peak = float(np.maximum(peak, np.abs(y[start:start + 65536]).max()))
+    return peak
+
+
 def peaks(y: np.ndarray, n: int = 2000) -> list[float]:
-    mono = np.abs(y).max(axis=1) if y.ndim == 2 else np.abs(y)
-    if len(mono) == 0:
+    if len(y) == 0:
         return []
-    n = min(n, len(mono))
-    edges = np.linspace(0, len(mono), n + 1).astype(int)
-    return [round(float(mono[a:b].max()), 4) if b > a else 0.0 for a, b in zip(edges[:-1], edges[1:])]
+    n = min(n, len(y))
+    edges = np.linspace(0, len(y), n + 1).astype(int)
+    return [round(sample_peak(y[a:b]), 4) if b > a else 0.0 for a, b in zip(edges[:-1], edges[1:])]

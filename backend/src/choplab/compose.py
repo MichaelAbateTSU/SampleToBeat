@@ -67,7 +67,14 @@ def sections(template: str, bars: int) -> list[dict]:
     t = TEMPLATES[template]
     tot = sum(b for _, b in t)
     sizes = [max(2, int(round(b * bars / tot / 2)) * 2) for _, b in t]
-    sizes[int(np.argmax(sizes))] += bars - sum(sizes)
+    diff = bars - sum(sizes)
+    if diff > 0:
+        sizes[int(np.argmax(sizes))] += diff
+    while diff < 0:  # shrink the largest sections a step at a time so none drops below 2 bars
+        i = int(np.argmax(sizes))
+        step = min(2, sizes[i] - 2, -diff)
+        sizes[i] -= step
+        diff += step
     out, s = [], 0
     for (name, _), b in zip(t, sizes):
         out.append({"name": name, "start_bar": s, "bars": b})

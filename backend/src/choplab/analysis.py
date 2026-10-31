@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 import librosa
-import pyloudnorm
 
-from .audio_io import AudioError
+from .audio_io import AudioError, sample_peak
 from .core import NOTE_NAMES, SR, parse_key
+from .render import loudness
+from .hpss import blocks
+from .cqt import chroma as _chroma
+from .memory import release_unused
 
 ASR = 22050  # analysis rate
 HOP = 512
@@ -101,6 +104,114 @@ def _sync(m: np.ndarray, idx: np.ndarray) -> np.ndarray:
     return np.stack([m[:, a:max(b, a + 1)].mean(axis=1) for a, b in zip(bounds[:-1], bounds[1:])], axis=1)
 
 
+def _tempo(oenv: np.ndarray) -> float:
+    """The same mean tempogram/prior, without an entire recording's FFT workspace."""
+    window = int(librosa.time_to_frames(8.0, sr=ASR, hop_length=BHOP))
+    padded = np.pad(oenv, (window // 2, window // 2), mode="linear_ramp", end_values=(0, 0))
+    total = np.zeros((window, 1), np.float64)
+    for start in range(0, len(oenv), 256):
+        end = min(len(oenv), start + 256)
+        tg = librosa.feature.tempogram(onset_envelope=padded[start:end + window - 1],
+                                      sr=ASR, hop_length=BHOP, win_length=window, center=False)
+        total += tg.sum(axis=1, keepdims=True)
+    return float(librosa.feature.tempo(tg=total / len(oenv), sr=ASR, hop_length=BHOP)[0])
+
+
+def _mel_spectrogram(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
+    """Keep the identical centered mel frames/global dB floor, with a bounded STFT workspace."""
+    n_fft, frames = 2048, 1 + len(mono) // hop
+    mel = np.empty((kwargs.get("n_mels", 128), frames), dtype=mono.dtype)
+    for start in range(0, frames, 256):
+        end = min(frames, start + 256)
+        lo, hi = start * hop - n_fft // 2, (end - 1) * hop + n_fft // 2
+        audio = mono[max(0, lo):min(len(mono), hi)]
+        if lo < 0 or hi > len(mono):
+            audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
+        mel[:, start:end] = librosa.feature.melspectrogram(
+            y=audio, sr=ASR, n_fft=n_fft, hop_length=hop, center=False, **kwargs)
+    return mel
+
+
+def _onset_strength(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
+    mel = _mel_spectrogram(mono, hop, **kwargs)
+    _power_to_db(mel)
+    output = np.zeros(mel.shape[1], dtype=mel.dtype)
+    shift = 1 + 2048 // (2 * hop)
+    for start in range(0, max(0, mel.shape[1] - shift), 256):
+        end = min(start + 256, mel.shape[1] - shift)
+        novelty = mel[:, start + 1:end + 1] - mel[:, start:end]
+        np.maximum(novelty, 0, out=novelty)
+        output[start + shift:end + shift] = novelty.mean(axis=0)
+    del mel
+    release_unused()
+    return output
+
+
+def _power_to_db(mel: np.ndarray) -> None:
+    """Convert an owned nonnegative mel buffer with the original global 80 dB floor."""
+    flat = mel.reshape(-1)
+    for start in range(0, len(flat), 65536):
+        block = flat[start:start + 65536]
+        np.maximum(block, 1e-10, out=block)
+        np.log10(block, out=block)
+        block *= 10.0
+    np.maximum(mel, mel.max() - 80.0, out=mel)
+
+
+def _mfcc(mono: np.ndarray) -> np.ndarray:
+    mel = _mel_spectrogram(mono, HOP)
+    _power_to_db(mel)
+    output = np.empty((13, mel.shape[1]), dtype=mel.dtype)
+    for start in range(0, mel.shape[1], 256):
+        end = min(start + 256, mel.shape[1])
+        output[:, start:end] = librosa.feature.mfcc(S=mel[:, start:end], sr=ASR, hop_length=HOP, n_mfcc=13)
+    del mel
+    release_unused()
+    return output
+
+
+def _harmonic(mono: np.ndarray) -> np.ndarray:
+    output = np.empty_like(mono)
+    position = 0
+    for chunk in blocks(lambda a, b: mono[a:b], len(mono), mono.dtype):
+        output[position:position + len(chunk)] = chunk
+        position += len(chunk)
+    return output
+
+
+def _rms(mono: np.ndarray, other: np.ndarray | None = None) -> np.ndarray:
+    frames, hop, n_fft = 1 + len(mono) // HOP, HOP, 2048
+    output = np.empty(frames, np.float32)
+    for start in range(0, frames, 256):
+        end = min(start + 256, frames)
+        lo, hi = start * hop - n_fft // 2, (end - 1) * hop + n_fft // 2
+        audio = mono[max(0, lo):min(len(mono), hi)]
+        if other is not None:
+            audio = audio - other[max(0, lo):min(len(mono), hi)]
+        audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
+        output[start:end] = librosa.feature.rms(y=audio, hop_length=hop, center=False)[0]
+    return output
+
+
+def _tuning(mono: np.ndarray) -> float:
+    pitches, magnitudes = [], []
+    hop, n_fft = 512, 2048
+    frames = 1 + len(mono) // hop
+    for start in range(0, frames, 256):
+        end = min(frames, start + 256)
+        lo, hi = start * hop - n_fft // 2, (end - 1) * hop + n_fft // 2
+        audio = mono[max(0, lo):min(len(mono), hi)]
+        audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
+        spectrum = np.abs(librosa.stft(audio, center=False))
+        pitch, mag = librosa.piptrack(S=spectrum, sr=ASR)
+        active = pitch > 0
+        pitches.append(pitch[active])
+        magnitudes.append(mag[active])
+    pitch, mag = np.concatenate(pitches), np.concatenate(magnitudes)
+    threshold = np.median(mag) if len(mag) else 0.0
+    return librosa.pitch_tuning(pitch[mag >= threshold], bins_per_octave=36)
+
+
 def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | None = None) -> tuple[dict, dict]:
     """Returns (analysis document, per-beat feature arrays). `override` = user corrections
     {bpm, grid_offset (a downbeat time), downbeat_phase, key}."""
@@ -110,12 +221,11 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         raise AudioError("The recording is silent; nothing to analyze.")
 
     progress("tempo", 0.1)
-    oenv = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=HOP)
-    oenv_f = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP)
-    low = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmax=200, n_mels=32)[: len(oenv_f)]
-    high = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmin=1500, n_mels=32)[: len(oenv_f)]
-    base_tempo, _ = librosa.beat.beat_track(onset_envelope=oenv_f, sr=ASR, hop_length=BHOP)
-    base_tempo = float(np.atleast_1d(base_tempo)[0]) or 90.0
+    oenv = _onset_strength(mono, HOP)
+    oenv_f = _onset_strength(mono, BHOP)
+    low = _onset_strength(mono, BHOP, fmax=200, n_mels=32)[: len(oenv_f)]
+    high = _onset_strength(mono, BHOP, fmin=1500, n_mels=32)[: len(oenv_f)]
+    base_tempo = _tempo(oenv_f) or 90.0
     base_tempo, frames, cands = _pick_tempo(oenv_f, low, high, base_tempo)
     beat_times = librosa.frames_to_time(frames, sr=ASR, hop_length=BHOP)
     weak_grid = len(beat_times) < 8
@@ -161,9 +271,20 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     # frame indices are only for feature syncing; beat_times stay sub-frame precise (HOP is ~23 ms)
     beats = np.clip(librosa.time_to_frames(beat_times, sr=ASR, hop_length=HOP), 0, n_frames - 1)
 
-    progress("key", 0.25)
-    harm = librosa.effects.harmonic(mono)
-    chroma = librosa.feature.chroma_cqt(y=harm, sr=ASR, hop_length=HOP)[:, :n_frames]
+    progress("structure_features", 0.25)
+    mfcc = _mfcc(mono)[:, :n_frames]
+    rms = _rms(mono)[:n_frames]
+    progress("key_harmonic", 0.25)
+    harm = _harmonic(mono)
+    rms_p = _rms(mono, harm)[:n_frames]
+    del mono
+    release_unused()
+    progress("key_chroma", 0.25)
+    tuning = _tuning(harm)
+    progress("key_cqt", 0.25)
+    chroma = _chroma(harm, ASR, HOP, tuning)[:, :n_frames]
+    del harm
+    release_unused()
     keys = estimate_key(chroma.sum(axis=1))
     key_conf = round(max(0.0, keys[0]["score"] - keys[1]["score"]) * 5 + max(0.0, keys[0]["score"]) * 0.5, 3)
     chroma_b = _sync(chroma, beats)
@@ -189,9 +310,6 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     onsets = librosa.onset.onset_detect(onset_envelope=oenv, sr=ASR, hop_length=HOP, units="time", backtrack=True)
 
     progress("structure", 0.7)
-    mfcc = librosa.feature.mfcc(y=mono, sr=ASR, hop_length=HOP, n_mfcc=13)[:, :n_frames]
-    rms = librosa.feature.rms(y=mono, hop_length=HOP)[0][:n_frames]
-    rms_p = librosa.feature.rms(y=mono - harm, hop_length=HOP)[0][:n_frames]
     mfcc_b = _sync(mfcc, beats)
     rms_b, rmsp_b, oenv_b = _sync(rms, beats)[0], _sync(rms_p, beats)[0], _sync(oenv, beats)[0]
     bt = beat_times
@@ -207,11 +325,8 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         s["tonal_stability"] = round(float(1 - np.mean(np.std(seg_chroma, axis=1))), 3)
 
     progress("loudness", 0.85)
-    try:
-        lufs = float(pyloudnorm.Meter(SR).integrated_loudness(y48)) if duration > 0.5 else None
-    except ValueError:
-        lufs = None
-    peak = float(np.abs(y48).max())
+    lufs = loudness(y48)
+    peak = sample_peak(y48)
 
     # per-bar chroma summary (used for key-aware bass generation)
     bar_chroma = [[round(float(x), 3) for x in chroma_b[:, i:i + 4].mean(axis=1)] for i in range(phase, len(bt), 4)]

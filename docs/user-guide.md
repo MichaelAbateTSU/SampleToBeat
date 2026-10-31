@@ -1,0 +1,210 @@
+# User guide
+
+Each project moves left to right through the tabs: **Source → Samples → Generate → Variations → Studio → Export**.
+
+## 1. Create a project and import audio
+
+On **Home**, click **New project** and give it a name. In the **Source** tab, drop an audio file or browse for one
+(WAV, FLAC, AIFF, OGG, MP3, AAC/M4A, or anything else ffmpeg can decode; up to 1 GB). The file is decoded to 48 kHz stereo. The original is kept
+unchanged.
+
+No song handy? **Use demo sample** generates a copyright-free 92 BPM A-minor test song. It has an 8-bar harmonic
+section (keys, pad, bass) and an 8-bar section with drums.
+
+Only sample audio you have the rights to use.
+
+## 2. Analysis
+
+Analysis starts automatically after import. It shows tempo (with half/double-time alternatives), key with
+confidence, tempo stability, loudness, peak and bar count. The waveform shows the beat grid.
+
+If the analysis is wrong, use **Correct the analysis**. You can set the BPM, the key, which detected beat is "1",
+or a grid offset. Corrections re-derive the grid and re-run sample discovery.
+
+## 3. Stem separation (optional)
+
+Choose a **Model** in the Source tab and click **Separate**:
+
+* **Built-in HPSS**: fast, 2 stems (harmonic, percussive). Always available.
+* **Demucs v4 Fast / Quality**: 4 stems (vocals, drums, bass, other). Optional install; see
+  [installation.md](installation.md).
+
+Stems can be auditioned. Sample discovery runs again so it can find cleaner candidates in the stems.
+
+## 4. Samples
+
+The **Samples** tab lists discovered loop and chop candidates. Each one has an overall usability score plus
+reasons, e.g. "strong harmonic content", "loops cleanly", "low drum bleed". You can:
+
+* play each sample as-is or at the target tempo
+* ★ favourite a sample: favourites are kept when discovery re-runs and are preferred by the generator
+* **Edit** a sample: name, pitch (semitones + fine), pitch mode, formant preservation, reverse, gain and fades
+* delete it
+* **Select region manually**: drag a region on the waveform, choose the audio (mix or a stem), optionally snap
+  to beats, then create your own sample
+
+## 5. Generate beats
+
+In **Generate**, choose:
+
+* **Style**: genre (Boom Bap, Trap, Drill, Lo-fi), tempo (blank means automatic from the sample), length in bars
+  and structure
+* **Feel**: energy, chop intensity, 808/bass intensity, drum complexity
+* **Samples**: let ChopLab choose the best samples, or choose your own
+* **Variations**: how many, and an optional seed
+
+Variations use different strategies:
+
+| Strategy | Idea |
+| --- | --- |
+| Loop flip | The strongest phrase stretched to tempo and looped, chopped up in the verses |
+| Hard chops | Transient-aligned slices resequenced into a 2-bar motif |
+| Dark & pitched | Pitched-down chops, a darker filter and a heavier 808 |
+| Creative flip | An alternate sample with reversed chops, octave jumps and stutters |
+
+Every variation is rendered with the authoritative renderer and checked automatically: not silent, not clipped,
+drums and 808 present, key consistency.
+
+## 6. Compare variations
+
+**Variations** shows each result with its strategy, metrics and check results. Play it, **Regenerate** it with a
+new seed, delete it, or **Open in studio** to edit it. Opening replaces the current studio arrangement after you
+confirm.
+
+## 7. Edit in the studio
+
+* **Transport**: play/stop (Space), loop (L; shift-click the ruler to set the loop), BPM, bars, swing, key, kit,
+  undo/redo (Ctrl+Z / Ctrl+Y), zoom and **Render HQ** (authoritative mastered render). It also shows a master
+  meter and save status.
+* **Timeline**:
+  * Click the ruler to seek; Home returns to the start.
+  * Drag a clip to move it, including onto another track. Drag a clip's right edge to resize it.
+  * Double-click an empty lane to add a clip.
+  * With a clip selected: S splits it at the playhead, Ctrl+D duplicates it, Delete removes it, and **Make
+    unique** gives it its own copy of a shared pattern.
+  * Tracks have mute (M) and solo buttons. You can add or remove tracks and edit sections.
+* **Pattern editor** (bottom panel, follows the selected clip):
+  * *Drums*: step grid per instrument. Click toggles a hit; right-click cycles velocity. Randomize from the
+    generator, clear, or change the length.
+  * *808*: piano roll with the key's scale highlighted. Click adds a note, clicking a note deletes it, and
+    shift-click toggles slide. You can transpose, regenerate a bassline that follows the kick, and edit the 808
+    sound (decay, glide, pitch envelope, harmonics, drive).
+  * *Sample chops*: pads for each slice (click to audition), a step row to place chops, and a chop inspector
+    (pitch, velocity, length, reverse).
+* **Mixer**:
+  * Per-track volume, pan, mute/solo and meters.
+  * An FX panel with EQ, filters, compression, saturation, bit-crush, reverb, delay, width and hat choke.
+  * Effects marked *(HQ)* (tape wobble and vinyl) are heard only in Render HQ and exports.
+
+Edits autosave. Ctrl+S saves immediately.
+
+## 8. Export
+
+In **Export**, set:
+
+* the file name
+* the format: WAV 24-bit, WAV 16-bit, WAV 32-bit float, or MP3 320 kbps
+* the range: the full beat, or a loop region (start bar + length)
+* whether to also export stems (one file per track) and the project `.json`
+
+Exports are mastered to about -14 LUFS with a -1 dBTP ceiling, then read back and verified (duration, peak, not
+silent). Download them from the export list, or open the export folder.
+
+## Settings
+
+**Settings** shows:
+
+* system information: sample rate, ffmpeg availability, free disk space, data folder
+* the available separation models and genres
+* the drum kits: audition every sound, replace it with your own file, or reset it
+
+**Clear render cache** frees cached renders.
+
+## Interrupted jobs and retries
+
+After a restart, queued/running jobs and their pending analysis, separation, or export records show
+**interrupted**, with an explanation and a **Retry** action. No work is retried automatically.
+Saved analysis, stems, samples, arrangements, and export files are retained, including results saved
+before a job stopped. Retry runs the operation again; generation may create additional variations,
+and export uses the current saved arrangement. A failed initial import can also be retried with
+**Retry analysis**. If the original audio is missing, import it again.
+
+Only one application runtime may use an audio volume. Keep `jobs.lock` with that volume and its backup;
+do not delete or replace it while the application is running. Startup refuses a second runtime, and
+waits for draining jobs before releasing ownership on a graceful shutdown. Stop older application
+versions before upgrading; they do not participate in this lock. Do not run independent copies of
+the same audio-volume backup concurrently. PostgreSQL metadata is
+bound to the same audio-volume identity: a different volume, or old pending PostgreSQL jobs without
+verifiable ownership, disables processing rather than guessing another host stopped. The studio
+shows an operator warning; `/api/system/recovery` reports the reason and read-only status.
+Stop every runtime and restore matching metadata/audio backups before resolving ownership offline.
+After backing up metadata and verifying that all workers are stopped, run
+`python -m choplab.metadata recover-jobs --confirm-all-runtimes-stopped` on the matching audio volume,
+then restart. This explicit command adopts stopped legacy jobs and interrupts their pending records
+without submitting retries. It cannot bypass another runtime's volume lock or another volume's
+PostgreSQL binding; restore the original `jobs.lock` with the matching audio backup for the latter.
+Multiple hosts with independent audio volumes require a distributed worker/fencing and shared-audio
+architecture, not automatic recovery based on job age.
+
+Retrying an older analysis, separation, or export is rejected if newer work owns its target.
+Wait for active source work to finish, then retry the latest job or start a new operation.
+
+While tracking a pending job, a visible browser tab keeps live SSE progress and resynchronizes its
+status every 30 seconds. If SSE disconnects (or is unavailable), it polls every second instead.
+Refresh failures are shown without changing the job's status; terminal jobs stop both mechanisms.
+Hidden tabs do not poll, and browsers can suspend or throttle timers. This helps observation only
+while the browser is active: it is not an idle keep-alive, an uptime guarantee, or a guarantee that
+processing continues after the tab closes or the hosting provider stops the instance.
+
+## Optional durable private audio
+
+Storage-aware hosting requires PostgreSQL plus a private existing S3-compatible bucket. Install the
+`storage` extra (the container includes it), and set `CHOPLAB_STORAGE_CONFIG_FILE` to a private JSON
+secret containing `endpoint` (HTTPS origin), `bucket`, `region`, `access_key`, `secret_key`, `prefix`,
+`max_bytes` (per-object limit), and `min_free_bytes` (cache disk reserve). An optional `ca_bundle`
+supports a private trusted test CA; certificate verification is never disabled. Never commit this
+secret or use production credentials for acceptance tests.
+
+Enable this configuration on the original intact audio volume first: existing metadata/file paths
+are published before replacement. Missing legacy audio/features stop migration explicitly. Thereafter
+the cache is disposable: originals, decoded audio, analysis features, stems, custom sounds/kits,
+variation/studio previews, and export files restore from verified private objects. Metadata stores
+portable paths and an asset catalog; exported project JSON includes portable source references.
+Back up metadata **including its durable asset catalog** and the matching private bucket/branch.
+Do not switch branches or restore metadata alone into a different bucket.
+
+A PostgreSQL lease permits one writer, with a monotonically increasing fencing token on every
+authoritative document/asset-reference mutation. Live overlapping instances serve health and
+read-only ownership feedback without admitting processing; this allows a zero-downtime host to
+stop its old instance rather than deadlocking startup on the new instance's health check.
+The replacement checks ownership every five seconds, then reconciles and admits processing after
+the old instance releases ownership or its 60-second lease expires. Each instance's local cache
+is exclusively locked; instances sharing metadata must use separate private cache directories.
+Stop every legacy/local-volume runtime before enabling this ownership protocol; an older binary
+without fencing must never run against the same library alongside a durable runtime. Pending
+legacy/unowned jobs are left untouched and produce actionable read-only feedback, including the
+offline recovery command on their original volume. Initialization/reconciliation errors also
+leave health available and processing read-only; fix the reported error and restart.
+An old worker that wakes after expiry cannot commit metadata or attach assets. Objects are published
+under unique, never-reused namespaces before metadata references them. Retired keys cannot gain
+references; cleanup retries exact retired keys, including ambiguous upload orphans, so delayed old
+deletes cannot remove a successor's identical bytes. Provider/network failures remain errors, never
+successful exports or automatic retries. Use `POST /api/system/storage/reconcile` for owner-requested
+cleanup of retired assets; startup also reconciles.
+
+This does not promise free-service uptime or unlimited storage/transfers. Neon documents 5 GB per
+project across branches, throttling including `503 SlowDown`, and soft deletion; deletion is not
+assumed to immediately reclaim quota. Render can suspend services with heavy outbound traffic.
+Cache restoration is bounded per transfer and by the configured disk reserve; an insufficient cache
+disk fails explicitly. Live Neon compatibility, full audio workload headroom at 512 MiB, and actual
+Render replacement behavior must be verified separately before production readiness is claimed.
+
+Metadata reads (including opening projects, listing stems/kits and viewing analysis) do not
+download audio into a cold cache. Playback and processing restore only their referenced input
+assets, verifying byte size and SHA-256 before exposing local files. Reopening metadata does not
+redownload originals or unused stems. A first byte-range playback still restores its entire
+selected immutable audio object before serving the range; it is not a remote partial-object
+stream. Cached assets are verified before reuse. Analysis needs decoded audio and features;
+sample discovery can legitimately read the mix and melodic stems, and generation/export can
+read every asset used by the arrangement. Those operations still incur their actual transfer
+costs and do not guarantee a provider egress allowance is sufficient.

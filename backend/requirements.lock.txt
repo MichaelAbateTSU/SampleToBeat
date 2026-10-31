@@ -17,6 +17,12 @@ audioread==3.1.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
 beartype==0.18.5 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via audio-separator
+boto3==1.43.118 ; sys_platform == 'linux' or sys_platform == 'win32'
+    # via choplab
+botocore==1.43.118 ; sys_platform == 'linux' or sys_platform == 'win32'
+    # via
+    #   boto3
+    #   s3transfer
 certifi==2026.10.19 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via requests
 cffi==2.1.1 ; sys_platform == 'linux' or sys_platform == 'win32'
@@ -71,6 +77,10 @@ imageio-ffmpeg==0.6.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
 jinja2==3.1.6 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via torch
+jmespath==1.1.0 ; sys_platform == 'linux' or sys_platform == 'win32'
+    # via
+    #   boto3
+    #   botocore
 joblib==1.6.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   librosa
@@ -205,6 +215,8 @@ pydub==0.25.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via audio-separator
 pyloudnorm==0.2.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
+python-dateutil==2.9.0.post0 ; sys_platform == 'linux' or sys_platform == 'win32'
+    # via botocore
 python-dotenv==1.2.4 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via uvicorn
 python-multipart==0.0.32 ; sys_platform == 'linux' or sys_platform == 'win32'
@@ -222,6 +234,8 @@ resampy==0.4.3 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via audio-separator
 rotary-embedding-torch==0.6.5 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via audio-separator
+s3transfer==0.19.3 ; sys_platform == 'linux' or sys_platform == 'win32'
+    # via boto3
 samplerate==0.1.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via audio-separator
 scikit-learn==1.9.1 ; sys_platform == 'linux' or sys_platform == 'win32'
@@ -236,7 +250,9 @@ scipy==1.18.1 ; sys_platform == 'linux' or sys_platform == 'win32'
 setuptools==84.2.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via torch
 six==1.17.0 ; sys_platform == 'linux' or sys_platform == 'win32'
-    # via audio-separator
+    # via
+    #   audio-separator
+    #   python-dateutil
 soundfile==0.14.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   audio-separator
@@ -282,7 +298,9 @@ typing-inspection==0.4.4 ; sys_platform == 'linux' or sys_platform == 'win32'
     #   fastapi
     #   pydantic
 urllib3==2.8.0 ; sys_platform == 'linux' or sys_platform == 'win32'
-    # via requests
+    # via
+    #   botocore
+    #   requests
 uvicorn==0.54.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
 uvloop==0.23.0 ; platform_python_implementation != 'PyPy' and sys_platform == 'linux'

@@ -4,15 +4,19 @@ without model weights."""
 from __future__ import annotations
 
 import re
+import os
 import shutil
 import tempfile
 from pathlib import Path
 
 import numpy as np
 import librosa
+import soundfile as sf
 
-from . import audio_io
+from . import audio_io, durable
 from .core import SR, cache_key, data_path, log
+from .hpss import blocks
+from .memory import release_unused
 
 
 class Adapter:
@@ -41,15 +45,39 @@ class HPSSAdapter(Adapter):
     est_memory_gb = 0.5
 
     def separate(self, wav, out_dir, progress):
-        y = audio_io.load(wav)
+        release_unused()
         progress("hpss", 0.3)
-        out = {"harmonic": [], "percussive": []}
-        for ch in range(2):
-            stft = librosa.stft(y[:, ch])
-            h, p = librosa.decompose.hpss(stft, margin=2.0)
-            out["harmonic"].append(librosa.istft(h, length=len(y)))
-            out["percussive"].append(librosa.istft(p, length=len(y)))
-        return {k: audio_io.write_wav(out_dir / f"{k}.wav", np.stack(v, axis=1)) for k, v in out.items()}
+        with sf.SoundFile(wav) as source:
+            if source.samplerate != SR or source.channels != 2:
+                y = audio_io.load(wav)
+                read = lambda channel, a, b: y[a:b, channel]
+                length = len(y)
+            else:
+                def read(channel, a, b):
+                    source.seek(a)
+                    chunk = source.read(b - a, dtype="float32", always_2d=True)[:, channel]
+                    audio_io._release_file_cache(wav)
+                    return chunk
+                length = len(source)
+            streams = [blocks(lambda a, b, ch=ch: read(ch, a, b), length, np.float32,
+                              margin=2.0, both=True) for ch in range(2)]
+            out_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=out_dir.parent) as temporary:
+                paths = {k: Path(temporary) / f"{k}.wav" for k in self.stems}
+                with sf.SoundFile(paths["harmonic"], "w", samplerate=SR, channels=2, subtype="FLOAT") as h, \
+                     sf.SoundFile(paths["percussive"], "w", samplerate=SR, channels=2, subtype="FLOAT") as p:
+                    for left, right in zip(*streams, strict=True):
+                        h.write(np.stack([left[0], right[0]], axis=1))
+                        p.write(np.stack([left[1], right[1]], axis=1))
+                        h.flush()
+                        p.flush()
+                        for path in paths.values():
+                            audio_io._release_file_cache(path)
+                for name, path in paths.items():
+                    audio_io._release_file_cache(path)
+                    os.replace(path, out_dir / path.name)
+        audio_io._release_file_cache(wav)
+        return {k: out_dir / f"{k}.wav" for k in self.stems}
 
 
 class AudioSeparatorAdapter(Adapter):
@@ -112,17 +140,23 @@ ADAPTERS: dict[str, Adapter] = {a.id: a for a in [
 ]}
 
 
-def separate(source: dict, model_id: str, progress) -> dict[str, str]:
+def separate(source: dict, model_id: str, progress, *, working_id: str | None = None) -> dict[str, str]:
     adapter = ADAPTERS[model_id]
     ok, why = adapter.available()
     if not ok:
         raise RuntimeError(why)
+    if working_id and source.get("stem_model") == model_id and source.get("stems"):
+        paths = [durable.ensure_path(path, source) for path in source["stems"].values()]
+        if all(path.is_file() for path in paths):
+            return source["stems"]
     key = cache_key("sep", source["content_hash"], model_id)
+    if working_id:
+        key = cache_key(key, working_id)
     out_dir = data_path("cache", "stems", key, "x").parent
     done = out_dir / "done.txt"
     if done.exists():  # cached; never rerun identical separation
         log.info("stems cache hit %s", key)
         return {p.stem: str(p) for p in out_dir.glob("*.wav")}
-    files = adapter.separate(Path(source["internal_audio_path"]), out_dir, progress)
+    files = adapter.separate(durable.ensure_path(source["internal_audio_path"], source), out_dir, progress)
     done.write_text(model_id)
     return {k: str(v) for k, v in files.items()}

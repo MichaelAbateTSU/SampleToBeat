@@ -6,7 +6,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.157.0",
     "imageio-ffmpeg>=0.6.0",
-    "librosa>=1.0.0",
+    "librosa>=1.0.0,<1.1",
+    "numba>=0.66.0",
     "numpy>=2.5.4",
     "pedalboard>=0.9.26",
     "pydantic>=2.14.1",
@@ -21,6 +22,8 @@ dependencies = [
 choplab = "choplab.api:main"
 
 [project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2.0,<4"]
+storage = ["boto3>=1.40.0,<2"]
 separation = [
     "audio-separator[cpu]>=0.47",
     "audioread>=3.1.0",

@@ -61,3 +61,14 @@ def test_master_hits_loudness_target_and_true_peak_ceiling():
     assert m["true_peak_dbfs"] <= -1.0 + 0.01
     assert m["lufs"] == pytest.approx(-14.0, abs=1.0)
     assert m["clipped_samples"] == 0
+
+
+def test_section_layout_tiles_every_length():
+    from choplab.compose import TEMPLATES, sections
+
+    for template in TEMPLATES:
+        for bars in range(1, 257):
+            secs = sections(template, bars)
+            assert sum(s["bars"] for s in secs) == bars, (template, bars)
+            assert all(s["bars"] >= 1 for s in secs), (template, bars, secs)
+            assert [s["start_bar"] for s in secs] == [sum(x["bars"] for x in secs[:i]) for i in range(len(secs))]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 
 import numpy as np
 import pedalboard as pb
@@ -36,11 +37,14 @@ def source_audio(paths: tuple[str, ...]) -> np.ndarray:
 
 
 def region(paths: tuple[str, ...], start: float, end: float) -> np.ndarray:
-    y = source_audio(paths)
     a, b = int(round(start * SR)), int(round(end * SR))
-    if not (0 <= a < b <= len(y) + 1):
-        raise ValueError(f"Invalid sample bounds {start:.3f}-{end:.3f}s for audio of {len(y) / SR:.3f}s")
-    return y[a:b].copy()
+    out = audio_io.load_region(Path(paths[0]), a, b)
+    for path in paths[1:]:
+        y = audio_io.load_region(Path(path), a, b)
+        n = min(len(out), len(y))
+        out = out[:n]
+        out += y[:n]
+    return out
 
 
 def fade(y: np.ndarray, in_ms: float, out_ms: float) -> np.ndarray:
@@ -64,7 +68,7 @@ def zero_cross(y: np.ndarray, max_ms: float = 2.0) -> int:
 
 
 def _pb(y: np.ndarray, board: pb.Pedalboard) -> np.ndarray:
-    return board(np.ascontiguousarray(y.T, dtype=np.float32), SR).T.astype(np.float32)
+    return board(np.ascontiguousarray(y.T, dtype=np.float32), SR).T.astype(np.float32, copy=False)
 
 
 def pitch_stretch(y: np.ndarray, semitones: float, speed: float, mode: str = "stretch",
@@ -82,7 +86,7 @@ def pitch_stretch(y: np.ndarray, semitones: float, speed: float, mode: str = "st
     out = pb.time_stretch(np.ascontiguousarray(y.T), SR, stretch_factor=float(speed),
                           pitch_shift_in_semitones=float(semitones), high_quality=True,
                           preserve_formants=preserve_formants)
-    return out.T.astype(np.float32)
+    return out.T.astype(np.float32, copy=False)
 
 
 def pan(y: np.ndarray, p: float) -> np.ndarray:
@@ -151,20 +155,27 @@ def transform(y: np.ndarray, t: dict, speed: float = 1.0) -> np.ndarray:
 
 
 _mem: dict[str, np.ndarray] = {}
+_mem_lock = Lock()
+_MEMORY_CACHE_BYTES = 32 * 1024 * 1024
 
 
 def cached_transform(paths: tuple[str, ...], hashes: tuple[str, ...], start: float, end: float, t: dict,
                      speed: float = 1.0) -> np.ndarray:
     key = cache_key("tf", hashes, round(start, 5), round(end, 5), t, round(speed, 6))
-    if key in _mem:
-        return _mem[key]
+    with _mem_lock:
+        cached = _mem.pop(key, None)
+        if cached is not None:
+            _mem[key] = cached
+            return cached
     f = data_path("cache", "transforms", f"{key}.wav")
     if f.exists():
         y = audio_io.load(f)
     else:
         y = transform(region(paths, start, end), t, speed)
         audio_io.write_wav(f, y)
-    if len(_mem) > 256:
-        _mem.clear()
-    _mem[key] = y
+    with _mem_lock:
+        while _mem and sum(audio.nbytes for audio in list(_mem.values())) + y.nbytes > _MEMORY_CACHE_BYTES:
+            _mem.pop(next(iter(_mem), None), None)
+        if y.nbytes <= _MEMORY_CACHE_BYTES:
+            _mem[key] = y
     return y

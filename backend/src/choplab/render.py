@@ -10,9 +10,10 @@ from pathlib import Path
 import numpy as np
 import pyloudnorm
 from scipy.ndimage import minimum_filter1d, uniform_filter1d
-from scipy.signal import resample_poly
+from scipy.signal import lfilter, resample_poly
 
 from . import audio_io, bass, drums, sampling, transform
+from .memory import release_unused
 from .core import PPQ, SR, TICKS_PER_BAR, db_to_gain, swing_offset_ticks, ticks_to_samples
 
 TAIL_S = 2.0  # reverb/808 ring-out after the last bar (full renders); wrapped to the start for loops
@@ -117,6 +118,7 @@ def _bass_track(tl, params, bpm, n, swing, a, kick_ticks) -> np.ndarray:
 def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_start_bar: int = 0,
            loop_bars: int = 4, master: bool = True) -> dict:
     """Returns {"master": (n,2), "stems": {track_id: (n,2)}, "metrics": {...}} - stems share gain and length."""
+    release_unused()
     bpm, swing = float(arr["bpm"]), float(arr.get("swing", 50))
     if scope == "loop":
         a = int(loop_start_bar) * TICKS_PER_BAR
@@ -152,9 +154,12 @@ def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_st
             y = y.copy()
             y[:tail] += y[body:body + tail]
             y = y[:body]
-        bufs[tr["id"]] = np.nan_to_num(y.astype(np.float32))
+        bufs[tr["id"]] = np.nan_to_num(y.astype(np.float32, copy=False), copy=False)
+        release_unused()
     length = body if scope == "loop" else n
-    mix = np.sum(list(bufs.values()), axis=0) if bufs else np.zeros((length, 2), np.float32)
+    mix = np.zeros((length, 2), np.float32)
+    for buf in bufs.values():
+        mix += buf
     if not master:
         return {"master": mix, "stems": bufs, "metrics": {}}
     return _master(mix, bufs, arr.get("master", {}).get("target_lufs", -14.0))
@@ -162,14 +167,54 @@ def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_st
 
 def true_peak(y: np.ndarray) -> float:
     """4x-oversampled peak estimate (ITU-style approximation)."""
-    return float(np.abs(resample_poly(y, 4, 1, axis=0)).max()) if len(y) else 0.0
+    peak = 0.0
+    block, halo = SR, 32  # default polyphase FIR is shorter than this overlap
+    for start in range(0, len(y), block):
+        end = min(start + block, len(y))
+        lo, hi = max(0, start - halo), min(len(y), end + halo)
+        up = resample_poly(y[lo:hi], 4, 1, axis=0)
+        peak = max(peak, float(np.abs(up[(start - lo) * 4:(end - lo) * 4]).max()))
+    return peak
 
 
 def loudness(y: np.ndarray) -> float | None:
-    try:
-        v = pyloudnorm.Meter(SR).integrated_loudness(y.astype(np.float64)) if len(y) > SR // 2 else None
-    except ValueError:
+    if len(y) <= SR // 2:
         return None
+    meter = pyloudnorm.Meter(SR)
+    step = 1.0 - meter.overlap
+    count = int(np.round((len(y) / SR - meter.block_size) / (meter.block_size * step))) + 1
+    energy = np.zeros((y.shape[1], count), np.float64)
+    # BS.1770 weighting/gating is channel-independent up to the final channel sum.
+    # Filter one channel at a time rather than copying/filtering full stereo buffers.
+    for channel in range(y.shape[1]):
+        stages = list(meter._filters.values())
+        states = [np.zeros(max(len(stage.a), len(stage.b)) - 1, np.float64) for stage in stages]
+        weighted = np.empty(0, np.float64)
+        previous_lo, end = 0, 0
+        for block in range(count):
+            lo = int(meter.block_size * (block * step) * SR)
+            hi = int(meter.block_size * (block * step + 1) * SR)
+            stop = min(hi, len(y))
+            new = y[end:stop, channel].astype(np.float64)
+            if len(new):
+                for i, stage in enumerate(stages):
+                    new, states[i] = lfilter(stage.b, stage.a, new, zi=states[i])
+                    new *= stage.passband_gain
+            weighted = np.concatenate([weighted[lo - previous_lo:], new])
+            energy[channel, block] = np.sum(np.square(weighted)) / (meter.block_size * SR)
+            previous_lo, end = lo, stop
+        del weighted
+    gains = np.asarray([1.0, 1.0, 1.0, 1.41, 1.41])[:y.shape[1]]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        levels = -0.691 + 10 * np.log10(gains @ energy)
+        absolute = levels >= -70
+        if not absolute.any():
+            return None
+        relative = -0.691 + 10 * np.log10(gains @ energy[:, absolute].mean(axis=1)) - 10
+        gated = (levels > relative) & (levels > -70)
+        if not gated.any():
+            return None
+        v = -0.691 + 10 * np.log10(gains @ energy[:, gated].mean(axis=1))
     return None if v is None or not np.isfinite(v) or v < -70 else float(v)
 
 
@@ -179,7 +224,7 @@ def limit(y: np.ndarray, ceiling: float, window_ms: float = 10.0) -> np.ndarray:
     w = max(1, int(window_ms * SR / 1000))
     need = np.minimum(1.0, ceiling / np.maximum(np.abs(y).max(axis=1), 1e-9))
     g = uniform_filter1d(minimum_filter1d(need, 2 * w + 1), w + 1 - (w % 2))  # odd size keeps the window centred
-    return (y * g[:, None]).astype(np.float32)
+    return (y * g[:, None]).astype(np.float32, copy=False)
 
 
 def _master(mix: np.ndarray, bufs: dict, target_lufs: float) -> dict:
@@ -189,17 +234,22 @@ def _master(mix: np.ndarray, bufs: dict, target_lufs: float) -> dict:
     pre = mix * np.float32(db_to_gain(g_db))
     clipped_pre = int((np.abs(pre) >= 1.0).sum())
     out = limit(pre, db_to_gain(CEILING_DB))
+    del pre
     tp = true_peak(out)
     if tp > db_to_gain(CEILING_DB):
         out *= np.float32(db_to_gain(CEILING_DB) / tp)
         tp = true_peak(out)
-    stems = {k: v * np.float32(db_to_gain(g_db)) for k, v in bufs.items()}
-    sp = max((float(np.abs(v).max()) for v in stems.values()), default=0.0)
+    stems = bufs
+    for v in stems.values():
+        v *= np.float32(db_to_gain(g_db))
+    sp = max((audio_io.sample_peak(v) for v in stems.values()), default=0.0)
     stem_trim = min(1.0, 0.98 / sp) if sp > 0 else 1.0  # stems are unlimited: one common trim keeps balance
-    stems = {k: v * np.float32(stem_trim) for k, v in stems.items()}
-    peak = float(np.abs(out).max()) if len(out) else 0.0
+    for v in stems.values():
+        v *= np.float32(stem_trim)
+    peak = audio_io.sample_peak(out)
+    lufs_out = loudness(out)
     metrics = {"duration_s": round(len(out) / SR, 3), "lufs_in": None if lufs_in is None else round(lufs_in, 2),
-               "lufs": None if loudness(out) is None else round(loudness(out), 2), "master_gain_db": round(g_db, 2),
+               "lufs": None if lufs_out is None else round(lufs_out, 2), "master_gain_db": round(g_db, 2),
                "peak_dbfs": round(20 * np.log10(max(peak, 1e-9)), 2), "true_peak_dbfs": round(20 * np.log10(max(tp, 1e-9)), 2),
                "clipped_samples": int((np.abs(out) >= 1.0).sum()), "limited_samples_pre": clipped_pre,
                "stem_trim_db": round(20 * np.log10(stem_trim), 2), "rms_dbfs": round(20 * np.log10(np.sqrt(np.mean(out ** 2)) + 1e-9), 2)}
@@ -241,7 +291,7 @@ def write_preview(path: Path, y: np.ndarray) -> Path:
 def verify(path: Path) -> dict:
     """Read the written file back (spec 36): duration, peak, silence."""
     y = audio_io.decode(path)
-    peak = float(np.abs(y).max())
+    peak = audio_io.sample_peak(y)
     return {"file": path.name, "duration_s": round(len(y) / SR, 3), "peak_dbfs": round(20 * np.log10(max(peak, 1e-9)), 2),
             "silent": bool(np.sqrt(np.mean(y ** 2)) < 1e-4), "channels": int(y.shape[1]), "bytes": path.stat().st_size}
 
@@ -257,7 +307,12 @@ def export(arr: dict, samples: dict, sources: dict, out_dir: Path, filename: str
     out_dir.mkdir(parents=True, exist_ok=True)
     files = []
     progress("writing", 0.6)
+    if not stems:
+        res["stems"].clear()
+        release_unused()
     main = write_audio(out_dir / f"{name}.{FORMATS[fmt][0]}", res["master"], fmt)
+    del res["master"]
+    release_unused()
     files.append({"kind": "mix", "name": main.name, "path": str(main), "check": verify(main)})
     if stems:
         progress("writing stems", 0.75)

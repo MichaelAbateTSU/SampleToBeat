@@ -1,0 +1,173 @@
+name: Hosted container checks
+on:
+  push:
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "deploy/**"
+      - "scripts/**"
+      - ".github/workflows/container.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "deploy/**"
+      - "scripts/**"
+      - ".github/workflows/container.yml"
+  workflow_dispatch:
+    inputs:
+      neon_smoke:
+        description: Test an explicitly provided disposable Neon database secret
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  container:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build production image
+        run: |
+          python3 -m py_compile scripts/hosting_password.py scripts/verify_container.py
+          docker build -t choplab:check .
+      - name: Verify native scientific parity and response cleanup
+        run: |
+          docker run --rm --user 0:0 --entrypoint sh \
+            -v "$PWD:/workspace:ro" choplab:check -c '
+              set -eu
+              if ! python -c "import pytest, httpx" >/dev/null 2>&1; then
+                python -m ensurepip >/dev/null
+                python -c "import tomllib, subprocess; requirements = tomllib.load(open(\"/workspace/backend/pyproject.toml\", \"rb\"))[\"dependency-groups\"][\"dev\"]; subprocess.check_call([\"python\", \"-m\", \"pip\", \"install\", \"--quiet\", *requirements])"
+              fi
+              python -m pytest /workspace/backend/tests -q -o cache_dir=/tmp/pytest-cache
+            '
+      - name: Smoke test protected image and persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/choplab-test"
+          python3 - <<'PY'
+          import hashlib, os, pathlib, secrets
+          salt = secrets.token_bytes(16)
+          digest = hashlib.pbkdf2_hmac("sha256", b"workflow-test-password", salt, 600000)
+          pathlib.Path(os.environ["RUNNER_TEMP"], "choplab-test", "hash").write_text(
+              f"pbkdf2_sha256$600000${salt.hex()}${digest.hex()}")
+          PY
+          docker run -d --name choplab-check --read-only --tmpfs /tmp:uid=10001,gid=10001 \
+            --env CHOPLAB_MODE=hosted --env CHOPLAB_PUBLIC_URL=https://localhost --env PORT=10000 \
+            --env CHOPLAB_PROXY_IPS='*' \
+            --env CHOPLAB_PASSWORD_HASH_FILE=/run/secrets/hash \
+            -v "$RUNNER_TEMP/choplab-test/hash:/run/secrets/hash:ro" \
+            -v choplab_test:/data -p 127.0.0.1:8765:10000 choplab:check
+          trap 'docker logs choplab-check; docker rm -f choplab-check' EXIT
+          for i in {1..60}; do
+            test "$(docker inspect -f '{{.State.Running}}' choplab-check)" = true
+            if curl --fail --silent http://127.0.0.1:8765/api/health; then break; fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:8765/api/health
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/)" = 400
+          python3 scripts/verify_container.py "$RUNNER_TEMP/choplab-test/project.json"
+          docker restart choplab-check
+          for i in {1..60}; do
+            test "$(docker inspect -f '{{.State.Running}}' choplab-check)" = true
+            if curl --fail --silent http://127.0.0.1:8765/api/health; then break; fi
+            sleep 2
+          done
+          python3 scripts/verify_container.py "$RUNNER_TEMP/choplab-test/project.json" --after-restart
+      - name: Validate TLS proxy and Compose configuration
+        run: |
+          set -euo pipefail
+          mkdir -p deploy/secrets
+          cp "$RUNNER_TEMP/choplab-test/hash" deploy/secrets/owner_password_hash
+          export CHOPLAB_DOMAIN=localhost ACME_EMAIL=check@example.com CHOPLAB_IMAGE=choplab:check
+          docker compose --project-directory deploy -f deploy/compose.yaml config --quiet
+          docker compose --project-directory deploy -f deploy/compose.yaml run --rm --no-deps proxy \
+            caddy validate --config /etc/caddy/Caddyfile
+          trap 'docker compose --project-directory deploy -f deploy/compose.yaml logs --tail 100; docker compose --project-directory deploy -f deploy/compose.yaml down' EXIT
+          docker compose --project-directory deploy -f deploy/compose.yaml up -d --wait --wait-timeout 180
+          proxy=$(docker compose --project-directory deploy -f deploy/compose.yaml ps -q proxy)
+          for i in {1..30}; do
+            if docker cp "$proxy:/data/caddy/pki/authorities/local/root.crt" "$RUNNER_TEMP/choplab-test/root.crt"; then break; fi
+            sleep 1
+          done
+          curl --fail --silent --show-error --retry 10 --retry-all-errors \
+            --cacert "$RUNNER_TEMP/choplab-test/root.crt" https://localhost/api/health
+          python3 scripts/verify_container.py "$RUNNER_TEMP/choplab-test/proxy.json" \
+            --base-url https://localhost --ca "$RUNNER_TEMP/choplab-test/root.crt" --upload-limits
+          bash scripts/verify_backup.sh sqlite
+      - name: Verify real PostgreSQL metadata and Neon deployment networking
+        env:
+          PG_TEST_CERT_DIR: ${{ runner.temp }}/choplab-postgres-certs
+        run: |
+          set -euo pipefail
+          export CHOPLAB_DOMAIN=localhost ACME_EMAIL=check@example.com CHOPLAB_IMAGE=choplab:check
+          mkdir -p "$PG_TEST_CERT_DIR" "$RUNNER_TEMP/choplab-pg-state"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=postgres' \
+            -addext 'subjectAltName=DNS:postgres' \
+            -keyout "$PG_TEST_CERT_DIR/server.key" -out "$PG_TEST_CERT_DIR/server.crt" 2>/dev/null
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=untrusted' \
+            -keyout "$PG_TEST_CERT_DIR/untrusted.key" -out "$PG_TEST_CERT_DIR/untrusted.crt" 2>/dev/null
+          sudo chown 999:999 "$PG_TEST_CERT_DIR/server.key"
+          sudo chmod 600 "$PG_TEST_CERT_DIR/server.key"
+          printf '%s\n' 'postgresql://choplab:container-test-database-password@postgres:5432/choplab?sslmode=require' > deploy/secrets/database_url
+          sudo chown 10001:"$(id -g)" "$RUNNER_TEMP/choplab-pg-state"
+          sudo chmod 770 "$RUNNER_TEMP/choplab-pg-state"
+          compose=(docker compose --project-directory deploy -f deploy/compose.yaml -f deploy/compose.neon.yaml -f deploy/compose.postgres-test.yaml)
+          trap '"${compose[@]}" logs --tail 100; "${compose[@]}" down' EXIT
+          "${compose[@]}" up -d --wait --wait-timeout 90 postgres
+          for phase in tls crud restart migration migration-restart restore; do
+            "${compose[@]}" run -T --rm --no-deps \
+              -v "$PWD/scripts/verify_postgres.py:/verify_postgres.py:ro" \
+              -v "$RUNNER_TEMP/choplab-pg-state:/checks" \
+              app python /verify_postgres.py /checks/state.json "$phase"
+          done
+          if "${compose[@]}" run -T --rm --no-deps -e CHOPLAB_DATABASE_URL_FILE= \
+            -e CHOPLAB_DATABASE_URL='postgresql://test:invalid@127.0.0.1:1/unavailable' \
+            app python -m choplab.metadata check; then
+            echo 'Unavailable configured database incorrectly succeeded.' >&2
+            exit 1
+          fi
+          if "${compose[@]}" run -T --rm --no-deps -e CHOPLAB_DATABASE_URL_FILE= \
+            app python -m choplab.metadata check; then
+            echo 'PostgreSQL audio volume silently fell back to SQLite.' >&2
+            exit 1
+          fi
+          "${compose[@]}" up -d --wait --wait-timeout 180
+          python3 scripts/verify_container.py "$RUNNER_TEMP/choplab-pg-state/studio.json" \
+            --base-url https://localhost --ca "$RUNNER_TEMP/choplab-test/root.crt"
+          "${compose[@]}" restart app
+          curl --fail --silent --retry 15 --retry-all-errors --retry-delay 2 \
+            --cacert "$RUNNER_TEMP/choplab-test/root.crt" https://localhost/api/health
+          python3 scripts/verify_container.py "$RUNNER_TEMP/choplab-pg-state/studio.json" \
+            --base-url https://localhost --ca "$RUNNER_TEMP/choplab-test/root.crt" --after-restart
+          bash scripts/verify_backup.sh postgres
+      - name: Optional synthetic Claimable Neon smoke test
+        if: github.event_name == 'workflow_dispatch' && inputs.neon_smoke && matrix.runner == 'ubuntu-24.04'
+        env:
+          NEON_SMOKE_DATABASE_URL: ${{ secrets.NEON_SMOKE_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          test -n "$NEON_SMOKE_DATABASE_URL"
+          install -d -m 700 "$RUNNER_TEMP/neon-smoke"
+          printf '%s\n' "$NEON_SMOKE_DATABASE_URL" > "$RUNNER_TEMP/neon-smoke/database_url"
+          chmod 644 "$RUNNER_TEMP/neon-smoke/database_url"
+          for phase in crud restart migration migration-restart restore; do
+            docker run --rm --read-only --tmpfs /tmp:uid=10001,gid=10001 \
+              --env CHOPLAB_DATABASE_URL_FILE=/run/secrets/database_url \
+              -v "$RUNNER_TEMP/neon-smoke/database_url:/run/secrets/database_url:ro" \
+              -v "$PWD/scripts/verify_postgres.py:/verify_postgres.py:ro" \
+              -v choplab_neon_check:/data \
+              -v "$RUNNER_TEMP/choplab-pg-state:/checks" \
+              --entrypoint python choplab:check /verify_postgres.py /checks/neon.json "$phase"
+          done
+          rm "$RUNNER_TEMP/neon-smoke/database_url"

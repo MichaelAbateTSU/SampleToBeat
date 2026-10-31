@@ -1,0 +1,120 @@
+name: Render Free memory measurements
+on:
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: Remaining import and export cases, or export-only follow-up
+        type: choice
+        options: [remaining, export, repeated, cold]
+        default: remaining
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build current audio engine and reuse pinned baseline harness
+        env:
+          CASES: ${{ inputs.cases }}
+        run: |
+          set -euo pipefail
+          docker build -t choplab:render-free .
+          git fetch --depth=1 origin 504e97584d2b5992e2e48cedfb7067c8bd877691
+          git show 504e97584d2b5992e2e48cedfb7067c8bd877691:.github/benchmarks/render_free.py \
+            > "$RUNNER_TEMP/render-memory.py"
+          python3 - <<'PY'
+          import os, pathlib
+          path = pathlib.Path(os.environ["RUNNER_TEMP"], "render-memory.py")
+          source = path.read_text()
+          source = source.replace('import base64', 'import pathlib\nimport base64')
+          source = source.replace('REVISION = "4d62d58a6ba64f2f8efe642777ba3c057fcc8e64"',
+                                  f'REVISION = "{os.environ["GITHUB_SHA"]}"')
+          source = source.replace('short_passed = run_case(16)\n        if not short_passed:\n            run_case(4)',
+                                  'run_case(16)')
+          if os.environ["CASES"] == "export":
+              source = source.replace('        run_case(300)', '')
+          elif os.environ["CASES"] in ("repeated", "cold"):
+              source = source.replace('        run_case(16)\n        run_case(300)',
+                                      '        for repeat in range(2):\n            run_case(16)\n            run_case(300)')
+          if os.environ["CASES"] == "cold":
+              source = source.replace('source = create_input(seconds)', '''source = create_input(seconds)
+              code = "import os; paths = (os.path.join(root, name) for root, dirs, files in os.walk('/opt/venv') for name in files if '.so' in name or name.endswith('.pyc')); count = 0\\nfor path in paths:\\n with open(path, 'rb') as file: os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)\\n count += 1\\nprint('Released scientific code cache for', count, 'files')"
+              command("docker", "run", "--rm", "--entrypoint", "/usr/local/bin/python", IMAGE, "-c", code)''')
+              source = source.replace('"storage": "Disposable Docker volume; NOT proof of provider persistence",',
+                                      '"cold_scientific_code_cache": True,\n    "storage": "Disposable Docker volume; NOT proof of provider persistence",')
+          source = source.replace('if result["status"] == "completed":',
+                                  'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "current_stage", "progress", "error_message")}\n        stage = result.get("current_stage")\n        if stage != RESULTS.get("profile_stage"):\n            RESULTS["profile_stage"] = stage\n            print(json.dumps({"profile_stage": stage, "monotonic": time.monotonic()}), flush=True)\n        if result["status"] == "completed":')
+          source = source.replace('samples = []', 'samples = []\n        memory_profile = []')
+          source = source.replace('stop = threading.Event()', '''stop = threading.Event()
+                  http_liveness = []
+                  def probe_liveness():
+                      while not stop.is_set():
+                          started = time.monotonic()
+                          observation = {"monotonic": started}
+                          try:
+                              assert api("GET", "/api/health", timeout=5)["ok"]
+                              observation["outcome"] = "passed"
+                          except (OSError, RuntimeError, ValueError, AssertionError) as error:
+                              observation.update(outcome="failed", error=f"{type(error).__name__}: {error}")
+                          observation["seconds"] = time.monotonic() - started
+                          if observation["seconds"] > 5 and observation.get("outcome") == "passed":
+                              observation.update(outcome="failed", error="HTTP response exceeded five seconds")
+                          http_liveness.append(observation)
+                          stop.wait(1)
+                  probe = threading.Thread(target=probe_liveness, daemon=True)
+                  if label != "startup_and_protected_frontend":
+                      probe.start()''')
+          source = source.replace('thread.join(timeout=15)', '''thread.join(timeout=15)
+                      if probe.is_alive():
+                          probe.join(timeout=7)''')
+          source = source.replace('samples.append(int((self.group / "memory.current").read_text()))',
+                                  'samples.append(int((self.group / "memory.current").read_text()))\n                        stat = dict(line.split() for line in (self.group / "memory.stat").read_text().splitlines())\n                        cpu = dict(line.split() for line in (self.group / "cpu.stat").read_text().splitlines())\n                        rss = 0\n                        for pid in (self.group / "cgroup.procs").read_text().split():\n                            try:\n                                rss += int(next(line.split()[1] for line in pathlib.Path("/proc", pid, "status").read_text().splitlines() if line.startswith("VmRSS:"))) * 1024\n                            except (FileNotFoundError, StopIteration, ProcessLookupError):\n                                pass\n                        memory_profile.append({"monotonic": time.monotonic(), "cpu_usage_usec": int(cpu["usage_usec"]), "rss_bytes": rss, "stage": RESULTS.get("profile_stage"), "current": samples[-1], **{k: int(stat.get(k, 0)) for k in ("anon", "file", "kernel")}})')
+          source = source.replace('"duration_seconds": round(time.monotonic() - before, 3),',
+                                  '"last_job": RESULTS.get("last_job"),\n                "memory_profile": memory_profile,\n                "http_liveness": http_liveness,\n                "duration_seconds": round(time.monotonic() - before, 3),')
+          path.write_text(source)
+          PY
+          python3 -m py_compile "$RUNNER_TEMP/render-memory.py"
+      - name: Measure full audio at 512 MiB no swap and 0.1 CPU
+        timeout-minutes: 35
+        run: |
+          sudo timeout --signal=TERM --kill-after=15s 2000s \
+            python3 -u "$RUNNER_TEMP/render-memory.py" "$RUNNER_TEMP/render-memory-results"
+      - name: Make evidence readable and summarize every measured outcome
+        if: always()
+        run: |
+          if test -d "$RUNNER_TEMP/render-memory-results"; then
+            sudo find "$RUNNER_TEMP/render-memory-results" -type f -exec chmod 644 {} +
+          fi
+          python3 - <<'PY'
+          import json, os, pathlib
+          path = pathlib.Path(os.environ["RUNNER_TEMP"], "render-memory-results", "results.json")
+          if not path.exists():
+              raise SystemExit("No measurement evidence produced.")
+          data = json.loads(path.read_text())
+          lines = ["## Capped audio measurements (not a Render deployment)",
+                   f"Revision: `{data['revision']}`; limits: `{data['limits']}`",
+                   "| Input | Stage | Outcome | Seconds | Sampled peak MiB | Lifetime peak MiB | OOM killed | 64 MiB headroom |",
+                   "|---|---|---|---|---|---|---|---|"]
+          for case in data["cases"]:
+              for row in case["operations"]:
+                  lines.append(f"| {case['input_seconds']}s | {row['operation']} | {row['outcome']} | "
+                               f"{row['duration_seconds']} | {row['sampled_peak_memory_bytes']/1048576:.2f} | "
+                               f"{row['cgroup_lifetime_peak_memory_bytes']/1048576:.2f} | "
+                               f"{row['container_state']['OOMKilled']} | "
+                               f"{row['outcome'] == 'passed' and not row['container_state']['OOMKilled'] and 0 < max(row['sampled_peak_memory_bytes'], row['cgroup_lifetime_peak_memory_bytes']) <= 448 * 1048576} |")
+              if case.get("skipped"):
+                  lines.append(f"\n{case['input_seconds']}s untested: {case['skipped']}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("\n".join(lines))
+          PY
+      - name: Preserve peaks timings output checks and container state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-memory-results
+          path: |
+            ${{ runner.temp }}/render-memory-results/*.json
+            ${{ runner.temp }}/render-memory-results/*.log
+          retention-days: 7
