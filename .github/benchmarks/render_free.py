@@ -15,14 +15,18 @@ REVISION = "4d62d58a6ba64f2f8efe642777ba3c057fcc8e64"
 OUT = Path(sys.argv[1])
 OUT.mkdir(parents=True, exist_ok=True)
 APPROXIMATE_E2_MICRO = "--approximate-e2-micro" in sys.argv[2:]
-CPU = 0.25 if APPROXIMATE_E2_MICRO else 0.1
-MEMORY = 1073741824 if APPROXIMATE_E2_MICRO else 536870912
+JOB_ENVELOPE = "--job-envelope" in sys.argv[2:]
+if APPROXIMATE_E2_MICRO and JOB_ENVELOPE:
+    raise ValueError("Choose only one resource experiment")
+CPU = 2 if JOB_ENVELOPE else 0.25 if APPROXIMATE_E2_MICRO else 0.1
+MEMORY = 2147483648 if JOB_ENVELOPE else 1073741824 if APPROXIMATE_E2_MICRO else 536870912
 AUTH = base64.b64encode(b"owner:workflow-test-password").decode()
 RESULTS = {
     "revision": REVISION,
     "limits": {"cpu": CPU, "memory_bytes": MEMORY, "swap_bytes": 0},
     "environment": "GitHub Actions Ubuntu 24.04 Linux Docker; not a provider deployment",
     "approximate_e2_micro": APPROXIMATE_E2_MICRO,
+    "job_envelope": JOB_ENVELOPE,
     "storage": "Disposable Docker volume; NOT proof of provider persistence",
     "cases": [],
 }
@@ -219,9 +223,11 @@ def run_case(seconds):
             assert set(result["result"]["stems"]) == {"harmonic", "percussive"}
             stems = api("GET", f"/api/sources/{sid}/stems")
             assert {s["stem_type"] for s in stems} == {"harmonic", "percussive"}
+            case["stem_download_bytes"] = {}
             for stem in stems:
                 audio = request("GET", f"/api/stems/{stem['id']}/audio")
                 assert audio.startswith(b"RIFF") and len(audio) > 100
+                case["stem_download_bytes"][stem["stem_type"]] = len(audio)
             return result
 
         if not measurement.run("builtin_hpss_and_stem_downloads", separate, 240):
@@ -244,6 +250,9 @@ def run_case(seconds):
             case["skipped"] = "HQ/WAV/MP3 and maximum input: outside focused approximation check"
             return all(row["outcome"] == "passed" for row in case["operations"])
         variation = api("GET", f"/api/projects/{pid}/variations")[0]
+        audio = request("GET", f"/api/variations/{variation['id']}/audio")
+        assert audio.startswith(b"RIFF") and len(audio) > 100
+        case["generated_audio_bytes"] = len(audio)
         api("POST", f"/api/variations/{variation['id']}/open-in-studio", {})
 
         def preview(deadline):
@@ -252,6 +261,7 @@ def run_case(seconds):
                          timeout=max(1, deadline - time.monotonic()))
             audio = request("GET", result["url"])
             assert audio.startswith(b"RIFF") and len(audio) > 100
+            case["preview_audio_bytes"] = len(audio)
             case["preview_metrics"] = result["metrics"]
             return result
 
@@ -270,6 +280,7 @@ def run_case(seconds):
                 assert record["status"] == "done" and not mix["check"]["silent"]
                 audio = request("GET", f"/api/exports/{record['id']}/download")
                 assert len(audio) > 100
+                case[f"{fmt}_download_bytes"] = len(audio)
                 case[f"{fmt}_checks"] = mix["check"]
                 return record
 
