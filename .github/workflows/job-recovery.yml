@@ -62,9 +62,11 @@ jobs:
             -e CHOPLAB_TEST_POSTGRES_URL='postgresql://choplab_test:synthetic-ci-password@postgres:5432/choplab_recovery_test?sslmode=verify-full' \
             -e PGSSLROOTCERT=/certs/server.crt \
             -v "$RUNNER_TEMP/recovery-certs/server.crt:/certs/server.crt:ro" \
-            -v "$PWD/backend/tests:/tests:ro" \
+            -v "$PWD/backend/tests:/workspace/backend/tests:ro" \
+            -v "$PWD/scripts:/workspace/scripts:ro" \
             choplab:recovery-test -m pytest -q -p no:cacheprovider \
-            /tests/test_job_recovery.py /tests/test_job_events.py /tests/test_hosting.py /tests/test_metadata.py
+            /workspace/backend/tests/test_job_recovery.py /workspace/backend/tests/test_job_events.py \
+            /workspace/backend/tests/test_hosting.py /workspace/backend/tests/test_metadata.py
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
