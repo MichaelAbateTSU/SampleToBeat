@@ -35,9 +35,12 @@ jobs:
           if os.environ["CASES"] == "export":
               source = source.replace('        run_case(300)', '')
           source = source.replace('if result["status"] == "completed":',
-                                  'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "current_stage", "progress", "error_message")}\n        if result["status"] == "completed":')
+                                  'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "current_stage", "progress", "error_message")}\n        stage = result.get("current_stage")\n        if stage != RESULTS.get("profile_stage"):\n            RESULTS["profile_stage"] = stage\n            print(json.dumps({"profile_stage": stage, "monotonic": time.monotonic()}), flush=True)\n        if result["status"] == "completed":')
+          source = source.replace('samples = []', 'samples = []\n        memory_profile = []')
+          source = source.replace('samples.append(int((self.group / "memory.current").read_text()))',
+                                  'samples.append(int((self.group / "memory.current").read_text()))\n                        stat = dict(line.split() for line in (self.group / "memory.stat").read_text().splitlines())\n                        memory_profile.append({"monotonic": time.monotonic(), "stage": RESULTS.get("profile_stage"), "current": samples[-1], **{k: int(stat.get(k, 0)) for k in ("anon", "file", "kernel")}})')
           source = source.replace('"duration_seconds": round(time.monotonic() - before, 3),',
-                                  '"last_job": RESULTS.get("last_job"),\n                "duration_seconds": round(time.monotonic() - before, 3),')
+                                  '"last_job": RESULTS.get("last_job"),\n                "memory_profile": memory_profile,\n                "duration_seconds": round(time.monotonic() - before, 3),')
           path.write_text(source)
           PY
           python3 -m py_compile "$RUNNER_TEMP/render-memory.py"

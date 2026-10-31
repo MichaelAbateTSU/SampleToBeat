@@ -207,8 +207,9 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     # frame indices are only for feature syncing; beat_times stay sub-frame precise (HOP is ~23 ms)
     beats = np.clip(librosa.time_to_frames(beat_times, sr=ASR, hop_length=HOP), 0, n_frames - 1)
 
-    progress("key", 0.25)
+    progress("key_harmonic", 0.25)
     harm = _harmonic(mono)
+    progress("key_chroma", 0.25)
     chroma = librosa.feature.chroma_cqt(y=harm, sr=ASR, hop_length=HOP)[:, :n_frames]
     keys = estimate_key(chroma.sum(axis=1))
     key_conf = round(max(0.0, keys[0]["score"] - keys[1]["score"]) * 5 + max(0.0, keys[0]["score"]) * 0.5, 3)
