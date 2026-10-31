@@ -5,8 +5,21 @@ import sys
 import numpy as np
 import pytest
 import soundfile as sf
+from scipy.signal import resample_poly
 
 from choplab import audio_io, disk_decode
+
+
+def original_decode(path):
+    """Frozen original libsndfile/SciPy path, independent of production decode."""
+    y, rate = sf.read(path, dtype="float32", always_2d=True)
+    if y.shape[1] == 1:
+        y = np.repeat(y, 2, axis=1)
+    y = np.ascontiguousarray(y[:, :2], dtype=np.float32)
+    if rate != 48000:
+        g = np.gcd(rate, 48000)
+        y = resample_poly(y, 48000 // g, rate // g, axis=0).astype(np.float32)
+    return np.nan_to_num(y) if not np.isfinite(y).all() else y
 
 
 @pytest.mark.parametrize("rate", [44100, 48000, 96000])
@@ -17,7 +30,7 @@ def test_soundfile_sample_parity(tmp_path, rate, channels, frames):
     y = rng.uniform(-0.7, 0.7, (frames, channels)).astype(np.float32)
     source = tmp_path / "source.wav"
     sf.write(source, y, rate, subtype="FLOAT")
-    expected = audio_io.decode(source)
+    expected = original_decode(source)
     output = disk_decode.decode_to_wav(source, tmp_path / "out.wav")
     actual, sr = sf.read(output, dtype="float32", always_2d=True)
     assert sr == 48000 and actual.shape == expected.shape
@@ -35,7 +48,7 @@ def test_nonfinite_parity(tmp_path, rate):
     y[131071] = -np.inf
     source = tmp_path / "nonfinite.wav"
     sf.write(source, y, rate, subtype="FLOAT")
-    expected = audio_io.decode(source)
+    expected = original_decode(source)
     actual, _ = sf.read(disk_decode.decode_to_wav(source, tmp_path / "out.wav"),
                         dtype="float32", always_2d=True)
     np.testing.assert_array_equal(actual, expected)
@@ -48,7 +61,7 @@ def test_container_formats(tmp_path, format, subtype):
              format=format, subtype=subtype)
     actual, _ = sf.read(disk_decode.decode_to_wav(source, tmp_path / "out.wav"),
                         dtype="float32", always_2d=True)
-    np.testing.assert_array_equal(actual, audio_io.decode(source))
+    np.testing.assert_array_equal(actual, original_decode(source))
 
 
 @pytest.mark.parametrize("channels", [1, 2, 4])
@@ -60,7 +73,13 @@ def test_ffmpeg_fallback_parity(tmp_path, monkeypatch, channels):
     compressed = tmp_path / "source.m4a"
     subprocess.run([exe, "-v", "error", "-y", "-i", str(source), "-c:a", "aac", str(compressed)],
                    check=True, timeout=30)
-    expected = audio_io.decode(compressed)
+    reference = subprocess.run(
+        [exe, "-v", "error", "-i", str(compressed), "-t", "1201",
+         "-f", "f32le", "-ac", "2", "-ar", "48000", "-"],
+        capture_output=True, check=True, timeout=180,
+    )
+    expected = np.frombuffer(reference.stdout, dtype=np.float32).reshape(-1, 2)
+    expected = np.nan_to_num(expected) if not np.isfinite(expected).all() else expected
     actual, _ = sf.read(disk_decode.decode_to_wav(compressed, tmp_path / "out.wav"),
                         dtype="float32", always_2d=True)
     np.testing.assert_array_equal(actual, expected)
@@ -93,7 +112,7 @@ def test_resampled_duration_boundary(tmp_path, monkeypatch, rate):
     sf.write(source, np.random.default_rng(3).normal(0, .1, (rate, 1)), rate, subtype="FLOAT")
     actual, _ = sf.read(disk_decode.decode_to_wav(source, tmp_path / "out.wav"),
                         dtype="float32", always_2d=True)
-    np.testing.assert_array_equal(actual, audio_io.decode(source))
+    np.testing.assert_array_equal(actual, original_decode(source))
     assert len(actual) == 48000
     sf.write(source, np.zeros((rate + 1, 1)), rate)
     with pytest.raises(audio_io.AudioError, match="longer"):
@@ -172,3 +191,158 @@ def test_hidden_duration_and_write_failure_cleanup(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="disk full"):
         disk_decode.decode_to_wav(source, destination)
     assert not destination.exists() and not list(tmp_path.glob(".decode-*"))
+
+
+@pytest.mark.parametrize("rate,frames", [
+    (1, 1), (1, 20), (1, 21), (1, 22), (1, 43), (7, 241), (31, 1303),
+    (47999, 73), (47999, 1007978), (47999, 1007979), (47999, 1007980),
+    (48001, 1008022), (96001, 2016022),
+])
+def test_expanding_and_coprime_parity(tmp_path, rate, frames):
+    source = tmp_path / "source.wav"
+    sf.write(source, np.random.default_rng(84).normal(0, .1, (frames, 2)).astype(np.float32),
+             rate, subtype="FLOAT")
+    actual, _ = sf.read(disk_decode.decode_to_wav(source, tmp_path / "out.wav"),
+                        dtype="float32", always_2d=True)
+    np.testing.assert_array_equal(actual, original_decode(source))
+
+
+@pytest.mark.parametrize("rate,channels", [(1, 1024), (7, 128), (44100, 1024), (48000, 1024)])
+def test_channel_reads_bounded_before_stereo_conversion(tmp_path, monkeypatch, rate, channels):
+    frames = min(rate * 2, 3003)
+    source = tmp_path / "source.wav"
+    sf.write(source, np.random.default_rng(42).normal(0, .1, (frames, channels)),
+             rate, subtype="FLOAT")
+    expected = original_decode(source)
+    read = sf.SoundFile.read
+    reads = []
+
+    def bounded_read(self, frames=-1, *args, **kwargs):
+        if self.channels == channels:
+            reads.append(frames)
+            assert 0 < frames * channels * 4 <= disk_decode.READ_BYTES
+        return read(self, frames, *args, **kwargs)
+
+    monkeypatch.setattr(sf.SoundFile, "read", bounded_read)
+    output = disk_decode.decode_to_wav(source, tmp_path / "out.wav")
+    monkeypatch.setattr(sf.SoundFile, "read", read)
+    actual, _ = sf.read(output, dtype="float32", always_2d=True)
+    np.testing.assert_array_equal(actual, expected)
+    assert reads
+
+
+def test_coprime_filter_designed_once(tmp_path, monkeypatch):
+    source = tmp_path / "source.wav"
+    sf.write(source, np.zeros((2015959, 2), np.float32), 47999, subtype="FLOAT")
+    design = disk_decode.firwin
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(args[0])
+        return design(*args, **kwargs)
+
+    monkeypatch.setattr(disk_decode, "firwin", counted)
+    disk_decode.decode_to_wav(source, tmp_path / "out.wav")
+    assert calls == [960001]
+
+
+@pytest.mark.parametrize("rate,frames", [(44100, 150003), (47999, 73), (192001, 73), (1000003, 73)])
+@pytest.mark.parametrize("nonfinite", [False, True])
+def test_ordered_phase_parity(tmp_path, monkeypatch, rate, frames, nonfinite):
+    source = tmp_path / "source.wav"
+    y = np.random.default_rng(21).normal(0, .1, (frames, 2)).astype(np.float32)
+    if nonfinite:
+        y[min(21, frames - 1)] = np.nan
+    sf.write(source, y, rate, subtype="FLOAT")
+    expected = original_decode(source)
+    original = disk_decode.resample_poly
+    monkeypatch.setattr(disk_decode, "resample_poly",
+                        lambda *args, **kwargs: pytest.fail("full polyphase workspace allocated"))
+    monkeypatch.setattr(disk_decode, "READ_BYTES", 384 << 20)
+    output = disk_decode.decode_to_wav(source, tmp_path / "out.wav")
+    monkeypatch.setattr(disk_decode, "resample_poly", original)
+    actual, _ = sf.read(output, dtype="float32", always_2d=True)
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_disk_filter_construction_failure_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setattr(disk_decode.np, "sinc",
+                        lambda *args: (_ for _ in ()).throw(OSError("disk/filter failure")))
+    with pytest.raises(OSError, match="disk/filter failure"):
+        disk_decode._disk_fir(tmp_path, 960001, 1 / 48000)
+    assert not list(tmp_path.glob(".decode-*"))
+
+
+@pytest.mark.parametrize("rate,frames", [(192001, 73), (192001, 4032022), (1000003, 73)])
+def test_large_coprime_parity(tmp_path, rate, frames):
+    source = tmp_path / "source.wav"
+    sf.write(source, np.random.default_rng(2).normal(0, .1, (frames, 2)).astype(np.float32),
+             rate, subtype="FLOAT")
+    expected = original_decode(source)
+    actual, _ = sf.read(disk_decode.decode_to_wav(source, tmp_path / "out.wav"),
+                        dtype="float32", always_2d=True)
+    np.testing.assert_array_equal(actual, expected)
+    assert not list(tmp_path.glob(".decode-*"))
+
+
+@pytest.mark.parametrize("maximum", [48000, 192001, 1000003])
+def test_disk_fir_coefficients_exact(tmp_path, maximum):
+    expected = disk_decode.firwin(20 * maximum + 1, 1.0 / maximum,
+                                  window=("kaiser", 5.0)).astype(np.float32)
+    actual, path = disk_decode._disk_fir(tmp_path, len(expected), 1.0 / maximum)
+    try:
+        np.testing.assert_array_equal(actual, expected)
+    finally:
+        actual._mmap.close()
+        path.unlink()
+
+
+def test_large_filter_write_failure_cleanup(tmp_path, monkeypatch):
+    source = tmp_path / "source.wav"
+    sf.write(source, np.zeros((73, 2), np.float32), 192001, subtype="FLOAT")
+    destination = tmp_path / "out.wav"
+    destination.write_bytes(b"existing")
+    monkeypatch.setattr(disk_decode, "_write", lambda *args: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        disk_decode.decode_to_wav(source, destination)
+    assert destination.read_bytes() == b"existing"
+    assert not list(tmp_path.glob(".decode-*"))
+
+
+def test_truncated_read_cleanup(tmp_path, monkeypatch):
+    source = tmp_path / "source.wav"
+    sf.write(source, np.zeros((100, 2), np.float32), 48000)
+    destination = tmp_path / "out.wav"
+    destination.write_bytes(b"existing")
+    read = sf.SoundFile.read
+
+    def short(self, frames=-1, *args, **kwargs):
+        return read(self, max(0, frames - 1), *args, **kwargs)
+
+    monkeypatch.setattr(sf.SoundFile, "read", short)
+    with pytest.raises(audio_io.AudioError, match="incomplete audio frames"):
+        disk_decode.decode_to_wav(source, destination)
+    assert destination.read_bytes() == b"existing"
+    assert not list(tmp_path.glob(".decode-*"))
+
+
+def test_expanded_nonfinite_and_write_mask_bounds(tmp_path, monkeypatch):
+    source = tmp_path / "source.wav"
+    y = np.random.default_rng(5).normal(0, .1, (43, 2)).astype(np.float32)
+    y[19] = np.nan
+    y[21] = np.inf
+    y[22] = -np.inf
+    sf.write(source, y, 1, subtype="FLOAT")
+    write = disk_decode._write
+    counts = []
+
+    def bounded(out, block, fd, maximum):
+        counts.append(len(block))
+        assert len(block) <= disk_decode.BLOCK_FRAMES
+        return write(out, block, fd, maximum)
+
+    monkeypatch.setattr(disk_decode, "_write", bounded)
+    output = disk_decode.decode_to_wav(source, tmp_path / "out.wav")
+    actual, _ = sf.read(output, dtype="float32", always_2d=True)
+    np.testing.assert_array_equal(actual, original_decode(source))
+    assert len(counts) > 2
