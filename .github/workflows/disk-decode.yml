@@ -7,6 +7,7 @@ on:
       - "backend/tests/test_disk_decode.py"
       - ".github/benchmarks/*disk_decode*"
       - ".github/benchmarks/Dockerfile.disk-decode"
+      - ".github/benchmarks/Dockerfile.disk-decode.dockerignore"
       - ".github/workflows/disk-decode.yml"
 permissions:
   contents: read
