@@ -180,6 +180,11 @@ stop its old instance rather than deadlocking startup on the new instance's heal
 The replacement checks ownership every five seconds, then reconciles and admits processing after
 the old instance releases ownership or its 60-second lease expires. Each instance's local cache
 is exclusively locked; instances sharing metadata must use separate private cache directories.
+Stop every legacy/local-volume runtime before enabling this ownership protocol; an older binary
+without fencing must never run against the same library alongside a durable runtime. Pending
+legacy/unowned jobs are left untouched and produce actionable read-only feedback, including the
+offline recovery command on their original volume. Initialization/reconciliation errors also
+leave health available and processing read-only; fix the reported error and restart.
 An old worker that wakes after expiry cannot commit metadata or attach assets. Objects are published
 under unique, never-reused namespaces before metadata references them. Retired keys cannot gain
 references; cleanup retries exact retired keys, including ambiguous upload orphans, so delayed old

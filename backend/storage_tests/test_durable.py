@@ -150,6 +150,112 @@ def test_same_path_new_output_is_published_not_overwritten_by_old_cache_hydratio
         assert Path(second["features_path"]).read_bytes() == b"new-feature-data"
 
 
+def test_metadata_read_during_feature_write_cannot_restore_over_pending_output(remote, monkeypatch):
+    root, _, _ = remote
+    with jobs.runtime():
+        store.put("source", {"id": "analysis", "project_id": "p",
+                            "features_path": write(root, "projects/p/sources/analysis/features.npz", b"old-data")})
+        original = np.savez
+        def concurrent_reader(path, **features):
+            original(path, **features)
+            store.get("source", "analysis")
+        monkeypatch.setattr(np, "savez", concurrent_reader)
+        monkeypatch.setattr(api.analysis, "analyze", lambda *args: ({"bpm": 100, "key": "C"}, {"energy": [1, 2]}))
+        monkeypatch.setattr(api, "_discover", lambda *args: 0)
+        api._analyze(jobs.JobContext("new-analysis"), "analysis", np.zeros((2, 2), dtype=np.float32))
+        result = store.get("source", "analysis")
+        assert Path(result["features_path"]).name == "features-new-analysis.npz"
+        with np.load(result["features_path"]) as features:
+            np.testing.assert_array_equal(features["energy"], [1, 2])
+
+
+def test_offline_snapshot_restore_preserves_live_assets_and_tombstones(remote, monkeypatch):
+    root, _, _ = remote
+    with jobs.runtime():
+        store.put("sound", {"id": "live", "sample_path": write(root, "live.wav")})
+        store.put("sound", {"id": "retired", "sample_path": write(root, "retired.wav")})
+        store.delete("sound", "retired")
+        durable.reconcile()
+        snapshot = store.export_snapshot()
+        old_fence = durable._fence
+    replace_volume(remote, monkeypatch)
+    with store._conn() as con:
+        con.execute("DELETE FROM docs")
+        con.execute("DELETE FROM choplab_asset_links")
+        con.execute("DELETE FROM choplab_assets")
+    store.restore_snapshot(snapshot)
+    with jobs.runtime():
+        assert durable._fence > old_fence
+        assert Path(store.get("sound", "live")["sample_path"]).read_bytes() == b"identical-audio-bytes"
+        with store._conn() as con:
+            assert con.execute("SELECT COUNT(*) FROM choplab_assets WHERE state='deleted'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("owner", [None, "foreign-volume"])
+def test_legacy_jobs_remain_untouched_with_actionable_read_only_api(remote, owner):
+    with jobs.runtime():
+        doc = {"id": "legacy", "status": "running", "job_type": "analyze",
+               "params": {"source_id": "legacy-source"}}
+        if owner:
+            doc["owner_volume"] = owner
+        store.put("job", doc)
+        store.put("source", {"id": "legacy-source", "analysis_status": "analyzing"})
+    with TestClient(api.app) as client:
+        response = client.get("/api/system/recovery")
+        assert response.status_code == 409
+        assert "left untouched" in response.json()["detail"]
+        assert "matching original volume" in response.json()["detail"]
+        assert "recover-jobs" in client.get("/api/system/capabilities").json()["job_recovery_error"]
+        assert client.get("/api/health").status_code == 200
+        assert client.post("/api/projects", json={"name": "blocked"}).status_code == 503
+        assert raw("job", "legacy")["status"] == "running"
+        assert raw("source", "legacy-source")["analysis_status"] == "analyzing"
+
+
+def test_abrupt_durable_restart_recovers_linked_statuses_without_changing_newer_results(remote, monkeypatch):
+    root, _, _ = remote
+    signal = root.parent / "crash-ready"
+    code = """
+import os,time
+from pathlib import Path
+from choplab import durable,jobs,store
+durable.configure()
+with jobs.runtime():
+    store.put('source',{'id':'source','analysis_status':'analyzing','separation_status':'running'})
+    store.put('export',{'id':'export','status':'queued'})
+    store.put('source',{'id':'newer','analysis_status':'analyzed','analysis':{'bpm':101},'separation_status':'done'})
+    store.put('export',{'id':'saved','status':'done','note':'completed history'})
+    for kind,params in [('analyze',{'source_id':'source'}),('separate',{'source_id':'source','model_id':'builtin-hpss'}),('export',{'export_id':'export','project_id':'p','request':{}})]:
+        store.put('job',{'id':kind,'job_type':kind,'status':'running','owner_volume':'durable','params':params})
+    Path(os.environ['SIGNAL']).write_text('ready')
+    while True: time.sleep(.1)
+"""
+    process = subprocess.Popen([sys.executable, "-c", code], env={**worker_env(remote, root), "SIGNAL": str(signal)},
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        wait_file(signal, process)
+        process.kill()
+        process.communicate(timeout=10)
+        with store._conn() as con:
+            con.execute("UPDATE choplab_runtime SET expires=0 WHERE id=1")
+        replace_volume(remote, monkeypatch)
+        with TestClient(api.app) as client:
+            assert client.get("/api/system/recovery").json()["ok"]
+            for id in ("analyze", "separate", "export"):
+                assert raw("job", id)["status"] == "interrupted"
+                assert "retry" in raw("job", id)["error_message"].lower()
+            assert raw("source", "source")["analysis_status"] == "interrupted"
+            assert raw("source", "source")["separation_status"] == "interrupted"
+            assert raw("export", "export")["status"] == "interrupted"
+            assert raw("source", "newer")["analysis"] == {"bpm": 101}
+            assert raw("source", "newer")["analysis_status"] == "analyzed"
+            assert raw("export", "saved")["status"] == "done"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=10)
+
+
 def test_failed_publication_never_commits_success_and_orphans_reconcile(remote, monkeypatch):
     root, _, _ = remote
     with jobs.runtime():

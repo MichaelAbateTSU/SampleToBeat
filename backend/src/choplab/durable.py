@@ -113,6 +113,15 @@ def restore_kits():
 def migrate_local():
     """Explicitly enabling storage publishes the existing volume before replacement."""
     from . import store
+    with store._conn() as con:
+        pending = con.execute("SELECT doc FROM docs WHERE kind='job'").fetchall()
+    if any((job := json.loads(row[0])).get("status") in ("queued", "running")
+           and job.get("owner_volume") != "durable" for row in pending):
+        from .jobs import RECOVERY_COMMAND
+        raise StorageError(
+            "Legacy or unowned PostgreSQL jobs cannot be fenced by this storage runtime and were left untouched. "
+            f"Stop ALL legacy runtimes, back up metadata/audio, and run {RECOVERY_COMMAND} "
+            "without CHOPLAB_STORAGE_CONFIG_FILE on the matching original volume before enabling durable storage.")
     for kind in ("source", "project", "variation", "export", "preview", "sound", "kit", "job"):
         with store._conn() as con:
             rows = con.execute("SELECT doc FROM docs WHERE kind=?", (kind,)).fetchall()
@@ -254,7 +263,11 @@ def _runtime(*, on_acquired=None):
         while not _stop.wait(5):
             try:
                 if acquire():
-                    activate()
+                    try:
+                        activate()
+                    except (StorageError, store.StoreUnavailable) as error:
+                        _runtime_error = f"Storage initialization/reconciliation failed: {error} Processing is read-only; resolve the error and restart this instance."
+                        core.log.error("%s", _runtime_error)
                     return
             except (StorageError, store.StoreUnavailable) as error:
                 core.log.error("Replacement ownership/reconciliation failed: %s", error)

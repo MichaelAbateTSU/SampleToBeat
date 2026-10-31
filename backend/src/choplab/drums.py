@@ -111,8 +111,10 @@ def sound(kit: str, inst: str) -> np.ndarray:
 
 
 def import_sound(kit: str, inst: str, src: Path) -> Path:
+    from . import durable, store
     y = audio_io.decode(src)[: SR * 4]
-    return audio_io.write_wav(data_path("kits", kit, "custom", f"{inst}.wav"), y)
+    name = f"{inst}-{store.new_id('sound')}.wav" if durable.enabled() else f"{inst}.wav"
+    return audio_io.write_wav(data_path("kits", kit, "custom", name), y)
 
 
 def reset_sound(kit: str, inst: str) -> None:

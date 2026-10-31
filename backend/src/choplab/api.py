@@ -127,7 +127,13 @@ async def _save_upload(f: UploadFile, dest: Path) -> int:
                     raise HTTPException(413, f"File is larger than {MAX_UPLOAD // (1 << 20)} MiB.")
                 if shutil.disk_usage(DATA_DIR).free < MIN_FREE + len(chunk):
                     raise HTTPException(507, "Storage reserve reached; delete old projects or clear the cache.")
-                out.write(chunk)
+                await asyncio.to_thread(out.write, chunk)
+                if durable.enabled() and n % (8 << 20) < len(chunk):
+                    from .object_storage import _release_file_cache
+                    await asyncio.to_thread(_release_file_cache, out, written=True)
+            if durable.enabled():
+                from .object_storage import _release_file_cache
+                await asyncio.to_thread(_release_file_cache, out, written=True)
         if n == 0:
             raise HTTPException(400, "Uploaded file is empty.")
         tmp.replace(dest)
@@ -166,6 +172,8 @@ def _with_slices(s: dict, src: dict | None) -> dict:
 
 
 def _features_path(src: dict) -> Path:
+    if durable.enabled() and src.get("features_path"):
+        return Path(src["features_path"])
     return _dir(src["project_id"], "sources", src["id"]) / "features.npz"
 
 
@@ -183,7 +191,8 @@ def job_import(ctx, source_id: str):
         orig = Path(src["original_file_path"])
         meta = audio_io.probe(orig)
         y = audio_io.decode(orig)
-        internal = audio_io.write_wav(Path(src["original_file_path"]).with_name("audio.wav"), y)
+        internal_name = f"audio-{ctx.id}.wav" if durable.enabled() else "audio.wav"
+        internal = audio_io.write_wav(Path(src["original_file_path"]).with_name(internal_name), y)
         src = store.update("source", source_id, internal_audio_path=str(internal), content_hash=audio_io.file_hash(orig),
                            duration_seconds=round(len(y) / SR, 3), sample_rate=meta["sample_rate"],
                            channel_count=meta["channels"], metadata=meta, peaks=audio_io.peaks(y, 2400),
@@ -208,9 +217,11 @@ def _analyze(ctx, source_id, y=None, override=None):
     src = _get("source", source_id)
     y = audio_io.load(Path(src["internal_audio_path"])) if y is None else y
     doc, f = analysis.analyze(y, _sub(ctx, 0.05, 0.7), override)
-    np.savez(_features_path(src), **{k: np.asarray(v) for k, v in f.items()})
+    features = (_dir(src["project_id"], "sources", source_id) / f"features-{ctx.id}.npz"
+                if durable.enabled() else _features_path(src))
+    np.savez(features, **{k: np.asarray(v) for k, v in f.items()})
     store.update("source", source_id, analysis=doc, analysis_status="analyzed", error=None,
-                 features_path=str(_features_path(src)))
+                 features_path=str(features))
     n = _discover(ctx, source_id)
     return {"bpm": doc["bpm"], "key": doc["key"], "samples": n}
 
@@ -233,7 +244,8 @@ def _discover(ctx, source_id) -> int:
 def job_separate(ctx, source_id: str, model_id: str):
     store.update("source", source_id, separation_status="running")
     try:
-        stems = separation.separate(_get("source", source_id), model_id, _sub(ctx, 0.0, 0.7))
+        stems = separation.separate(_get("source", source_id), model_id, _sub(ctx, 0.0, 0.7),
+                                    working_id=ctx.id if durable.enabled() else None)
         store.update("source", source_id, stems=stems, stem_model=model_id, separation_status="done")
     except Exception as e:
         store.update("source", source_id, separation_status="failed", separation_error=str(e))
@@ -681,7 +693,7 @@ def preview_file(id: str, name: str):
 async def bass_sample(id: str, file: UploadFile = File(...)):
     """A custom 808 one-shot (tuned from its root note at render time)."""
     await asyncio.to_thread(_get, "project", id)
-    tmp = _dir(id, "sounds") / f"upload{_ext(file.filename)}"
+    tmp = _dir(id, "sounds") / f"{store.new_id('upload')}{_ext(file.filename)}"
     await _save_upload(file, tmp)
     try:
         with jobs.compute_slot():
@@ -789,15 +801,15 @@ def kit_audio(kit: str, inst: str):
 @app.post("/api/kits/{kit}/{inst}", status_code=201)
 async def kit_upload(kit: str, inst: str, file: UploadFile = File(...)):
     _kit_inst(kit, inst)
-    tmp = data_path("kits", "_upload" + _ext(file.filename))
+    tmp = data_path("kits", store.new_id("upload") + _ext(file.filename))
     await _save_upload(file, tmp)
     try:
         with jobs.compute_slot():
-            await asyncio.to_thread(drums.import_sound, kit, inst, tmp)
+            path = await asyncio.to_thread(drums.import_sound, kit, inst, tmp)
     finally:
         tmp.unlink(missing_ok=True)
     if durable.enabled():
-        await asyncio.to_thread(store.put, "kit", {"id": f"kit-{kit}-{inst}", "audio_path": str(data_path("kits", kit, "custom", f"{inst}.wav"))})
+        await asyncio.to_thread(store.put, "kit", {"id": f"kit-{kit}-{inst}", "audio_path": str(path)})
     return {"kit": kit, "inst": inst, "custom": True}
 
 
