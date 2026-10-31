@@ -17,6 +17,15 @@ def test_bounded_harmonic_matches_default_hpss(length, dtype):
     np.testing.assert_array_equal(analysis._harmonic(mono), librosa.effects.harmonic(mono))
 
 
+@pytest.mark.parametrize("length", [2048, 275777, 22050 * 60])
+def test_bounded_global_tuning_preserves_pitch_median(length):
+    import librosa
+
+    mono = np.random.default_rng(43).normal(0, 0.1, length).astype(np.float32)
+    mono[:len(mono) // 3] *= 0.001
+    assert analysis._tuning(mono) == librosa.estimate_tuning(y=mono, sr=analysis.ASR, bins_per_octave=36)
+
+
 @pytest.mark.parametrize("length", [137, 256, 513, 2000])
 def test_bounded_tempogram_preserves_global_tempo(length):
     import librosa
