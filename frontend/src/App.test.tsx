@@ -39,3 +39,17 @@ it("shows hosting-neutral outage guidance and automatically reconnects", async (
   expect(api.health).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
+
+it("does not claim automatic retries while an outage is paused for inactivity", async () => {
+  vi.useFakeTimers();
+  focusManager.setFocused(true);
+  vi.mocked(api.health).mockRejectedValue(new Error("Service unavailable"));
+  render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_100); });
+  expect(screen.getByRole("alert")).toHaveTextContent("Reconnection resumes when you return or interact");
+  expect(screen.getByRole("alert")).not.toHaveTextContent("This page reconnects automatically");
+  vi.mocked(api.health).mockResolvedValue({ ok: true, version: "test", engine: "test" });
+  act(() => window.dispatchEvent(new Event("keydown")));
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});

@@ -38,7 +38,7 @@ describe("hosted health activity", () => {
     expect(api.health).toHaveBeenCalledTimes(count);
   });
 
-  it.each(["pointerdown", "keydown", "focus", "online"])("reconnects on %s and reconciles active queries", async (event) => {
+  it.each(["pointerdown", "keydown", "wheel", "touchstart", "focus", "online"])("reconnects on %s and reconciles active queries", async (event) => {
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const hook = renderHook(useHealth, { wrapper });
     await tick(HEALTH_IDLE_MS + 100);
@@ -111,5 +111,15 @@ describe("hosted health activity", () => {
     await tick(20_000);
     expect(vi.mocked(api.health).mock.calls.length).toBeGreaterThan(count);
     expect(hook.result.current.paused).toBe(false);
+  });
+
+  it("removes activity listeners and health observation on unmount", async () => {
+    const hook = renderHook(useHealth, { wrapper });
+    await tick(HEALTH_IDLE_MS + 100);
+    hook.unmount();
+    const count = vi.mocked(api.health).mock.calls.length;
+    act(() => window.dispatchEvent(new Event("pointerdown")));
+    await tick(HEALTH_IDLE_MS + 100);
+    expect(api.health).toHaveBeenCalledTimes(count);
   });
 });

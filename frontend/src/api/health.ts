@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
-import { queryClient, TERMINAL, useCapabilities, useJobs } from "./hooks";
+import { TERMINAL, useCapabilities, useJobs } from "./hooks";
 
 export const HEALTH_IDLE_MS = 60_000;
 
 /** Hosted health traffic follows interaction, not merely an open visible tab. */
 export function useHealth() {
+  const queryClient = useQueryClient();
   const hosted = useCapabilities().data?.hosted !== false;
   const busy = useJobs((s) => Object.values(s.jobs).some((job) => !TERMINAL.has(job.status)));
   const [awake, setAwake] = useState(document.visibilityState === "visible");
@@ -71,7 +72,7 @@ export function useHealth() {
         refetchType: "active",
       });
     }
-  }, [q.isSuccess, q.isFetching, q.dataUpdatedAt]);
+  }, [queryClient, q.isSuccess, q.isFetching, q.dataUpdatedAt]);
 
   return { ...q, paused: hosted && !awake && !busy };
 }
