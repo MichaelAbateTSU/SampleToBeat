@@ -6,18 +6,14 @@ on:
 permissions:
   contents: read
 jobs:
-  inspect:
+  measure:
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          pip install fastapi==0.157.0 starlette==1.9.0 python-multipart==0.0.32
-          python - <<'PY'
-          import inspect
-          from starlette.formparsers import MultiPartParser
-          from starlette.requests import Request
-          from starlette.datastructures import UploadFile
-          print(inspect.getsource(MultiPartParser))
-          print(inspect.getsource(Request._get_form))
-          print(inspect.getsource(UploadFile))
-          PY
+      - run: bash backend/upload_tests/ci.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spool-cache-results
+          path: upload-results
