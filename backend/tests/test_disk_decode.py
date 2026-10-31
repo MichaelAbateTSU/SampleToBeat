@@ -273,3 +273,25 @@ def test_truncated_read_cleanup(tmp_path, monkeypatch):
         disk_decode.decode_to_wav(source, destination)
     assert destination.read_bytes() == b"existing"
     assert not list(tmp_path.glob(".decode-*"))
+
+
+def test_expanded_nonfinite_and_write_mask_bounds(tmp_path, monkeypatch):
+    source = tmp_path / "source.wav"
+    y = np.random.default_rng(5).normal(0, .1, (43, 2)).astype(np.float32)
+    y[19] = np.nan
+    y[21] = np.inf
+    y[22] = -np.inf
+    sf.write(source, y, 1, subtype="FLOAT")
+    write = disk_decode._write
+    counts = []
+
+    def bounded(out, block, fd, maximum):
+        counts.append(len(block))
+        assert len(block) <= disk_decode.BLOCK_FRAMES
+        return write(out, block, fd, maximum)
+
+    monkeypatch.setattr(disk_decode, "_write", bounded)
+    output = disk_decode.decode_to_wav(source, tmp_path / "out.wav")
+    actual, _ = sf.read(output, dtype="float32", always_2d=True)
+    np.testing.assert_array_equal(actual, original_decode(source))
+    assert len(counts) > 2

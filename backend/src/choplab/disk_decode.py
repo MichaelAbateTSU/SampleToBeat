@@ -92,12 +92,15 @@ def _read_blocks(source, inp: sf.SoundFile, out: sf.SoundFile, fd: int, sr: int)
     target = (1 << 20) if up > 1024 else BLOCK_FRAMES
     block = max(1, target // up) * down
     # Match scipy's default symmetric FIR and global downsampling phase.
-    halo = math.ceil((10 * max(up, down) / up + 2) / down) * down
+    halo = (10 * max(up, down) + 2 * up + up * down - 1) // (up * down) * down
     frames = min(inp.frames, block + 2 * halo)
     expanded = (frames * up + down - 1) // down
     taps = 20 * max(up, down) + 1
+    # upfirdn also allocates the convolution tail before resample_poly slices
+    # it away. Include filter padding, row copies and the trimmed float32 copy.
+    filtered = ((max(frames, 1) - 1) * up + taps + 2 * down - 1) // down + 1
     if up != down and (taps * 64 > FILTER_WORK_BYTES
-                       or 32 * (frames + expanded) + READ_BYTES > RESAMPLE_WORK_BYTES):
+                       or 32 * (frames + max(expanded, filtered)) + READ_BYTES > RESAMPLE_WORK_BYTES):
         raise audio_io.AudioError(
             f"Exact resampling from {inp.samplerate} Hz to {sr} Hz exceeds the "
             "bounded decoder's FIR/workspace budget; convert externally at the "
