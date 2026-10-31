@@ -93,6 +93,29 @@ def test_existing_manifest_does_not_duplicate_creation(tmp_path):
         harness.prepare(PreflightClient(), path)
 
 
+def test_partial_prepare_preserves_nonsecret_ids_and_cannot_be_verified(tmp_path):
+    class Partial(PreflightClient):
+        def json(self, method, path, body=None):
+            if method == "POST" and path == "/api/projects":
+                return {"id": "prj_synthetic"}
+            return super().json(method, path, body)
+        def upload(self, *args):
+            raise harness.AcceptanceError("HTTP request timed out")
+    client = Partial()
+    path = tmp_path / "manifest.json"
+    with pytest.raises(harness.AcceptanceError, match="timed out"):
+        harness.prepare(client, path)
+    saved = json.loads(path.read_text())
+    assert saved["complete"] is False and saved["ids"] == {"project": "prj_synthetic"}
+    with pytest.raises(harness.AcceptanceError, match="incomplete"):
+        harness.verify(client, path)
+    # Do not delete or overwrite another operation's existing temporary file.
+    other = tmp_path / "manifest.json.part"
+    other.write_text("unrelated")
+    harness.save(path, saved)
+    assert other.read_text() == "unrelated"
+
+
 def test_synthetic_source_is_short_deterministic_stereo_pcm():
     import wave
     audio = harness.synthetic_audio()
@@ -136,7 +159,7 @@ def http_server():
         def log_message(self, *args):
             pass
         def do_GET(self):
-            state["requests"].append((self.path, self.headers.get("Authorization")))
+            state["requests"].append((self.path, self.headers.get("Authorization"), self.headers.get("X-Forwarded-Proto")))
             self.send_response(state["status"])
             if state["status"] == 302:
                 self.send_header("Location", "/api/credential-trap")
@@ -182,6 +205,14 @@ def test_range_integrity_and_download_limits(http_server, auth, monkeypatch):
         client.checksum("/api/audio")
 
 
+def test_anonymous_loopback_probe_omits_auth_but_preserves_https_proxy_scheme(http_server, auth):
+    base, state = http_server
+    client = harness.Client(base, base, auth, allow_loopback_http=True)
+    with client.open("GET", "/api/projects", anonymous=True):
+        pass
+    assert state["requests"] == [("/api/projects", None, "https")]
+
+
 def test_network_timeouts_are_safe(auth, monkeypatch):
     client = harness.Client("https://test.invalid", "https://test.invalid", auth)
     monkeypatch.setattr(client.opener, "open", lambda *args, **kwargs: (_ for _ in ()).throw(socket.timeout("secret-never-log")))
@@ -216,3 +247,28 @@ def test_bad_manifest_rejected_before_verification_network(tmp_path, failure):
     with pytest.raises(harness.AcceptanceError):
         harness.verify(client, path)
     assert not client.mutations
+
+
+def test_verify_is_read_only_and_checksum_mismatch_is_explicit(tmp_path, monkeypatch):
+    client = PreflightClient()
+    data = manifest(client)
+    old_json = client.json
+    def respond(method, path, body=None):
+        assert method == "GET"
+        if path.startswith("/api/projects/"):
+            return {"name": "synthetic-" + data["run_id"]}
+        if path.startswith("/api/jobs/"):
+            return {"status": "completed"}
+        return old_json(method, path, body)
+    monkeypatch.setattr(client, "json", respond)
+    monkeypatch.setattr(harness, "checksums", lambda *args: dict(data["sha256"]))
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(data))
+    saved = path.read_bytes()
+    harness.verify(client, path)
+    harness.verify(client, path)
+    assert not client.mutations and path.read_bytes() == saved
+    observed = {**data["sha256"], "source_audio": "b" * 64}
+    monkeypatch.setattr(harness, "checksums", lambda *args: observed)
+    with pytest.raises(harness.AcceptanceError, match="checksum mismatch: source_audio"):
+        harness.verify(client, path)

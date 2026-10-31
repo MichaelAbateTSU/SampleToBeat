@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import http.client
 import io
 import json
 import math
@@ -129,7 +130,8 @@ class Client:
                             r"/api/projects/[A-Za-z0-9_-]+/arrangement",)
             if not any(re.fullmatch(pattern, path) for pattern in patterns):
                 raise AcceptanceError("Mutation outside the synthetic project journey is forbidden.")
-        request_headers = {} if anonymous else dict(self.headers)
+        request_headers = {key: value for key, value in self.headers.items()
+                           if not anonymous or key != "Authorization"}
         request_headers.update(headers or {})
         data = raw
         if body is not None:
@@ -205,9 +207,12 @@ class Client:
         boundary = "synthetic-" + uuid.uuid4().hex
         prefix = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
                   'filename="synthetic.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode()
-        with self.open("POST", path, raw=prefix + audio + f"\r\n--{boundary}--\r\n".encode(),
-                       headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}) as response:
-            data = response.read(MAX_JSON + 1)
+        try:
+            with self.open("POST", path, raw=prefix + audio + f"\r\n--{boundary}--\r\n".encode(),
+                           headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}) as response:
+                data = response.read(MAX_JSON + 1)
+        except (TimeoutError, socket.timeout):
+            raise AcceptanceError("Upload response timed out; its commit state is unknown. Inspect the synthetic project; no automatic retry was submitted.") from None
         if len(data) > MAX_JSON:
             raise AcceptanceError("Upload metadata exceeded its safety limit.")
         try:
@@ -286,7 +291,7 @@ def checksums(client, manifest):
     p, s, v, e = (ids[key] for key in ("project", "source", "variation", "export"))
     result = {}
     source = client.json("GET", f"/api/sources/{s}")
-    if source.get("content_hash") != digest(synthetic_audio()):
+    if source.get("content_hash") != digest(synthetic_audio()) or source.get("analysis_status") != "analyzed":
         raise AcceptanceError("Original upload identity was lost or changed.")
     result["original_upload"] = source["content_hash"]
     for name, path in {
@@ -294,7 +299,12 @@ def checksums(client, manifest):
         "analysis": f"/api/sources/{s}/analysis", "waveform": f"/api/sources/{s}/waveform",
         "variation": f"/api/variations/{v}", "export": f"/api/exports/{e}",
     }.items():
-        result["metadata_" + name] = metadata_digest(client.json("GET", path))
+        doc = client.json("GET", path)
+        if name == "export":
+            mix = next((item for item in doc.get("files", []) if item.get("name") == "synthetic.wav"), None)
+            if doc.get("status") != "done" or not mix or mix.get("check", {}).get("silent") is not False:
+                raise AcceptanceError("Required export is incomplete, missing its mix, or silent.")
+        result["metadata_" + name] = metadata_digest(doc)
     assets = {"source_audio": f"/api/sources/{s}/audio",
               "variation_audio": f"/api/variations/{v}/audio",
               "studio_audio": f"/api/projects/{p}/preview/{ids['preview']}.wav",
@@ -422,7 +432,7 @@ def main(argv=None):
         if args.phase == "prepare":
             print("Replace the service/cache externally, then run verify. No provider operation or cleanup was performed.")
         return 0
-    except (AcceptanceError, OSError, KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+    except (AcceptanceError, OSError, KeyError, TypeError, ValueError, IndexError, AttributeError, http.client.HTTPException) as error:
         message = str(error) if isinstance(error, AcceptanceError) else "Local file or response-shape failure; no successful acceptance was inferred."
         print("Acceptance failed: " + message)
         return 1
