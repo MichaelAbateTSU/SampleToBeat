@@ -1,0 +1,16 @@
+# Temporary: validates tools/render-upload-probe on Linux/Docker. Delete with the probe.
+name: upload-probe-selftest
+on:
+  push:
+    branches: [michaelabatetsu-render-upload-boundary-probe]
+    paths: [tools/render-upload-probe/**, .github/workflows/upload-probe-selftest.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tools/render-upload-probe/ci_selftest.sh
