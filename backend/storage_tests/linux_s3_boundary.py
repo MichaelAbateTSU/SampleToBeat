@@ -1,4 +1,5 @@
 """Real TLS/S3 protocol check, run only by the disposable Linux container harness."""
+print("boundary interpreter started", flush=True)
 import hashlib
 import json
 import resource
@@ -39,6 +40,7 @@ def save(status):
 
 
 def check(label, operation):
+    print("starting:", label, flush=True)
     before = time.monotonic()
     operation()
     CHECKS.append({"check": label, "seconds": round(time.monotonic() - before, 3),
@@ -61,6 +63,7 @@ def digest(path):
 
 
 def main():
+    print("imports complete", memory(), flush=True)
     ROOT.mkdir(exist_ok=True)
     assert memory()["max_bytes"] == LIMIT
     assert memory()["swap_max_bytes"] == 0
@@ -68,7 +71,10 @@ def main():
         "https://s3:9000", "synthetic-audio", "us-east-1",
         "synthetic-access", "synthetic-secret", ca_bundle="/certs/public.crt",
     )
+    save("initializing SDK")
+    print("initializing SDK", flush=True)
     adapter = S3ByteStorage(settings, ROOT)
+    print("SDK initialized", memory(), flush=True)
     adapter.client.create_bucket(Bucket=settings.bucket)
     source = ROOT / "large.wav"
 
