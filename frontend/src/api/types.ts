@@ -110,6 +110,7 @@ export interface Source {
   original_filename: string;
   analysis_status: "queued" | "analyzing" | "analyzed" | "failed" | string;
   separation_status: string | null;
+  separation_error?: string | null;
   stems: Record<string, string>;
   stem_model?: string | null;
   duration_seconds?: number;
@@ -330,6 +331,7 @@ export interface ExportRecord {
   project_id: string;
   request: ExportRequest;
   status: string;
+  error?: string | null;
   files?: ExportFile[];
   metrics?: RenderMetrics;
   folder?: string;
@@ -344,6 +346,7 @@ export interface GenreInfo {
 }
 
 export interface Capabilities {
+  job_recovery_error?: string | null;
   hosted?: boolean;
   metadata_store?: "sqlite" | "postgres";
   max_upload_mb?: number;

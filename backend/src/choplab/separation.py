@@ -140,12 +140,17 @@ ADAPTERS: dict[str, Adapter] = {a.id: a for a in [
 ]}
 
 
-def separate(source: dict, model_id: str, progress) -> dict[str, str]:
+def separate(source: dict, model_id: str, progress, *, working_id: str | None = None) -> dict[str, str]:
     adapter = ADAPTERS[model_id]
     ok, why = adapter.available()
     if not ok:
         raise RuntimeError(why)
+    if working_id and source.get("stem_model") == model_id and source.get("stems"):
+        if all(Path(path).is_file() for path in source["stems"].values()):
+            return source["stems"]
     key = cache_key("sep", source["content_hash"], model_id)
+    if working_id:
+        key = cache_key(key, working_id)
     out_dir = data_path("cache", "stems", key, "x").parent
     done = out_dir / "done.txt"
     if done.exists():  # cached; never rerun identical separation

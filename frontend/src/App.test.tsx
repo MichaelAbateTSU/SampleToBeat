@@ -5,6 +5,7 @@ import { api } from "./api/client";
 import App from "./App";
 
 vi.mock("./api/client", () => ({ api: { health: vi.fn() } }));
+vi.mock("./api/hooks", () => ({ useCapabilities: () => ({ data: undefined }) }));
 vi.mock("./components/Audio", () => ({ NowPlaying: () => null }));
 vi.mock("./pages/Home", () => ({ default: () => null }));
 vi.mock("./pages/Project", () => ({ default: () => null }));

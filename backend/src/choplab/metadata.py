@@ -8,10 +8,19 @@ from . import store
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=["migrate-sqlite", "backup", "restore", "check"])
+    parser.add_argument("operation", choices=["migrate-sqlite", "backup", "restore", "check", "recover-jobs"])
+    parser.add_argument("--confirm-all-runtimes-stopped", action="store_true",
+                        help="Confirm every runtime using this metadata store is stopped and matching audio is restored.")
     args = parser.parse_args()
     try:
-        if args.operation == "migrate-sqlite":
+        if args.operation == "recover-jobs":
+            if not args.confirm_all_runtimes_stopped:
+                parser.error("recover-jobs requires --confirm-all-runtimes-stopped; first stop ALL runtimes and back up matching metadata/audio.")
+            from . import jobs
+            store.initialize()
+            with jobs.runtime(offline_recovery=True):
+                print("Stopped jobs and pending linked records marked interrupted. Saved results retained; no retries submitted.")
+        elif args.operation == "migrate-sqlite":
             store.migrate_sqlite()
             print("SQLite metadata copied to PostgreSQL. Original SQLite and audio were retained.")
         elif args.operation == "backup":

@@ -179,6 +179,22 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+def bind_job_volume(volume_id: str) -> None:
+    """One PostgreSQL library must have one audio volume and one job runtime."""
+    if not _DATABASE_URL:
+        return
+    with _lock, _conn() as con:
+        raw = json.dumps({"id": "job_runtime_volume", "volume_id": volume_id})
+        con.execute(
+            "INSERT INTO docs(id,kind,created,updated,doc) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+            ("job_runtime_volume", "runtime", now(), now(), raw))
+        row = con.execute("SELECT doc FROM docs WHERE id=? AND kind=?", ("job_runtime_volume", "runtime")).fetchone()
+        if not row or json.loads(row[0]).get("volume_id") != volume_id:
+            raise StoreConfigurationError(
+                "PostgreSQL jobs belong to another audio volume. Stop all runtimes and restore the matching "
+                "audio volume (including jobs.lock); refusing cross-host recovery or concurrent workers.")
+
+
 def now() -> float:
     return round(time.time(), 3)
 
@@ -206,17 +222,24 @@ def _conn():
 
 
 def put(kind: str, doc: dict, parent: str | None = None) -> dict:
+    from . import durable
     parent = parent if parent is not None else doc.get("_parent")
     doc["_parent"] = parent
     doc.setdefault("created_at", now())
     doc["updated_at"] = now()
+    if durable.enabled():
+        doc = durable.prepare(doc)
     with _lock, _conn() as con:
+        durable.guard(con)
         raw = json.dumps(doc, default=_plain)
         con.execute(
             "INSERT INTO docs(id,kind,parent,created,updated,doc) VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET doc=excluded.doc, updated=excluded.updated, parent=excluded.parent",
             (doc["id"], kind, parent, doc["created_at"], doc["updated_at"], raw))
-    return json.loads(raw)  # what was stored, as plain JSON types
+        if durable.enabled():
+            durable.link(con, doc)
+    result = json.loads(raw)
+    return durable.restore(result) if durable.enabled() else result
 
 
 def _plain(o):
@@ -226,23 +249,39 @@ def _plain(o):
 
 
 def get(kind: str, id: str) -> dict | None:
+    from . import durable
     with _conn() as con:
         row = con.execute("SELECT doc FROM docs WHERE id=? AND kind=?", (id, kind)).fetchone()
-    return json.loads(row[0]) if row else None
+    result = json.loads(row[0]) if row else None
+    if result:
+        durable.require_config(result)
+    return durable.restore(result) if result and durable.enabled() else result
 
 
 def list_(kind: str, parent: str | None = None) -> list[dict]:
+    from . import durable
     with _conn() as con:
         if parent is None:
             rows = con.execute("SELECT doc FROM docs WHERE kind=? ORDER BY updated DESC", (kind,)).fetchall()
         else:
             rows = con.execute("SELECT doc FROM docs WHERE kind=? AND parent=? ORDER BY created", (kind, parent)).fetchall()
-    return [json.loads(r[0]) for r in rows]
+    docs = [json.loads(r[0]) for r in rows]
+    for doc in docs:
+        durable.require_config(doc)
+    return [durable.restore(doc) for doc in docs] if durable.enabled() else docs
 
 
 def update(kind: str, id: str, **fields) -> dict:
+    from . import durable
     with _lock:  # read-modify-write under one lock: no lost updates between job threads
-        doc = get(kind, id)
+        if durable.enabled():
+            # Hydrating old paths here would overwrite freshly rendered output
+            # before prepare() can fingerprint and publish the replacement.
+            with _conn() as con:
+                row = con.execute("SELECT doc FROM docs WHERE kind=? AND id=?", (kind, id)).fetchone()
+            doc = durable.restore(json.loads(row[0]), hydrate=False) if row else None
+        else:
+            doc = get(kind, id)
         if doc is None:
             raise KeyError(id)
         doc.update(fields)
@@ -250,14 +289,24 @@ def update(kind: str, id: str, **fields) -> dict:
 
 
 def delete(kind: str, id: str) -> None:
+    from . import durable
     with _lock, _conn() as con:
+        durable.guard(con)
         con.execute("DELETE FROM docs WHERE id=? AND kind=?", (id, kind))
+        if durable.enabled():
+            con.execute("DELETE FROM choplab_asset_links WHERE doc_id=?", (id,))
+            durable.retire_unlinked(con)
 
 
 def export_snapshot() -> dict:
+    from . import durable
     with _lock, _conn() as con:
         rows = con.execute(f"SELECT {_COLUMNS} FROM docs ORDER BY id").fetchall()
-    return {"format": "choplab-metadata-1", "metadata_store": backend_name(), "rows": rows}
+        assets = durable.snapshot(con) if _DATABASE_URL else None
+    result = {"format": "choplab-metadata-1", "metadata_store": backend_name(), "rows": rows}
+    if assets:
+        result["durable_audio"] = assets
+    return result
 
 
 def _validate_snapshot(snapshot: dict) -> list:
@@ -290,7 +339,11 @@ def _validate_snapshot(snapshot: dict) -> list:
 def restore_snapshot(snapshot: dict, *, migrating: bool = False):
     """Explicit offline import into an empty store. Existing records are never overwritten."""
     global _initialized
+    from . import durable
     rows = _validate_snapshot(snapshot)
+    durable.validate_snapshot(snapshot.get("durable_audio"), [json.loads(row[5]) for row in rows])
+    if snapshot.get("durable_audio") and not _DATABASE_URL:
+        raise StoreConfigurationError("Durable audio snapshots require PostgreSQL; refusing a local-only restore.")
     if migrating and not _DATABASE_URL:
         raise StoreConfigurationError("Configure a private PostgreSQL URL before migrating SQLite.")
     with _lock:
@@ -301,6 +354,8 @@ def restore_snapshot(snapshot: dict, *, migrating: bool = False):
                 if existing and existing != [tuple(r) for r in sorted(rows, key=lambda r: r[0])]:
                     raise StoreConfigurationError("Destination PostgreSQL store is not empty; refusing to overwrite it.")
                 if not existing:
+                    if snapshot.get("durable_audio"):
+                        durable.restore_snapshot(con, snapshot["durable_audio"])
                     for row in rows:
                         con.execute(f"INSERT INTO docs({_COLUMNS}) VALUES(?,?,?,?,?,?)", row)
                 marker = _migration_marker(con, _sqlite_rows())

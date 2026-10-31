@@ -119,3 +119,82 @@ silent). Download them from the export list, or open the export folder.
 * the drum kits: audition every sound, replace it with your own file, or reset it
 
 **Clear render cache** frees cached renders.
+
+## Interrupted jobs and retries
+
+After a restart, queued/running jobs and their pending analysis, separation, or export records show
+**interrupted**, with an explanation and a **Retry** action. No work is retried automatically.
+Saved analysis, stems, samples, arrangements, and export files are retained, including results saved
+before a job stopped. Retry runs the operation again; generation may create additional variations,
+and export uses the current saved arrangement. A failed initial import can also be retried with
+**Retry analysis**. If the original audio is missing, import it again.
+
+Only one application runtime may use an audio volume. Keep `jobs.lock` with that volume and its backup;
+do not delete or replace it while the application is running. Startup refuses a second runtime, and
+waits for draining jobs before releasing ownership on a graceful shutdown. Stop older application
+versions before upgrading; they do not participate in this lock. Do not run independent copies of
+the same audio-volume backup concurrently. PostgreSQL metadata is
+bound to the same audio-volume identity: a different volume, or old pending PostgreSQL jobs without
+verifiable ownership, disables processing rather than guessing another host stopped. The studio
+shows an operator warning; `/api/system/recovery` reports the reason and read-only status.
+Stop every runtime and restore matching metadata/audio backups before resolving ownership offline.
+After backing up metadata and verifying that all workers are stopped, run
+`python -m choplab.metadata recover-jobs --confirm-all-runtimes-stopped` on the matching audio volume,
+then restart. This explicit command adopts stopped legacy jobs and interrupts their pending records
+without submitting retries. It cannot bypass another runtime's volume lock or another volume's
+PostgreSQL binding; restore the original `jobs.lock` with the matching audio backup for the latter.
+Multiple hosts with independent audio volumes require a distributed worker/fencing and shared-audio
+architecture, not automatic recovery based on job age.
+
+Retrying an older analysis, separation, or export is rejected if newer work owns its target.
+Wait for active source work to finish, then retry the latest job or start a new operation.
+
+While tracking a pending job, a visible browser tab keeps live SSE progress and resynchronizes its
+status every 30 seconds. If SSE disconnects (or is unavailable), it polls every second instead.
+Refresh failures are shown without changing the job's status; terminal jobs stop both mechanisms.
+Hidden tabs do not poll, and browsers can suspend or throttle timers. This helps observation only
+while the browser is active: it is not an idle keep-alive, an uptime guarantee, or a guarantee that
+processing continues after the tab closes or the hosting provider stops the instance.
+
+## Optional durable private audio
+
+Storage-aware hosting requires PostgreSQL plus a private existing S3-compatible bucket. Install the
+`storage` extra (the container includes it), and set `CHOPLAB_STORAGE_CONFIG_FILE` to a private JSON
+secret containing `endpoint` (HTTPS origin), `bucket`, `region`, `access_key`, `secret_key`, `prefix`,
+`max_bytes` (per-object limit), and `min_free_bytes` (cache disk reserve). An optional `ca_bundle`
+supports a private trusted test CA; certificate verification is never disabled. Never commit this
+secret or use production credentials for acceptance tests.
+
+Enable this configuration on the original intact audio volume first: existing metadata/file paths
+are published before replacement. Missing legacy audio/features stop migration explicitly. Thereafter
+the cache is disposable: originals, decoded audio, analysis features, stems, custom sounds/kits,
+variation/studio previews, and export files restore from verified private objects. Metadata stores
+portable paths and an asset catalog; exported project JSON includes portable source references.
+Back up metadata **including its durable asset catalog** and the matching private bucket/branch.
+Do not switch branches or restore metadata alone into a different bucket.
+
+A PostgreSQL lease permits one writer, with a monotonically increasing fencing token on every
+authoritative document/asset-reference mutation. Live overlapping instances serve health and
+read-only ownership feedback without admitting processing; this allows a zero-downtime host to
+stop its old instance rather than deadlocking startup on the new instance's health check.
+The replacement checks ownership every five seconds, then reconciles and admits processing after
+the old instance releases ownership or its 60-second lease expires. Each instance's local cache
+is exclusively locked; instances sharing metadata must use separate private cache directories.
+Stop every legacy/local-volume runtime before enabling this ownership protocol; an older binary
+without fencing must never run against the same library alongside a durable runtime. Pending
+legacy/unowned jobs are left untouched and produce actionable read-only feedback, including the
+offline recovery command on their original volume. Initialization/reconciliation errors also
+leave health available and processing read-only; fix the reported error and restart.
+An old worker that wakes after expiry cannot commit metadata or attach assets. Objects are published
+under unique, never-reused namespaces before metadata references them. Retired keys cannot gain
+references; cleanup retries exact retired keys, including ambiguous upload orphans, so delayed old
+deletes cannot remove a successor's identical bytes. Provider/network failures remain errors, never
+successful exports or automatic retries. Use `POST /api/system/storage/reconcile` for owner-requested
+cleanup of retired assets; startup also reconciles.
+
+This does not promise free-service uptime or unlimited storage/transfers. Neon documents 5 GB per
+project across branches, throttling including `503 SlowDown`, and soft deletion; deletion is not
+assumed to immediately reclaim quota. Render can suspend services with heavy outbound traffic.
+Cache restoration is bounded per transfer and by the configured disk reserve; an insufficient cache
+disk fails explicitly. Live Neon compatibility, full audio workload headroom at 512 MiB, and actual
+Render replacement behavior must be verified separately before production readiness is claimed.

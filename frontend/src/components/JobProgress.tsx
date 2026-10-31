@@ -1,8 +1,9 @@
 import { RotateCcw, X } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useJobs } from "../api/hooks";
 import type { Job } from "../api/types";
-import { Badge, Button, Progress } from "./ui";
+import { Badge, Button, ErrorBanner, Progress } from "./ui";
 
 const LABEL: Record<string, string> = {
   import: "Import", analyze: "Analysis", separate: "Stem separation", generate: "Generation", regenerate: "Regeneration", export: "Export",
@@ -10,6 +11,9 @@ const LABEL: Record<string, string> = {
 
 export function JobRow({ job, compact }: { job: Job; compact?: boolean }) {
   const track = useJobs((s) => s.track);
+  const trackingError = useJobs((s) => s.trackingErrors[job.id]);
+  const retry = useMutation({ mutationFn: () => api.retryJob(job.id), onSuccess: track });
+  const cancel = useMutation({ mutationFn: () => api.cancelJob(job.id), onSuccess: track });
   const active = job.status === "queued" || job.status === "running";
   const tone = job.status === "completed" ? "good" : job.status === "failed" || job.status === "interrupted" ? "bad" : job.status === "canceled" ? "neutral" : "accent";
   return (
@@ -20,18 +24,22 @@ export function JobRow({ job, compact }: { job: Job; compact?: boolean }) {
         <span className="flex-1 truncate text-xs text-ink-400">{active ? job.current_stage : null}</span>
         {active && <span className="tabular text-xs text-ink-300">{Math.round(job.progress * 100)}%</span>}
         {active && (
-          <Button size="sm" variant="ghost" onClick={() => api.cancelJob(job.id).then(track)} title="Cancel">
+          <Button size="sm" variant="ghost" busy={cancel.isPending} onClick={() => cancel.mutate()} title="Cancel">
             <X className="size-3.5" /> {!compact && "Cancel"}
           </Button>
         )}
         {(job.status === "failed" || job.status === "interrupted" || job.status === "canceled") && (
-          <Button size="sm" variant="ghost" onClick={() => api.retryJob(job.id).then(track)}>
+          <Button size="sm" variant="ghost" busy={retry.isPending} onClick={() => retry.mutate()}>
             <RotateCcw className="size-3.5" /> Retry
           </Button>
         )}
       </div>
       {active && <Progress value={job.progress} />}
-      {job.status === "failed" && job.error_message && <div className="text-xs text-red-400">{job.error_message}</div>}
+      {(job.status === "failed" || job.status === "interrupted") && (
+        <ErrorBanner error={job.error_message ?? (job.status === "interrupted" ? "Application stopped before this job finished. Retry to run it again; saved results were retained." : "Job failed.")} />
+      )}
+      <ErrorBanner error={retry.error ?? cancel.error} />
+      {active && <ErrorBanner error={trackingError} />}
     </div>
   );
 }

@@ -2,8 +2,9 @@
 
 **No live deployment is configured.** The user selected Render for application compute and Neon for data,
 instead of the initially investigated VM host.
-The protected container now supports Neon-compatible PostgreSQL metadata, but Neon does not host the Python
-app or frontend. The dedicated Free Neon project and private audio bucket have been provisioned, but their production
+The protected container supports Neon-compatible PostgreSQL metadata and optional private S3-compatible
+audio with database-fenced runtime ownership. Combined-state acceptance is still pending; Neon does not
+host the Python app or frontend. The dedicated Free Neon project and private audio bucket have been provisioned, but their production
 credentials are not wired to an app host. Final Render configuration, suitable compute and integrated
 durability validation remain unresolved.
 A temporary synthetic test database is not a deployed studio or permanent production database.
@@ -22,7 +23,8 @@ Neon Functions explicitly do not host websites or own durable background job que
 FastAPI, NumPy, SciPy, librosa, pedalboard and ffmpeg, plus background audio jobs and absolute disk paths.
 Moving the metadata to Postgres alone would **not** make audio, exports, kits or jobs durable on an
 ephemeral app host. The explicit SQLite migration below copies only metadata; source audio, exports and kits
-remain on a durable `/data` volume. Object-storage migration is not included.
+remain on a durable `/data` volume unless the separate private object-storage configuration is enabled and
+its explicit migration/recovery acceptance passes. A metadata migration alone does not publish audio.
 
 The Free plan is permanent and requires no card, but database compute scales to zero after five idle minutes
 and quotas can suspend compute/block writes. Free object storage is available in Ohio, N. Virginia, Frankfurt
@@ -153,7 +155,12 @@ an ephemeral disk or call it durable because the metadata uses Neon:
   The local suite passed 185 tests with one platform skip, and
   [native x64/ARM parity and container checks passed](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41242404181).
   [Repeated cold capped measurements](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41242403566)
-  are pending. No headroom improvement is claimed before those measurements.
+  completed all four full workflows, but lifetime peaks still reached 512 MiB in the first 16s case and
+  both 300s cases; the second 16s case peaked at 503.13 MiB. The 448 MiB headroom target remains failed.
+  All sampled HTTP probes passed within five seconds (maximum 1.201 seconds) and audio-stage Docker
+  health remained healthy. The 300s imports took 128.2/129.0 seconds and HPSS 177.4/177.8 seconds on
+  that runner; anonymous maxima during import were 358.0/363.5 MiB, while file-cache maxima reached
+  approximately 244.9 MiB. Reduced anonymous allocations did not establish safe total-memory headroom.
   All these measurements use local metadata/audio, **not configured PostgreSQL/S3**, and exclude the
   durable SDK, lease activity and storage transfers. They cannot establish combined-runtime readiness.
 * Original input compatibility remains unverified. Hosted defaults are still 300 seconds / 100 MiB;
@@ -176,7 +183,8 @@ an ephemeral disk or call it durable because the metadata uses Neon:
   decode, analysis and other decode/reanalysis callers, not only chunked peak calculation.
 * Free web services lose uploaded/generated files on every restart, redeploy and 15-minute idle spin-down.
   They cannot attach persistent disks, run one-off jobs or use dashboard/SSH shells. The full app currently
-  needs `/data` files and has no Neon Object Storage integration; an empty bucket is not automatic persistence.
+  needs `/data` working/cache files. Optional object-storage integration must be explicitly configured and
+  verified together with PostgreSQL fencing; an empty bucket is not automatic persistence.
 * Render explicitly says not to use Free instances for production and can restart or suspend them.
   A sleeping service takes about a minute to resume. Background audio jobs cannot be guaranteed to finish
   during spin-down/restarts; preserve explicit interrupted-job reporting rather than claiming durable compute.
@@ -245,6 +253,34 @@ password allowed reset and retained `NOLOGIN` and its least-privilege flags. Do 
 passwordless SQL role as a sufficient provisioning step.
 
 ## Portable container preparation
+
+### Integrated durable-runtime gates
+
+The complete recovery/storage final tree `240f23f` is being integrated atomically with the hosting work,
+not deployed as a recovery-only intermediate. Durable mode requires PostgreSQL and a private
+`CHOPLAB_STORAGE_CONFIG_FILE`; it bypasses permanent volume binding, fences metadata/asset publication,
+and reports interrupted jobs or lost ownership explicitly. Do not overlap legacy unfenced workers with
+durable production. The final image includes the PostgreSQL/storage extras and excludes all three Render
+secret filenames from its build context. Local volume-backed mode remains supported.
+
+Standalone component CI is not combined-state proof. The combined image still needs full durable
+replacement/recovery, protected two-phase HTTP, native x64/ARM and exact capped CPU/memory acceptance.
+The current final-tree metadata reads eagerly materialize referenced assets; a verified lazy-hydration
+follow-up is pending. Opening a cache-empty 1,200s stereo 48 kHz PCM16 source can otherwise download
+roughly 1.6 GB of original/internal/two-stem audio before returning metadata. Repeated small-fixture
+replacement success is not evidence of long-library cold-start, disk or 5 GB egress headroom.
+
+The fenced runtime renews its lease through PostgreSQL every ten seconds while active. This prevents
+Neon's five-minute database scale-to-zero. The dedicated branch's observed compute range is 0.25-2 CU;
+at a constant 0.25 CU, the Free project's 100 CU-hour allowance permits at most 400 active hours/month,
+less with autoscaling or other usage. Exhaustion suspends compute. Foreground browser health polling every
+ten seconds can also keep Render active while the page is open. Do not weaken fencing or add unattended
+keepalive traffic to work around limits. No idle-ownership strategy has been validated.
+
+The portable volume backup scripts below are not by themselves a complete object-storage backup.
+A durable metadata snapshot carries asset references/catalogs, not independent copies of every immutable
+object. Off-provider object copies and coordinated snapshot/restore acceptance remain required before
+claiming recovery after bucket deletion.
 
 `Dockerfile` builds Vite assets and installs the Python backend with the PostgreSQL client, without optional
 Demucs/model dependencies. Local installs still use SQLite unless explicitly configured.

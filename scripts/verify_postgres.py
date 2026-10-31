@@ -76,10 +76,16 @@ def main():
             ctx.progress("database progress", 0.5)
             return {"verified": True}
 
-        job = jobs.submit("postgres-test", parent, {})
-        result = jobs.wait(job["id"], timeout=30)
-        assert result["status"] == "completed" and result["result"] == {"verified": True}
-        interrupted = store.put("job", {"id": store.new_id("pg_interrupted"), "status": "running"}, parent=parent)
+        with jobs.runtime():
+            assert jobs.recovery_error is None
+            job = jobs.submit("postgres-test", parent, {})
+            result = jobs.wait(job["id"], timeout=30)
+            assert result["status"] == "completed" and result["result"] == {"verified": True}
+            interrupted = store.put("job", {
+                "id": store.new_id("pg_interrupted"), "project_id": parent,
+                "job_type": "postgres-test", "params": {}, "status": "running",
+                "owner_volume": jobs._volume_id, "progress": 0.5, "result": None,
+            }, parent=parent)
         snapshot = store.export_snapshot()
         assert snapshot["metadata_store"] == "postgres"
         bad = {**snapshot, "rows": snapshot["rows"] + [["invalid", "project", None, 1, 2, '{"id":"wrong"}']]}
@@ -98,12 +104,15 @@ def main():
     state = json.loads(args.state.read_text())
     if args.phase == "restart":
         store.initialize()
-        jobs.recover_interrupted()
-        assert store.get("project", state["parent"])["name"] == "PostgreSQL persisted"
-        assert store.get("job", state["job"])["status"] == "completed"
-        assert store.get("job", state["interrupted"])["status"] == "interrupted"
-        for kind, id in [("job", state["job"]), ("job", state["interrupted"]), ("project", state["parent"])]:
-            store.delete(kind, id)
+        with jobs.runtime():
+            assert jobs.recovery_error is None
+            assert store.get("project", state["parent"])["name"] == "PostgreSQL persisted"
+            assert store.get("job", state["job"])["status"] == "completed"
+            assert store.get("job", state["interrupted"])["status"] == "interrupted"
+            for kind, id in [("job", state["job"]), ("job", state["interrupted"]), ("project", state["parent"])]:
+                store.delete(kind, id)
+        # Later phases explicitly exercise offline migration into an empty DB.
+        store.delete("runtime", "job_runtime_volume")
         print("A fresh container process retained PostgreSQL metadata and recovered interrupted jobs.")
     elif args.phase == "migration":
         assert store.list_("project") == []

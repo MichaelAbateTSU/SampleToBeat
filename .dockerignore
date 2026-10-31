@@ -10,6 +10,8 @@
 **/.env
 **/secrets
 **/owner_password_hash
+**/database_url
+**/storage_config.json
 **/backups
 data
 .e2e-data

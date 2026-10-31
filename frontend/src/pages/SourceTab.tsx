@@ -112,7 +112,13 @@ function SourceView({ project, source, working }: { project: Project; source: So
       <Card title={<span className="flex items-center gap-2">{source.original_filename} <Badge>{source.analysis_status}</Badge></span>}
         actions={source.duration_seconds ? <span className="tabular text-xs text-ink-400">{formatTime(source.duration_seconds)} · {source.sample_rate} Hz</span> : null}>
         <Waveform testId="source-waveform" url={urls.sourceAudio(source.id)} peaks={source.peaks} duration={source.duration_seconds} markers={a?.downbeats} />
-        {source.analysis_status === "failed" && <ErrorBanner error={source.error ?? "Analysis failed"} />}
+        {["failed", "interrupted", "canceled"].includes(source.analysis_status) && (
+          <>
+            <ErrorBanner error={source.error ?? "Analysis did not finish. Retry the latest job, or import the audio again if it is missing."} />
+            {!a && <Button size="sm" onClick={() => reanalyze.mutate()} disabled={working} busy={reanalyze.isPending}>Retry analysis</Button>}
+            <ErrorBanner error={reanalyze.error} />
+          </>
+        )}
       </Card>
 
       {a && (
@@ -175,7 +181,7 @@ function SourceView({ project, source, working }: { project: Project; source: So
             <Button data-testid="separate" onClick={() => separate.mutate()} disabled={!model || working || !models.data?.find((m) => m.id === model)?.available} busy={separate.isPending}>Separate stems</Button>
           </div>
           <p className="mt-2 text-xs text-ink-400">Separation is optional — samples can be cut from the full mix. Demucs is higher quality but slow on CPU; the built-in HPSS splits harmonic and percussive parts instantly.</p>
-          <ErrorBanner error={separate.error} />
+          <ErrorBanner error={separate.error ?? source.separation_error} />
           {stems.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {stems.map((st) => (
