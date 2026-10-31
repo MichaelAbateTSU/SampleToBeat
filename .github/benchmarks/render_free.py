@@ -18,6 +18,9 @@ APPROXIMATE_E2_MICRO = "--approximate-e2-micro" in sys.argv[2:]
 JOB_ENVELOPE = "--job-envelope" in sys.argv[2:]
 ORIGINAL_LIMIT = "--original-limit" in sys.argv[2:]
 IMPORT_DIAGNOSTIC = "--import-diagnostic" in sys.argv[2:]
+MEMORY_REVISION_RETEST = "--memory-revision-retest" in sys.argv[2:]
+if MEMORY_REVISION_RETEST and not (IMPORT_DIAGNOSTIC and ORIGINAL_LIMIT):
+    raise ValueError("Memory revision retest requires original-limit diagnostic")
 if IMPORT_DIAGNOSTIC and not ORIGINAL_LIMIT:
     raise ValueError("Import diagnostic requires original-limit mode")
 if sum((APPROXIMATE_E2_MICRO, JOB_ENVELOPE, ORIGINAL_LIMIT)) > 1:
@@ -26,6 +29,8 @@ if ORIGINAL_LIMIT:
     REVISION = "05eda9d5f06b20453acbe2f5dedd0b238643fd09"
 if IMPORT_DIAGNOSTIC:
     REVISION = "ece9072e17e0ec5a40ffe337d80fb179f426cfcd"
+if MEMORY_REVISION_RETEST:
+    REVISION = "0541653da46672892e1146d1fbdb3b77ba85b6a5"
 CPU = 2 if JOB_ENVELOPE else 0.25 if APPROXIMATE_E2_MICRO else 0.1
 MEMORY = 2147483648 if JOB_ENVELOPE else 1073741824 if APPROXIMATE_E2_MICRO else 536870912
 AUTH = base64.b64encode(b"owner:workflow-test-password").decode()
@@ -37,6 +42,7 @@ RESULTS = {
     "job_envelope": JOB_ENVELOPE,
     "original_limit": ORIGINAL_LIMIT,
     "import_diagnostic": IMPORT_DIAGNOSTIC,
+    "memory_revision_retest": MEMORY_REVISION_RETEST,
     "test_only_overrides": {"CHOPLAB_MAX_AUDIO_SECONDS": 1200, "CHOPLAB_MAX_UPLOAD_MB": 1024}
     if ORIGINAL_LIMIT else {},
     "storage": "Disposable Docker volume; NOT proof of provider persistence",
@@ -79,11 +85,23 @@ def api(method, path, body=None, timeout=30):
 
 
 def wait_job(job, deadline):
+    next_health = 0
     while time.monotonic() < deadline:
         result = api("GET", f"/api/jobs/{job['id']}", timeout=min(10, max(1, deadline - time.monotonic())))
         if IMPORT_DIAGNOSTIC:
             with (OUT / "job-polls.jsonl").open("a") as out:
                 out.write(json.dumps({"monotonic": time.monotonic(), "job": result}) + "\n")
+        if MEMORY_REVISION_RETEST and time.monotonic() >= next_health:
+            started = time.monotonic()
+            health = {"monotonic": started, "job_id": job["id"]}
+            try:
+                health["response"] = api("GET", "/api/health", timeout=3)
+            except (OSError, RuntimeError) as error:
+                health["error"] = f"{type(error).__name__}: {error}"
+            health["duration_seconds"] = round(time.monotonic() - started, 4)
+            with (OUT / "http-liveness.jsonl").open("a") as out:
+                out.write(json.dumps(health) + "\n")
+            next_health = time.monotonic() + 5
         if result["status"] == "completed":
             return result
         if result["status"] in ("failed", "canceled", "interrupted"):
@@ -294,11 +312,16 @@ def run_case(seconds):
             if state(name)["State"]["Running"] and case.get("import_job_id"):
                 case["import_job_last_state"] = api("GET", f"/api/jobs/{case['import_job_id']}")
             return False
-        if IMPORT_DIAGNOSTIC:
+        if IMPORT_DIAGNOSTIC and not MEMORY_REVISION_RETEST:
             case["skipped"] = "Downstream studio/export stages outside focused import diagnostic"
             return True
 
         pid, sid = case["project_id"], case["source_id"]
+        if MEMORY_REVISION_RETEST:
+            case["imported_source_metadata"] = api("GET", f"/api/sources/{sid}")
+            ranged = request("GET", f"/api/sources/{sid}/audio")
+            assert ranged.startswith(b"RIFF") and len(ranged) > 100
+            case["imported_audio_download_bytes"] = len(ranged)
 
         def separate(deadline):
             job = api("POST", f"/api/sources/{sid}/separate", {"model_id": "builtin-hpss"})
