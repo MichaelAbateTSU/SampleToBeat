@@ -1,4 +1,4 @@
-name: Disposable original-duration feasibility
+name: Disposable twenty-minute input feasibility
 on:
   push:
     branches: [michaelabatetsu-render-free-feasibility]
