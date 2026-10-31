@@ -270,3 +270,25 @@ def test_cache_release_syncs_before_kernel_advice(tmp_path, monkeypatch):
     audio_io._release_file_cache(path)
     assert calls == [("sync", calls[0][1]), ("advice", calls[0][1], 0, 0, 4)]
     assert path.read_bytes() == b"synthetic"
+
+
+def test_transform_cache_evicts_by_bytes_without_changing_audio(tmp_path, monkeypatch):
+    from choplab import transform
+
+    transform._mem.clear()
+    monkeypatch.setattr(transform, "_MEMORY_CACHE_BYTES", 100)
+    monkeypatch.setattr(transform, "data_path", lambda *args: tmp_path / args[-1])
+    monkeypatch.setattr(transform, "region", lambda *args: np.arange(12, dtype=np.float32).reshape(6, 2))
+    monkeypatch.setattr(transform, "transform", lambda y, *args: y)
+    a = transform.cached_transform(("source",), ("a",), 0, 1, {})
+    b = transform.cached_transform(("source",), ("b",), 0, 1, {})
+    assert len(transform._mem) == 2
+    np.testing.assert_array_equal(a, b)
+    transform.cached_transform(("source",), ("a",), 0, 1, {})
+    transform.cached_transform(("source",), ("c",), 0, 1, {})
+    assert len(transform._mem) == 2
+    assert sum(y.nbytes for y in transform._mem.values()) <= 100
+    np.testing.assert_array_equal(transform.cached_transform(("source",), ("b",), 0, 1, {}), b)
+    monkeypatch.setattr(transform, "_MEMORY_CACHE_BYTES", 4)
+    np.testing.assert_array_equal(transform.cached_transform(("source",), ("large",), 0, 1, {}), a)
+    assert not transform._mem

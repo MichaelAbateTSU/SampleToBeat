@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 
 import numpy as np
 import pedalboard as pb
@@ -154,20 +155,27 @@ def transform(y: np.ndarray, t: dict, speed: float = 1.0) -> np.ndarray:
 
 
 _mem: dict[str, np.ndarray] = {}
+_mem_lock = Lock()
+_MEMORY_CACHE_BYTES = 32 * 1024 * 1024
 
 
 def cached_transform(paths: tuple[str, ...], hashes: tuple[str, ...], start: float, end: float, t: dict,
                      speed: float = 1.0) -> np.ndarray:
     key = cache_key("tf", hashes, round(start, 5), round(end, 5), t, round(speed, 6))
-    if key in _mem:
-        return _mem[key]
+    with _mem_lock:
+        cached = _mem.pop(key, None)
+        if cached is not None:
+            _mem[key] = cached
+            return cached
     f = data_path("cache", "transforms", f"{key}.wav")
     if f.exists():
         y = audio_io.load(f)
     else:
         y = transform(region(paths, start, end), t, speed)
         audio_io.write_wav(f, y)
-    if len(_mem) > 256:
-        _mem.clear()
-    _mem[key] = y
+    with _mem_lock:
+        while _mem and sum(audio.nbytes for audio in list(_mem.values())) + y.nbytes > _MEMORY_CACHE_BYTES:
+            _mem.pop(next(iter(_mem), None), None)
+        if y.nbytes <= _MEMORY_CACHE_BYTES:
+            _mem[key] = y
     return y
