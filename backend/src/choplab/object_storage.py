@@ -75,7 +75,7 @@ def _safe_name(value: str, *, local: bool = False) -> str:
 
 @dataclass(frozen=True)
 class ObjectRef:
-    """Persist all fields in metadata, never absolute local paths or signed URLs."""
+    """Persist all fields; ETag is diagnostic, SHA-256 identifies the bytes."""
     key: str
     size: int
     sha256: str
@@ -261,8 +261,6 @@ class S3ByteStorage:
             tmp = None
             try:
                 self._matches(response, ref.size, ref.sha256)
-                if response["ETag"] != ref.etag:
-                    raise IntegrityError("Object ETag changed")
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 fd, name = tempfile.mkstemp(prefix=".storage-", suffix=".part", dir=dest.parent)
                 tmp = Path(name)

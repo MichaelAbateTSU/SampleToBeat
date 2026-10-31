@@ -278,7 +278,7 @@ def test_journal_failure_aborts_before_any_part(adapter):
     assert not adapter.client.parts and not adapter.client.pending
 
 
-@pytest.mark.parametrize("damage", ["bytes", "truncate", "oversize", "metadata", "etag", "disconnect", "disk"])
+@pytest.mark.parametrize("damage", ["bytes", "truncate", "oversize", "metadata", "disconnect", "disk"])
 def test_download_failure_preserves_destination_and_cleans_partial(adapter, damage, monkeypatch):
     (adapter.root / "source").write_bytes(b"synthetic original bytes")
     ref = adapter.publish("source")
@@ -293,8 +293,6 @@ def test_download_failure_preserves_destination_and_cleans_partial(adapter, dama
         server.write_bytes(b"x" * (ref.size + 1))
     elif damage == "metadata":
         adapter.client.heads[ref.key]["Metadata"] = {"sha256": "a" * 64}
-    elif damage == "etag":
-        adapter.client.heads[ref.key]["ETag"] = '"other"'
     elif damage == "disconnect":
         original = adapter.client.get_object
         def broken(**args):
@@ -372,6 +370,16 @@ def test_existing_object_mismatch_is_not_overwritten(adapter):
         adapter.publish("source")
     assert adapter.client.puts == 1
 
+
+def test_identical_bytes_with_changed_opaque_etag_are_valid(adapter):
+    (adapter.root / "source").write_bytes(b"identical synthetic bytes")
+    ref = adapter.publish("source")
+    adapter.client.heads[ref.key]["ETag"] = '"different-layout-or-copy"'
+    assert adapter.materialize(ref, "restored").read_bytes() == b"identical synthetic bytes"
+    adapter.client.file(ref.key).write_bytes(b"x" * ref.size)
+    with pytest.raises(IntegrityError):
+        adapter.materialize(ref, "restored")
+    assert (adapter.root / "restored").read_bytes() == b"identical synthetic bytes"
 
 def test_recovery_pagination_is_scoped(adapter):
     paginator = Mock()

@@ -26,6 +26,16 @@ jobs:
           evidence="$RUNNER_TEMP/storage-evidence"
           certs="$RUNNER_TEMP/storage-certs"
           mkdir -p "$evidence" "$certs"
+          service="$RUNNER_TEMP/storage-service"
+          mkdir -p "$service"
+          release=RELEASE.2025-09-07T16-13-09Z
+          binary=minio.linux-amd64.$release
+          curl --fail --silent --show-error --location \
+            "https://github.com/minio/minio/releases/download/$release/$binary" -o "$service/$binary"
+          curl --fail --silent --show-error --location \
+            "https://github.com/minio/minio/releases/download/$release/$binary.sha256sum" -o "$service/checksum"
+          (cd "$service"; sha256sum --check checksum)
+          chmod 755 "$service/$binary"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=s3' \
             -addext 'subjectAltName=DNS:s3,DNS:localhost' \
             -keyout "$certs/private.key" -out "$certs/public.crt" 2>/dev/null
@@ -40,8 +50,8 @@ jobs:
             --memory=1536m --memory-swap=1536m \
             -e MINIO_ROOT_USER=synthetic-access -e MINIO_ROOT_PASSWORD=synthetic-secret \
             -v "$certs:/certs:ro" -p 127.0.0.1:9000:9000 \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z \
-            server /data --certs-dir /certs
+            -v "$service/$binary:/minio:ro" --entrypoint /minio \
+            storage-boundary server /data --certs-dir /certs
           for i in {1..60}; do
             test "$(docker inspect -f '{{.State.Running}}' storage-s3)" = true
             if curl --fail --silent --cacert "$certs/public.crt" https://localhost:9000/minio/health/ready; then break; fi
