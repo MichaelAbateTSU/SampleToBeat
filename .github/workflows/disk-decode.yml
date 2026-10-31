@@ -26,7 +26,7 @@ jobs:
           docker build -t choplab:decode-base "$RUNNER_TEMP/base"
           docker build -t choplab:disk-decode -f .github/benchmarks/Dockerfile.disk-decode .
       - name: Exact decoder parity and failure cleanup tests
-        run: docker run --rm choplab:disk-decode -m pytest -q /checks/test_disk_decode.py
+        run: docker run --rm choplab:disk-decode -m pytest -q -p no:cacheprovider /checks/test_disk_decode.py
       - name: Original duration helper at Render Free limits
         timeout-minutes: 17
         run: |

@@ -1,6 +1,7 @@
 """Sample parity and failure/cleanup contracts for the standalone disk decoder."""
 import os
 import subprocess
+import sys
 import numpy as np
 import pytest
 import soundfile as sf
@@ -78,62 +79,63 @@ def test_bounds_and_cleanup(tmp_path, monkeypatch):
         with pytest.raises(audio_io.AudioError, match="empty|longer"):
             disk_decode.decode_to_wav(source, destination)
         assert destination.read_bytes() == original
-
-
-@pytest.mark.parametrize("rate", [44100, 96000])
-def test_resampled_duration_boundary(tmp_path, monkeypatch, rate):
-        monkeypatch.setattr(audio_io, "MAX_SECONDS", 1)
-        source = tmp_path / "source.wav"
-        sf.write(source, np.random.default_rng(3).normal(0, .1, (rate, 1)), rate, subtype="FLOAT")
-        actual, _ = sf.read(disk_decode.decode_to_wav(source, tmp_path / "out.wav"),
-                            dtype="float32", always_2d=True)
-        np.testing.assert_array_equal(actual, audio_io.decode(source))
-        assert len(actual) == 48000
-        sf.write(source, np.zeros((rate + 1, 1)), rate)
-        with pytest.raises(audio_io.AudioError, match="longer"):
-            disk_decode.decode_to_wav(source, tmp_path / "out.wav")
-
-
-def test_fallback_unknown_duration_and_missing_decoder(tmp_path, monkeypatch):
-        source = tmp_path / "source.wav"
-        sf.write(source, np.zeros((48001, 2), np.float32), 48000)
-        monkeypatch.setattr(audio_io, "MAX_SECONDS", 1)
-        monkeypatch.setattr(disk_decode, "_probe", lambda *args: {"duration": 0})
-        monkeypatch.setattr(disk_decode, "_soundfile",
-                            lambda *args: (_ for _ in ()).throw(disk_decode._ReadError()))
-        destination = tmp_path / "out.wav"
-        with pytest.raises(audio_io.AudioError, match="longer"):
-            disk_decode.decode_to_wav(source, destination)
-        assert not destination.exists() and not list(tmp_path.glob(".decode-*"))
-        monkeypatch.setattr(audio_io, "ffmpeg_exe", lambda: None)
-        with pytest.raises(audio_io.AudioError, match="unavailable"):
-            disk_decode.decode_to_wav(source, destination)
-        assert not destination.exists() and not list(tmp_path.glob(".decode-*"))
-
-
-def test_incomplete_pcm_and_probe_timeout(tmp_path, monkeypatch):
-        source = tmp_path / "source.wav"
-        sf.write(source, np.zeros((100, 2), np.float32), 48000)
-        fake = tmp_path / "decoder"
-        fake.write_text("#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(b'bad')\n")
-        fake.chmod(0o700)
-        monkeypatch.setattr(audio_io, "ffmpeg_exe", lambda: str(fake))
-        monkeypatch.setattr(disk_decode, "_soundfile",
-                            lambda *args: (_ for _ in ()).throw(disk_decode._ReadError()))
-        destination = tmp_path / "out.wav"
-        with pytest.raises(audio_io.AudioError, match="incomplete"):
-            disk_decode.decode_to_wav(source, destination)
-        assert not destination.exists() and not list(tmp_path.glob(".decode-*"))
-        source.write_bytes(b"bad")
-        fake.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n")
-        with pytest.raises(audio_io.AudioError, match="probing timed out"):
-            disk_decode.decode_to_wav(source, destination, timeout=.01)
-        assert not destination.exists() and not list(tmp_path.glob(".decode-*"))
         assert not list(tmp_path.glob(".decode-*"))
     source.write_bytes(b"corrupt audio")
     with pytest.raises(audio_io.AudioError, match="decodable|Unsupported"):
         disk_decode.decode_to_wav(source, destination)
     assert destination.read_bytes() == original
+
+
+@pytest.mark.parametrize("rate", [44100, 96000])
+def test_resampled_duration_boundary(tmp_path, monkeypatch, rate):
+    monkeypatch.setattr(audio_io, "MAX_SECONDS", 1)
+    source = tmp_path / "source.wav"
+    sf.write(source, np.random.default_rng(3).normal(0, .1, (rate, 1)), rate, subtype="FLOAT")
+    actual, _ = sf.read(disk_decode.decode_to_wav(source, tmp_path / "out.wav"),
+                        dtype="float32", always_2d=True)
+    np.testing.assert_array_equal(actual, audio_io.decode(source))
+    assert len(actual) == 48000
+    sf.write(source, np.zeros((rate + 1, 1)), rate)
+    with pytest.raises(audio_io.AudioError, match="longer"):
+        disk_decode.decode_to_wav(source, tmp_path / "out.wav")
+
+
+def test_fallback_unknown_duration_and_missing_decoder(tmp_path, monkeypatch):
+    source = tmp_path / "source.wav"
+    sf.write(source, np.zeros((48001, 2), np.float32), 48000)
+    monkeypatch.setattr(audio_io, "MAX_SECONDS", 1)
+    monkeypatch.setattr(disk_decode, "_probe", lambda *args: {"duration": 0})
+    monkeypatch.setattr(disk_decode, "_soundfile",
+                        lambda *args: (_ for _ in ()).throw(disk_decode._ReadError()))
+    destination = tmp_path / "out.wav"
+    with pytest.raises(audio_io.AudioError, match="longer"):
+        disk_decode.decode_to_wav(source, destination)
+    assert not destination.exists() and not list(tmp_path.glob(".decode-*"))
+    monkeypatch.setattr(audio_io, "ffmpeg_exe", lambda: None)
+    with pytest.raises(audio_io.AudioError, match="unavailable"):
+        disk_decode.decode_to_wav(source, destination)
+    assert not destination.exists() and not list(tmp_path.glob(".decode-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Synthetic executable requires POSIX shebang support")
+def test_incomplete_pcm_and_probe_timeout(tmp_path, monkeypatch):
+    source = tmp_path / "source.wav"
+    sf.write(source, np.zeros((100, 2), np.float32), 48000)
+    fake = tmp_path / "decoder"
+    fake.write_text("#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(b'bad')\n")
+    fake.chmod(0o700)
+    monkeypatch.setattr(audio_io, "ffmpeg_exe", lambda: str(fake))
+    monkeypatch.setattr(disk_decode, "_soundfile",
+                        lambda *args: (_ for _ in ()).throw(disk_decode._ReadError()))
+    destination = tmp_path / "out.wav"
+    with pytest.raises(audio_io.AudioError, match="incomplete"):
+        disk_decode.decode_to_wav(source, destination)
+    assert not destination.exists() and not list(tmp_path.glob(".decode-*"))
+    source.write_bytes(b"bad")
+    fake.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n")
+    with pytest.raises(audio_io.AudioError, match="probing timed out"):
+        disk_decode.decode_to_wav(source, destination, timeout=.01)
+    assert not destination.exists() and not list(tmp_path.glob(".decode-*"))
 
 
 def test_ffmpeg_timeout_and_error_cleanup(tmp_path, monkeypatch):
@@ -148,7 +150,7 @@ def test_ffmpeg_timeout_and_error_cleanup(tmp_path, monkeypatch):
     assert destination.read_bytes() == b"existing"
     assert not list(tmp_path.glob(".decode-*"))
 
-    monkeypatch.setattr(audio_io, "ffmpeg_exe", lambda: "/bin/false")
+    monkeypatch.setattr(audio_io, "ffmpeg_exe", lambda: sys.executable)
     with pytest.raises(audio_io.AudioError, match="Decoding failed"):
         disk_decode.decode_to_wav(source, destination)
     assert destination.read_bytes() == b"existing"
