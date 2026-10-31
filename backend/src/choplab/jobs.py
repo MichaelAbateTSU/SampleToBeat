@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Callable
 
-from . import store
+from . import durable, store
 from .core import data_path, log
 
 TERMINAL = {"completed", "failed", "canceled", "interrupted"}
@@ -45,6 +45,19 @@ class Busy(Exception):
 def runtime(*, offline_recovery: bool = False):
     """Hold the audio-volume lock until even gracefully draining workers exit."""
     global _volume_id, recovery_error
+    if durable.enabled():
+        with durable.runtime():
+            _volume_id = "durable"
+            recovery_error = None
+            try:
+                recover_interrupted(confirmed_stopped=True)
+                yield
+            finally:
+                with _state:
+                    while _active:
+                        _state.wait()
+                    _volume_id = None
+        return
     with open(data_path("jobs.lock"), "a+b") as lock:
         lock.seek(0)
         try:
@@ -114,6 +127,8 @@ class JobContext:
         self.id = job_id
 
     def progress(self, stage: str, fraction: float | None = None) -> None:
+        if durable.enabled():
+            durable.check()
         if self.id in _cancel:
             raise Canceled()
         store.update("job", self.id, current_stage=stage, progress=fraction)
@@ -208,6 +223,8 @@ def _run(job_id: str, fn: Callable, params: dict) -> None:
     except Canceled:
         store.update("job", job_id, status="canceled", completed_at=store.now())
         _finish_target(store.get("job", job_id), "canceled", "Job canceled. Retry to run it again; saved results were retained.")
+    except durable.OwnershipLost as e:
+        log.error("job %s lost runtime ownership; authoritative state left to successor: %s", job_id, e)
     except Exception as e:  # surfaced to the UI; full trace in the log
         log.error("job %s failed:\n%s", job_id, traceback.format_exc())
         store.update("job", job_id, status="failed", error_message=f"{type(e).__name__}: {e}",

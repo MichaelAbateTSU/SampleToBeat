@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from urllib.parse import urlsplit
 
-from . import analysis, audio_io, bass, compose, drums, jobs, render, sampling, schemas, separation, store, transform
+from . import analysis, audio_io, bass, compose, drums, durable, jobs, render, sampling, schemas, separation, store, transform
 from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, TICKS_PER_BAR, cache_key, data_path, log, parse_key
 from .hosting import HOSTING, OwnerAccess, listening_port
 
@@ -32,8 +32,14 @@ FRONTEND = Path(os.environ.get("CHOPLAB_FRONTEND", Path(__file__).resolve().pare
 @asynccontextmanager
 async def lifespan(app):
     store.initialize()
-    with jobs.runtime():
+    durable.configure()
+    # PostgreSQL/storage startup can involve slow network calls.
+    runtime = jobs.runtime()
+    await asyncio.to_thread(runtime.__enter__)
+    try:
         yield
+    finally:
+        await asyncio.to_thread(runtime.__exit__, None, None, None)
 
 
 app = FastAPI(title="ChopLab AI", version="0.1.0", lifespan=lifespan,
@@ -41,6 +47,11 @@ app = FastAPI(title="ChopLab AI", version="0.1.0", lifespan=lifespan,
 @app.middleware("http")
 async def recovery_boundary(request: Request, call_next):
     path = request.url.path
+    if durable.enabled() and path.startswith("/api/") and path != "/api/health":
+        try:
+            await asyncio.to_thread(durable.check)
+        except (durable.StorageError, store.StoreUnavailable) as e:
+            return JSONResponse({"detail": str(e)}, 503, headers={"Retry-After": "10"})
     if jobs.recovery_error and path.startswith("/api/"):
         inspection = path in ("/api/health", "/api/system/recovery", "/api/system/capabilities", "/api/projects")
         inspection = inspection or bool(re.fullmatch(r"/api/projects/[^/]+(?:/jobs)?", path))
@@ -63,6 +74,12 @@ async def _database_unavailable(_, e):
 @app.exception_handler(jobs.Busy)
 async def _busy(_, e):
     return JSONResponse({"detail": str(e)}, 429, headers={"Retry-After": "5"})
+
+
+@app.exception_handler(durable.StorageError)
+async def _storage_error(_, e):
+    log.error("Durable storage operation failed: %s", e)
+    return JSONResponse({"detail": str(e)}, 503, headers={"Retry-After": "10"})
 
 
 @app.exception_handler(ValueError)  # includes AudioError and pydantic ValidationError
@@ -192,7 +209,8 @@ def _analyze(ctx, source_id, y=None, override=None):
     y = audio_io.load(Path(src["internal_audio_path"])) if y is None else y
     doc, f = analysis.analyze(y, _sub(ctx, 0.05, 0.7), override)
     np.savez(_features_path(src), **{k: np.asarray(v) for k, v in f.items()})
-    store.update("source", source_id, analysis=doc, analysis_status="analyzed", error=None)
+    store.update("source", source_id, analysis=doc, analysis_status="analyzed", error=None,
+                 features_path=str(_features_path(src)))
     n = _discover(ctx, source_id)
     return {"bpm": doc["bpm"], "key": doc["key"], "samples": n}
 
@@ -283,6 +301,9 @@ def job_export(ctx, project_id: str, export_id: str, request: dict):
     used = {e["sample_id"] for pat in arr["patterns"].values() for e in pat["events"] if e["type"] == "chop"}
     pj = {"choplab_schema": SCHEMA_VERSION, "engine": ENGINE_VERSION, "project": {k: v for k, v in p.items() if k != "arrangement"},
           "arrangement": arr, "samples": [samples[i] for i in sorted(used) if i in samples]} if request["project_json"] else None
+    if pj and durable.enabled():
+        pj["sources"] = list(sources.values())
+        pj = durable.portable(pj)
     try:
         out = render.export(arr, samples, sources, _dir(project_id, "exports", export_id), request["filename"], request["format"],
                             request["scope"], request["loop_start_bar"], request["loop_bars"], request["stems"], pj, ctx.progress)
@@ -332,7 +353,7 @@ def delete_project(id: str):
         for s in store.list_("sample", sid):
             store.delete("sample", s["id"])
         store.delete("source", sid)
-    for kind in ("variation", "export", "job"):
+    for kind in ("variation", "export", "job", "sound", "preview"):
         for d in store.list_(kind, id):
             store.delete(kind, d["id"])
     store.delete("project", id)
@@ -343,23 +364,23 @@ def delete_project(id: str):
 
 @app.post("/api/projects/{id}/sources", status_code=202)
 async def upload_source(id: str, file: UploadFile = File(...)):
-    _get("project", id)
+    await asyncio.to_thread(_get, "project", id)
     sid = store.new_id("src")
     dest = _dir(id, "sources", sid) / f"original{_ext(file.filename)}"
     await _save_upload(file, dest)
     try:
-        meta = audio_io.probe(dest)  # reject non-audio before queueing work
+        meta = await asyncio.to_thread(audio_io.probe, dest)
         if meta["duration"] > audio_io.MAX_SECONDS:
             raise audio_io.AudioError(f"Recording is longer than {audio_io.MAX_SECONDS} seconds; trim it first.")
     except audio_io.AudioError:
         shutil.rmtree(dest.parent, ignore_errors=True)
         raise
-    src = store.put("source", {"id": sid, "project_id": id, "original_filename": (file.filename or "upload")[:200],
+    src = await asyncio.to_thread(store.put, "source", {"id": sid, "project_id": id, "original_filename": (file.filename or "upload")[:200],
                                "original_file_path": str(dest), "internal_audio_path": None, "content_hash": None,
                                "analysis_status": "queued", "stems": {}, "separation_status": None}, parent=id)
-    p = _get("project", id)
-    store.update("project", id, source_ids=p["source_ids"] + [sid])
-    job = jobs.submit("import", id, {"source_id": sid})
+    p = await asyncio.to_thread(_get, "project", id)
+    await asyncio.to_thread(store.update, "project", id, source_ids=p["source_ids"] + [sid])
+    job = await asyncio.to_thread(jobs.submit, "import", id, {"source_id": sid})
     return {"source": src, "job": job}
 
 
@@ -640,6 +661,8 @@ def preview(id: str, body: schemas.PreviewRequest):
         old.unlink(missing_ok=True)
     name = f"studio_{store.new_id('r')}"
     render.write_preview(d / name, res["master"])
+    if durable.enabled():
+        store.put("preview", {"id": name, "project_id": id, "preview_path": str(d / f"{name}.wav")}, parent=id)
     return {"url": f"/api/projects/{id}/preview/{name}.wav", "metrics": res["metrics"],
             "start_bar": body.loop_start_bar if body.scope == "loop" else 0}
 
@@ -648,7 +671,7 @@ def preview(id: str, body: schemas.PreviewRequest):
 def preview_file(id: str, name: str):
     if not re.fullmatch(r"studio_r_[0-9a-f]{12}\.wav", name):
         raise HTTPException(404)
-    f = DATA_DIR / "projects" / id / "previews" / name
+    f = Path(_get("preview", name.removesuffix(".wav"))["preview_path"]) if durable.enabled() else DATA_DIR / "projects" / id / "previews" / name
     if not f.exists():
         raise HTTPException(404, "Preview expired; render again.")
     return FileResponse(f, media_type="audio/wav")
@@ -657,7 +680,7 @@ def preview_file(id: str, name: str):
 @app.post("/api/projects/{id}/bass-sample", status_code=201)
 async def bass_sample(id: str, file: UploadFile = File(...)):
     """A custom 808 one-shot (tuned from its root note at render time)."""
-    _get("project", id)
+    await asyncio.to_thread(_get, "project", id)
     tmp = _dir(id, "sounds") / f"upload{_ext(file.filename)}"
     await _save_upload(file, tmp)
     try:
@@ -666,7 +689,10 @@ async def bass_sample(id: str, file: UploadFile = File(...)):
             y = y[: SR * 4]
     finally:
         tmp.unlink(missing_ok=True)
-    out = audio_io.write_wav(_dir(id, "sounds") / f"808_{store.new_id('s')}.wav", y)
+    sound_id = store.new_id("s")
+    out = await asyncio.to_thread(audio_io.write_wav, _dir(id, "sounds") / f"808_{sound_id}.wav", y)
+    if durable.enabled():
+        await asyncio.to_thread(store.put, "sound", {"id": sound_id, "project_id": id, "sample_path": str(out)}, parent=id)
     return {"sample_path": str(out)}
 
 
@@ -741,6 +767,8 @@ def gen_bass(body: schemas.BassPatternRequest):
 
 @app.get("/api/kits")
 def kits():
+    if durable.enabled():
+        durable.restore_kits()
     return {k: {i: drums.kit_path(k, i).parent.name == "custom" for i in drums.INSTRUMENTS} for k in drums.KITS}
 
 
@@ -752,6 +780,8 @@ def _kit_inst(kit, inst):
 @app.get("/api/kits/{kit}/{inst}/audio")
 def kit_audio(kit: str, inst: str):
     _kit_inst(kit, inst)
+    if durable.enabled():
+        durable.restore_kits()
     drums.sound(kit, inst)  # materialize the synthesized default
     return FileResponse(drums.kit_path(kit, inst), media_type="audio/wav")
 
@@ -766,12 +796,16 @@ async def kit_upload(kit: str, inst: str, file: UploadFile = File(...)):
             await asyncio.to_thread(drums.import_sound, kit, inst, tmp)
     finally:
         tmp.unlink(missing_ok=True)
+    if durable.enabled():
+        await asyncio.to_thread(store.put, "kit", {"id": f"kit-{kit}-{inst}", "audio_path": str(drums.kit_path(kit, inst))})
     return {"kit": kit, "inst": inst, "custom": True}
 
 
 @app.delete("/api/kits/{kit}/{inst}", status_code=204)
 def kit_reset(kit: str, inst: str):
     _kit_inst(kit, inst)
+    if durable.enabled():
+        store.delete("kit", f"kit-{kit}-{inst}")
     drums.reset_sound(kit, inst)
 
 
@@ -838,6 +872,14 @@ def recovery_status():
     if jobs.recovery_error:
         return JSONResponse({"ok": False, "read_only": True, "detail": jobs.recovery_error}, 409)
     return {"ok": True, "read_only": False}
+
+
+@app.post("/api/system/storage/reconcile")
+def storage_reconcile():
+    if not durable.enabled():
+        raise HTTPException(409, "Durable object storage is not configured.")
+    durable.reconcile()
+    return {"ok": True, "note": "Retired objects reconciled. Provider soft deletion may not immediately reclaim quota."}
 
 
 @app.get("/api/system/capabilities")

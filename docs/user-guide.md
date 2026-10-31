@@ -155,3 +155,37 @@ Refresh failures are shown without changing the job's status; terminal jobs stop
 Hidden tabs do not poll, and browsers can suspend or throttle timers. This helps observation only
 while the browser is active: it is not an idle keep-alive, an uptime guarantee, or a guarantee that
 processing continues after the tab closes or the hosting provider stops the instance.
+
+## Optional durable private audio
+
+Storage-aware hosting requires PostgreSQL plus a private existing S3-compatible bucket. Install the
+`storage` extra (the container includes it), and set `CHOPLAB_STORAGE_CONFIG_FILE` to a private JSON
+secret containing `endpoint` (HTTPS origin), `bucket`, `region`, `access_key`, `secret_key`, `prefix`,
+`max_bytes` (per-object limit), and `min_free_bytes` (cache disk reserve). An optional `ca_bundle`
+supports a private trusted test CA; certificate verification is never disabled. Never commit this
+secret or use production credentials for acceptance tests.
+
+Enable this configuration on the original intact audio volume first: existing metadata/file paths
+are published before replacement. Missing legacy audio/features stop migration explicitly. Thereafter
+the cache is disposable: originals, decoded audio, analysis features, stems, custom sounds/kits,
+variation/studio previews, and export files restore from verified private objects. Metadata stores
+portable paths and an asset catalog; exported project JSON includes portable source references.
+Back up metadata **including its durable asset catalog** and the matching private bucket/branch.
+Do not switch branches or restore metadata alone into a different bucket.
+
+A PostgreSQL lease permits one writer, with a monotonically increasing fencing token on every
+authoritative document/asset-reference mutation. Live overlapping instances refuse processing;
+after a stopped instance's 60-second lease expires a replacement may recover interrupted work.
+An old worker that wakes after expiry cannot commit metadata or attach assets. Objects are published
+under unique, never-reused namespaces before metadata references them. Retired keys cannot gain
+references; cleanup retries exact retired keys, including ambiguous upload orphans, so delayed old
+deletes cannot remove a successor's identical bytes. Provider/network failures remain errors, never
+successful exports or automatic retries. Use `POST /api/system/storage/reconcile` for owner-requested
+cleanup of retired assets; startup also reconciles.
+
+This does not promise free-service uptime or unlimited storage/transfers. Neon documents 5 GB per
+project across branches, throttling including `503 SlowDown`, and soft deletion; deletion is not
+assumed to immediately reclaim quota. Render can suspend services with heavy outbound traffic.
+Cache restoration is bounded per transfer and by the configured disk reserve; an insufficient cache
+disk fails explicitly. Live Neon compatibility, full audio workload headroom at 512 MiB, and actual
+Render replacement behavior must be verified separately before production readiness is claimed.
