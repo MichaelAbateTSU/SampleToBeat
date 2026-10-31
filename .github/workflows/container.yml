@@ -93,6 +93,7 @@ jobs:
             --cacert "$RUNNER_TEMP/choplab-test/root.crt" https://localhost/api/health
           python3 scripts/verify_container.py "$RUNNER_TEMP/choplab-test/proxy.json" \
             --base-url https://localhost --ca "$RUNNER_TEMP/choplab-test/root.crt" --upload-limits
+          bash scripts/verify_backup.sh sqlite
       - name: Verify real PostgreSQL metadata and Neon deployment networking
         env:
           PG_TEST_CERT_DIR: ${{ runner.temp }}/choplab-postgres-certs
@@ -135,6 +136,7 @@ jobs:
             --cacert "$RUNNER_TEMP/choplab-test/root.crt" https://localhost/api/health
           python3 scripts/verify_container.py "$RUNNER_TEMP/choplab-pg-state/studio.json" \
             --base-url https://localhost --ca "$RUNNER_TEMP/choplab-test/root.crt" --after-restart
+          bash scripts/verify_backup.sh postgres
       - name: Optional synthetic Claimable Neon smoke test
         if: github.event_name == 'workflow_dispatch' && inputs.neon_smoke && matrix.runner == 'ubuntu-24.04'
         env:

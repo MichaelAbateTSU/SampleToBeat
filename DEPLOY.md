@@ -169,7 +169,10 @@ versions in `/opt/requirements-installed.txt`. Retain a built image tag for repe
 rebuilding later can resolve newer dependencies. The workflow `Hosted container checks` builds and smoke-tests
 the container, authentication, SPA serving, native demo/HPSS/generation/HQ/WAV+MP3/range/SSE workflow,
 persistence across restart, Caddy/Compose configuration, and real TLS PostgreSQL metadata CRUD/job updates/
-migration/restore checks on x86-64 and ARM64. Ordinary CI uses a disposable local PostgreSQL container.
+migration/restore checks on x86-64 and ARM64. It executes the real deployment backup script for both SQLite
+and PostgreSQL, restores exact metadata and synthetic audio into a fresh volume/database, and exercises
+export/invalid-JSON/archive/recovery failures, overlapping backups and intentionally stopped service state.
+Ordinary CI uses a disposable local PostgreSQL container.
 The optional manual `neon_smoke` input uses a dedicated `NEON_SMOKE_DATABASE_URL` secret supplied for a
 synthetic, disposable Neon database; it does not provision or claim a project. Never point that test at
 production data. Standard GitHub-hosted CI is free for this public
@@ -216,7 +219,16 @@ bash "$(cat /opt/choplab/current-release)/backup.sh"
 Copy backups **off the host** to storage you control. A host-local backup does not protect against disk/host
 deletion. Retain backups within the chosen free storage allowance; save `.env` and the owner hash privately.
 Backups contain source audio and project metadata and must not be published. `backup.sh` creates **both**
-`audio-TIMESTAMP.tar.gz` and `metadata-TIMESTAMP.json` while the single backend is stopped. Copy both off-host.
+`audio.tar.gz` and `metadata.json` in a unique `backup-TIMESTAMP-SUFFIX` directory while the single backend
+is stopped. Copy that entire directory off-host. Install `flock` (normally included in Linux `util-linux`);
+overlapping backups are rejected before changing the service. Do not run deployments, manual writers or
+other maintenance against this volume/database during a backup.
+The script preserves an intentionally stopped app. For a running app, it waits for recovery before
+publishing the completed pair. Failed export, archive or recovery commands return nonzero and do not publish
+a complete-looking backup; temporary files are removed on handled failures. A forcibly killed host/process
+can leave `.pending-*` directories; these are **not complete backups**. Inspect the service state and
+remove only an identified pending directory's two files before retrying. A recovery failure needs operator
+attention and is never reported as backup success.
 The JSON is an application-document snapshot, not a backup of PostgreSQL roles or unrelated databases.
 If metadata export fails, the backup command fails and does not claim a complete audio-only backup.
 
@@ -227,7 +239,7 @@ restore the paired audio archive first while the app is stopped, then import its
 
 ```bash
 # Use the same compose array as above; the JSON goes over stdin, not command-line arguments.
-"${compose[@]}" run -T --rm --no-deps app python -m choplab.metadata restore < metadata-TIMESTAMP.json
+"${compose[@]}" run -T --rm --no-deps app python -m choplab.metadata restore < backup-TIMESTAMP-SUFFIX/metadata.json
 "${compose[@]}" up -d --wait
 ```
 
