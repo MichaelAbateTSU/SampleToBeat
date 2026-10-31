@@ -1,0 +1,131 @@
+name: Isolated combined-limit budget preparation
+on:
+  push:
+    branches: [michaelabatetsu-render-free-feasibility]
+    paths: [".github/workflows/combined-budget.yml"]
+  workflow_dispatch:
+    inputs:
+      app_sha:
+        description: Exact installed app revision (40 hex; no moving branch)
+        required: true
+        default: 092df4b821a24a33b686eb942dcb0852137503eb
+      mode:
+        description: Short runner control or explicitly approved final combined case
+        type: choice
+        options: [control, combined]
+        default: control
+      confirm_final_combined_sha:
+        description: For combined only, repeat the coordinator-approved final app SHA
+        default: ""
+permissions:
+  contents: read
+jobs:
+  synthetic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      APP_SHA: ${{ inputs.app_sha || '092df4b821a24a33b686eb942dcb0852137503eb' }}
+      BUDGET_MODE: ${{ inputs.mode || 'control' }}
+      CONFIRM_FINAL_SHA: ${{ inputs.confirm_final_combined_sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate pins and build exact app without modifying its source
+        run: |
+          set -euo pipefail
+          [[ "$APP_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BUDGET_MODE" == control || ( "$BUDGET_MODE" == combined && "$CONFIRM_FINAL_SHA" == "$APP_SHA" ) ]]
+          root="$RUNNER_TEMP/combined-budget"
+          mkdir -p "$root/app" "$root/generator" "$root/certs" "$root/evidence" "$root/service"
+          git fetch origin "$APP_SHA" f6d7a9d6e8cab041415b538c5d81111a5712eb08
+          git archive "$APP_SHA" | tar -x -C "$root/app"
+          git archive f6d7a9d6e8cab041415b538c5d81111a5712eb08 tools/valid-audio-preflight | tar -x -C "$root/generator"
+          python3 -m compileall -q .github/benchmarks/full_budget "$root/generator"
+          docker build --quiet -t choplab:budget "$root/app"
+          python3 -m unittest discover -s .github/benchmarks/full_budget -p 'test_*.py'
+      - name: Start only disposable TLS synthetic PostgreSQL and MinIO
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/combined-budget"
+          mkdir -p "$root/certs/pg" "$root/certs/s3"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=postgres' \
+            -addext 'subjectAltName=DNS:postgres' -keyout "$root/certs/pg/server.key" \
+            -out "$root/certs/pg.crt" 2>/dev/null
+          sudo chown 999:999 "$root/certs/pg/server.key"
+          sudo chmod 600 "$root/certs/pg/server.key"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=s3' \
+            -addext 'subjectAltName=DNS:s3,DNS:localhost' -keyout "$root/certs/s3/private.key" \
+            -out "$root/certs/s3/public.crt" 2>/dev/null
+          cp "$root/certs/s3/public.crt" "$root/certs/s3.crt"
+          release=RELEASE.2025-09-07T16-13-09Z
+          binary=minio.linux-amd64.$release
+          curl --fail --silent --show-error --location --max-time 120 \
+            "https://github.com/minio/minio/releases/download/$release/$binary" -o "$root/service/minio"
+          curl --fail --silent --show-error --location --max-time 120 \
+            "https://github.com/minio/minio/releases/download/$release/$binary.sha256sum" -o "$root/service/checksum"
+          printf '%s  %s\n' "$(awk '{print $1}' "$root/service/checksum")" "$root/service/minio" | sha256sum --check
+          chmod 755 "$root/service/minio"
+          docker network create durable-acceptance
+          docker run -d --name combined-budget-postgres --network durable-acceptance --network-alias postgres \
+            --memory=1g --memory-swap=1g --tmpfs /var/lib/postgresql/data:uid=999,gid=999 \
+            -e POSTGRES_USER=choplab_test -e POSTGRES_DB=choplab_recovery_test \
+            -e POSTGRES_PASSWORD=synthetic-ci-password \
+            -v "$root/certs:/certs:ro" postgres:17-bookworm \
+            postgres -c ssl=on -c ssl_cert_file=/certs/pg.crt -c ssl_key_file=/certs/pg/server.key
+          docker run -d --name combined-budget-s3 --network durable-acceptance --network-alias s3 \
+            -u root --memory=1536m --memory-swap=1536m --read-only --tmpfs /tmp:size=32m \
+            -e MINIO_ROOT_USER=synthetic-access -e MINIO_ROOT_PASSWORD=synthetic-secret \
+            -v "$root/certs/s3:/certs:ro" -v "$root/service/minio:/minio:ro" \
+            -v "$root/service:/storage" -p 127.0.0.1:9000:9000 --entrypoint /minio choplab:budget \
+            server /storage/objects --certs-dir /certs
+          for i in {1..60}; do
+            if docker exec combined-budget-postgres pg_isready -U choplab_test -d choplab_recovery_test \
+              && curl --fail --silent --cacert "$root/certs/s3.crt" https://localhost:9000/minio/health/ready; then break; fi
+            sleep 1
+          done
+          docker exec combined-budget-postgres pg_isready -U choplab_test -d choplab_recovery_test
+          curl --fail --silent --cacert "$root/certs/s3.crt" https://localhost:9000/minio/health/ready
+          cat > "$root/synthetic.env" <<'ENV'
+          CHOPLAB_SYNTHETIC_BUDGET=yes
+          CHOPLAB_DISPOSABLE_POSTGRES_TEST=yes
+          CHOPLAB_DATABASE_URL=postgresql://choplab_test:synthetic-ci-password@postgres:5432/choplab_recovery_test?sslmode=verify-full
+          PGSSLROOTCERT=/certs/pg.crt
+          DATABASE_URL=
+          CHOPLAB_STORAGE_CONFIG_FILE=/config/storage.json
+          CHOPLAB_MODE=hosted
+          CHOPLAB_PUBLIC_URL=https://localhost
+          CHOPLAB_PASSWORD_HASH_FILE=/config/hash
+          CHOPLAB_DATA=/data
+          ENV
+          chmod 600 "$root/synthetic.env"
+      - name: Run bounded short control or explicitly approved combined journey
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/combined-budget"
+          # Host client/samplers/admin are outside the resource-capped app.
+          # No limit overrides: reject mismatched advertised app limits.
+          sudo --preserve-env=RUNNER_TEMP timeout --signal=TERM --kill-after=30s 6600s \
+            python3 .github/benchmarks/full_budget/run.py --root "$root" --app-sha "$APP_SHA" \
+            --mode "$BUDGET_MODE" --confirm-final-combined-sha "$CONFIRM_FINAL_SHA"
+      - name: Preserve only sanitized evidence (never WAV/config/server logs)
+        if: always()
+        run: |
+          root="$RUNNER_TEMP/combined-budget"
+          sudo chmod -R a+rX "$root/evidence"
+          for name in combined-budget-app-0 combined-budget-app-1 combined-budget-postgres combined-budget-s3; do
+            docker inspect "$name" --format \
+              '{"OOMKilled":{{.State.OOMKilled}},"ExitCode":{{.State.ExitCode}},"Running":{{.State.Running}},"Memory":{{.HostConfig.Memory}},"MemorySwap":{{.HostConfig.MemorySwap}},"NanoCpus":{{.HostConfig.NanoCpus}}}' \
+              > "$root/evidence/$name.json" || true
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: combined-budget-${{ inputs.mode || 'control' }}-evidence
+          path: ${{ runner.temp }}/combined-budget/evidence/
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Remove exact synthetic containers and network only
+        if: always()
+        run: |
+          docker rm -f combined-budget-app-0 combined-budget-app-1 combined-budget-postgres combined-budget-s3 || true
+          docker network rm durable-acceptance || true
+          # Runner disk is disposable; no recursive broad-directory removal.
