@@ -80,11 +80,16 @@ def test_database_errors_are_explicit_but_liveness_does_not_query_database(monke
 
 
 @pytest.mark.parametrize("mode", [None, "require", "verify-ca", "verify-full"])
-def test_postgres_tls_always_authenticates_host_and_system_trust(mode, monkeypatch):
+def test_postgres_tls_always_authenticates_host_and_system_trust(mode, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    bundle = tmp_path / "system-ca.pem"
+    bundle.write_text("Synthetic system trust placeholder")
+    monkeypatch.setattr(store.ssl, "get_default_verify_paths", lambda: SimpleNamespace(cafile=str(bundle)))
     monkeypatch.delenv("PGSSLMODE", raising=False)
     monkeypatch.delenv("PGSSLROOTCERT", raising=False)
     settings = {} if mode is None else {"sslmode": mode}
-    assert store._postgres_tls(settings) == {"sslmode": "verify-full", "sslrootcert": "system"}
+    assert store._postgres_tls(settings) == {"sslmode": "verify-full", "sslrootcert": str(bundle)}
 
 
 def test_postgres_tls_preserves_custom_trust_and_rejects_unsafe_configuration(tmp_path, monkeypatch):
@@ -98,3 +103,13 @@ def test_postgres_tls_preserves_custom_trust_and_rejects_unsafe_configuration(tm
             store._postgres_tls({"sslmode": mode})
     with pytest.raises(store.StoreConfigurationError, match="trust root"):
         store._postgres_tls({"sslrootcert": str(tmp_path / "missing")})
+
+
+def test_postgres_tls_missing_system_bundle_requires_explicit_trust(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("PGSSLROOTCERT", raising=False)
+    monkeypatch.delenv("PGSSLMODE", raising=False)
+    monkeypatch.setattr(store.ssl, "get_default_verify_paths", lambda: SimpleNamespace(cafile=None))
+    with pytest.raises(store.StoreConfigurationError, match="No system"):
+        store._postgres_tls({})

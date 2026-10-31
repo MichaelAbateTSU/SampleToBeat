@@ -159,8 +159,10 @@ For non-container local testing, install `cd backend && uv sync --extra postgres
 mutually exclusive). Without any database configuration, existing SQLite behavior is unchanged. Connections
 always enforce `sslmode=verify-full` and disable automatic prepared statements for Neon PgBouncer transaction
 pooling. A URL using `require` or `verify-ca` is upgraded, never used as an insecure fallback; `disable`,
-`allow` and `prefer` are rejected. The container includes system CA certificates and uses libpq's `system`
-trust by default. For an isolated/private PostgreSQL server, explicitly configure a trusted certificate
+`allow` and `prefer` are rejected. The container includes system CA certificates and passes Python's actual
+system trust-bundle path to libpq, whose bundled OpenSSL may otherwise look in a different directory.
+If no system bundle is available (for example in some local Windows installs), configure an explicit trusted
+CA file; the backend refuses to connect without one. For an isolated/private PostgreSQL server, configure a trusted certificate
 file with URL `sslrootcert` or `PGSSLROOTCERT`, readable inside the container. Certificate-chain or hostname
 mismatches fail the connection; do not bypass these checks or use an untrusted CA to fix connectivity.
 Only one

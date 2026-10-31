@@ -6,6 +6,7 @@ import json
 import math
 import os
 import sqlite3
+import ssl
 import threading
 import time
 import uuid
@@ -71,10 +72,15 @@ def _postgres_tls(settings: dict) -> dict:
     mode = settings.get("sslmode", os.environ.get("PGSSLMODE", "require"))
     if mode not in ("require", "verify-ca", "verify-full"):
         raise StoreConfigurationError("PostgreSQL requires authenticated TLS; remove insecure sslmode settings.")
-    root = settings.get("sslrootcert") or os.environ.get("PGSSLROOTCERT") or "system"
-    if root != "system" and not Path(root).expanduser().is_file():
+    root = settings.get("sslrootcert") or os.environ.get("PGSSLROOTCERT") or ssl.get_default_verify_paths().cafile
+    if not root:
+        raise StoreConfigurationError("No system PostgreSQL trust bundle found; configure a trusted sslrootcert or PGSSLROOTCERT file.")
+    if root != "system":
+        root = str(Path(root).expanduser())
+    if root != "system" and not Path(root).is_file():
         raise StoreConfigurationError("Configured PostgreSQL trust root is not a readable certificate file.")
-    # libpq 16+ supports system trust. Never downgrade certificate or hostname checks.
+    # Bundled libpq/OpenSSL can use a different default CA directory than the OS.
+    # Give it Python's actual system bundle instead of silently losing system trust.
     return {"sslmode": "verify-full", "sslrootcert": root}
 
 
