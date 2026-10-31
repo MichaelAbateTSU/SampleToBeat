@@ -39,6 +39,15 @@ READ_BYTES = MIB
 MAX_OBJECT_BYTES = 10 * (1 << 30)
 
 
+def _release_file_cache(stream, *, written: bool = False):
+    # Dirty page cache counts toward Linux cgroup limits even with small Python buffers.
+    if hasattr(os, "posix_fadvise"):
+        if written:
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.posix_fadvise(stream.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+
+
 class StorageError(RuntimeError):
     """Safe operational error; raw SDK messages may contain credentials/URLs."""
 
@@ -179,12 +188,16 @@ class S3ByteStorage:
             raise TransferLimitError("Object exceeds configured byte limit")
 
     def _fingerprint(self, stream) -> tuple[int, str]:
-        size, digest = 0, hashlib.sha256()
+        size, pending, digest = 0, 0, hashlib.sha256()
         while chunk := stream.read(READ_BYTES):
             size += len(chunk)
             if size > self.settings.max_bytes:
                 raise TransferLimitError("File exceeds configured byte limit")
             digest.update(chunk)
+            pending += len(chunk)
+            if pending >= PART_BYTES:
+                _release_file_cache(stream)
+                pending = 0
         return size, digest.hexdigest()
 
     def _head(self, key: str):
@@ -235,6 +248,7 @@ class S3ByteStorage:
                         part = self.client.upload_part(**args, UploadId=upload_id,
                                                        PartNumber=number, Body=chunk)
                         parts.append({"ETag": part["ETag"], "PartNumber": number})
+                        _release_file_cache(stream)
                     if sent != size or check.hexdigest() != digest:
                         raise IntegrityError("Source changed during upload")
                     self.client.complete_multipart_upload(
@@ -265,7 +279,7 @@ class S3ByteStorage:
                 fd, name = tempfile.mkstemp(prefix=".storage-", suffix=".part", dir=dest.parent)
                 tmp = Path(name)
                 with os.fdopen(fd, "wb") as out:
-                    size, digest = 0, hashlib.sha256()
+                    size, pending, digest = 0, 0, hashlib.sha256()
                     while chunk := body.read(READ_BYTES):
                         size += len(chunk)
                         if size > ref.size:
@@ -274,10 +288,15 @@ class S3ByteStorage:
                             raise TransferLimitError("Local storage reserve reached")
                         out.write(chunk)
                         digest.update(chunk)
+                        pending += len(chunk)
+                        if pending >= PART_BYTES:
+                            _release_file_cache(out, written=True)
+                            pending = 0
                     if size != ref.size or digest.hexdigest() != ref.sha256:
                         raise IntegrityError("Downloaded bytes do not match the object reference")
                     out.flush()
                     os.fsync(out.fileno())
+                    _release_file_cache(out)
                 self._path(relative_path)
                 tmp.replace(dest)
                 return dest

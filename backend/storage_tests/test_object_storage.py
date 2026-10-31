@@ -381,6 +381,17 @@ def test_identical_bytes_with_changed_opaque_etag_are_valid(adapter):
         adapter.materialize(ref, "restored")
     assert (adapter.root / "restored").read_bytes() == b"identical synthetic bytes"
 
+
+def test_linux_download_flushes_dirty_cache_at_part_boundaries(adapter, monkeypatch):
+    from choplab import object_storage
+    synthetic(adapter.root / "source", PART_BYTES + 1)
+    ref = adapter.publish("source")
+    released = []
+    monkeypatch.setattr(object_storage, "_release_file_cache",
+                        lambda stream, **kwargs: released.append((stream.tell(), kwargs)))
+    adapter.materialize(ref, "restored")
+    assert released == [(PART_BYTES, {"written": True}), (PART_BYTES + 1, {})]
+
 def test_recovery_pagination_is_scoped(adapter):
     paginator = Mock()
     paginator.paginate.return_value = [
