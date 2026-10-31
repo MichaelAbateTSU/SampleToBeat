@@ -1,7 +1,7 @@
 name: spool-cache
 on:
   push:
-    branches: [michaelabatetsu-spool-cache]
+    branches: [michaelabatetsu-spool-cache, michaelabatetsu-upload-spool-cache]
   workflow_dispatch:
 permissions:
   contents: read

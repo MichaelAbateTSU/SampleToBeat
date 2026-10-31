@@ -125,3 +125,113 @@ def test_no_fadvise_standard_local_file(monkeypatch):
         return {"n":file.size,"custom":isinstance(file.file,_CacheSpool)}
     with TestClient(app) as c:
         assert c.post("/upload",files={"file":("a.wav",b"xx")}).json()=={"n":2,"custom":False}
+
+
+def test_multiple_file_parts_and_field_limits():
+    data = body(b"a").replace(b"--test--\r\n", b"") + (
+        b'--test\r\nContent-Disposition: form-data; name="other"; filename="b"\r\n\r\n'
+        b"b\r\n--test--\r\n")
+    p = parser(data)
+    async def run():
+        form = await p.parse()
+        assert await form["file"].read() == b"a"
+        assert await form["other"].read() == b"b"
+        await form.close()
+    asyncio.run(run())
+    assert all(f.closed for f in p._files_to_close_on_error)
+
+
+def test_cache_window_calls_real_helper_in_worker(monkeypatch):
+    import choplab.uploads as uploads
+    calls = []
+    original = uploads._release_file_cache
+    def record(stream, **kwargs):
+        import threading
+        calls.append((kwargs.get("written", False), threading.current_thread().name))
+        return original(stream, **kwargs)
+    monkeypatch.setattr(uploads, "_release_file_cache", record)
+    p = parser(body(b"x" * (16 << 20)), limit=32 << 20)
+    async def run():
+        form = await p.parse()
+        f = form["file"]
+        while await f.read(1 << 20):
+            pass
+        await form.close()
+    asyncio.run(run())
+    assert any(written for written, _ in calls)
+    assert any(not written for written, _ in calls)
+    assert all(name != "MainThread" for _, name in calls)
+
+
+def test_actual_api_hooks_all_three_multipart_routes(monkeypatch):
+    import os
+    # Harness creates synthetic hosted settings only; no product startup or DB.
+    os.environ.setdefault("TEST_TOKEN", "test-only-" * 8)
+    from upload_tests import server
+    api = server.api
+    routes = {r.path: r for r in api.app.routes if hasattr(r, "endpoint")}
+    for path in ("/api/projects/{id}/sources", "/api/projects/{id}/bass-sample",
+                 "/api/kits/{kit}/{inst}"):
+        assert type(routes[path]).__name__ == "UploadRoute"
+        import inspect
+        assert "file" in inspect.signature(routes[path].endpoint).parameters
+
+
+def test_actual_save_limit_and_reserve_remove_part(monkeypatch, tmp_path):
+    import io
+    from upload_tests import server
+    from fastapi import HTTPException as FastAPIHTTPException
+    from starlette.datastructures import UploadFile as StarletteUploadFile
+    api = server.api
+    monkeypatch.setattr(api, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(api, "MAX_UPLOAD", 1 << 20)
+    path = tmp_path / "file.bin"
+    f = StarletteUploadFile(io.BytesIO(b"x" * ((1 << 20) + 1)))
+    with pytest.raises(FastAPIHTTPException) as exc:
+        asyncio.run(api._save_upload(f, path))
+    assert exc.value.status_code == 413
+    assert not path.exists() and not path.with_suffix(".part").exists()
+    monkeypatch.setattr(api, "MIN_FREE", 1 << 62)
+    f = StarletteUploadFile(io.BytesIO(b"x"))
+    with pytest.raises(FastAPIHTTPException) as exc:
+        asyncio.run(api._save_upload(f, path))
+    assert exc.value.status_code == 507
+    assert not path.exists() and not path.with_suffix(".part").exists()
+
+
+def test_field_limit_preserved():
+    data = b'--test\r\nContent-Disposition: form-data; name="field"\r\n\r\nxx\r\n--test--\r\n'
+    p = parser(data)
+    p.max_part_size = 1
+    with pytest.raises(MultiPartException):
+        asyncio.run(p.parse())
+
+
+def test_other_spool_oserror_is_logged_server_error(monkeypatch, caplog):
+    app = FastAPI()
+    app.router.route_class = upload_route(4 << 20)
+    @app.post("/upload")
+    async def upload(file: UploadFile = File(...)):
+        return {"n": file.size}
+    def failed(*args, **kwargs):
+        raise OSError(errno.EIO, "synthetic")
+    monkeypatch.setattr(_CacheSpool, "write", failed)
+    with TestClient(app) as c:
+        response = c.post("/upload", files={"file":("a.wav",b"x")})
+    assert response.status_code == 500
+    assert "Multipart upload spool failed" in caplog.text
+
+
+def test_endpoint_cancellation_closes_form():
+    import concurrent.futures
+    app = FastAPI()
+    app.router.route_class = upload_route(4 << 20)
+    seen = []
+    @app.post("/upload")
+    async def upload(file: UploadFile = File(...)):
+        seen.append(file.file)
+        raise asyncio.CancelledError()
+    with TestClient(app) as c:
+        with pytest.raises(concurrent.futures.CancelledError):
+            c.post("/upload",files={"file":("a.wav",b"x"*(2<<20))})
+    assert seen and seen[0].closed

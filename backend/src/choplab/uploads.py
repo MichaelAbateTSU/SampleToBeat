@@ -8,7 +8,7 @@ from contextlib import aclosing
 
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
-from starlette.datastructures import UploadFile
+from starlette.datastructures import FormData, UploadFile
 from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import Request
@@ -27,7 +27,7 @@ class _CacheSpool(tempfile.SpooledTemporaryFile):
         self._pending_write = 0
         self._pending_read = 0
 
-    def write(self, data):
+    def write(self, data: bytes) -> int:
         if self._written + len(data) > self._limit:
             raise HTTPException(413, f"File is larger than {self._limit // (1 << 20)} MiB.")
         n = super().write(data)
@@ -38,13 +38,13 @@ class _CacheSpool(tempfile.SpooledTemporaryFile):
             self._pending_write = 0
         return n
 
-    def seek(self, offset, whence=0):
+    def seek(self, offset: int, whence: int = 0) -> int:
         if self._rolled and self._pending_write:
             _release_file_cache(self, written=True)
             self._pending_write = 0
         return super().seek(offset, whence)
 
-    def read(self, size=-1):
+    def read(self, size: int = -1) -> bytes:
         data = super().read(size)
         self._pending_read += len(data)
         if self._rolled and (self._pending_read >= _CACHE_WINDOW or not data):
@@ -58,7 +58,7 @@ class _CacheParser(MultiPartParser):
         super().__init__(*args, **kwargs)
         self.upload_limit = upload_limit
 
-    def on_headers_finished(self):
+    def on_headers_finished(self) -> None:
         super().on_headers_finished()
         upload = self._current_part.file
         if upload is not None:
@@ -70,7 +70,7 @@ class _CacheParser(MultiPartParser):
             upload.file = spool
             original.close()
 
-    async def parse(self):
+    async def parse(self) -> FormData:
         form = await super().parse()
         retained = {id(value.file) for _, value in form.multi_items()
                     if isinstance(value, UploadFile)}
