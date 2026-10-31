@@ -247,10 +247,12 @@ def test_coprime_filter_designed_once(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("rate,frames", [(44100, 150003), (47999, 73), (192001, 73), (1000003, 73)])
-def test_ordered_phase_parity(tmp_path, monkeypatch, rate, frames):
+@pytest.mark.parametrize("nonfinite", [False, True])
+def test_ordered_phase_parity(tmp_path, monkeypatch, rate, frames, nonfinite):
     source = tmp_path / "source.wav"
     y = np.random.default_rng(21).normal(0, .1, (frames, 2)).astype(np.float32)
-    y[min(21, frames - 1)] = np.nan
+    if nonfinite:
+        y[min(21, frames - 1)] = np.nan
     sf.write(source, y, rate, subtype="FLOAT")
     expected = original_decode(source)
     original = disk_decode.resample_poly
@@ -261,6 +263,14 @@ def test_ordered_phase_parity(tmp_path, monkeypatch, rate, frames):
     monkeypatch.setattr(disk_decode, "resample_poly", original)
     actual, _ = sf.read(output, dtype="float32", always_2d=True)
     np.testing.assert_array_equal(actual, expected)
+
+
+def test_disk_filter_construction_failure_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setattr(disk_decode.np, "sinc",
+                        lambda *args: (_ for _ in ()).throw(OSError("disk/filter failure")))
+    with pytest.raises(OSError, match="disk/filter failure"):
+        disk_decode._disk_fir(tmp_path, 960001, 1 / 48000)
+    assert not list(tmp_path.glob(".decode-*"))
 
 
 @pytest.mark.parametrize("rate,frames", [(192001, 73), (192001, 4032022), (1000003, 73)])
