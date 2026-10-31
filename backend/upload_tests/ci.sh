@@ -5,7 +5,7 @@ export TEST_TOKEN="$(openssl rand -hex 32)"
 echo "::add-mask::$TEST_TOKEN"
 docker build -q -t spool-cache -f backend/upload_tests/Dockerfile . >/dev/null
 docker run --rm --memory=512m --memory-swap=512m -e TEST_TOKEN spool-cache \
-  python -m pytest -q upload_tests/test_uploads.py
+  python -m pytest -q -p no:cacheprovider upload_tests/test_uploads.py
 cleanup() { docker rm -f cache >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 run_server() {

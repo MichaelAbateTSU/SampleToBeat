@@ -169,7 +169,8 @@ def test_actual_api_hooks_all_three_multipart_routes(monkeypatch):
     os.environ.setdefault("TEST_TOKEN", "test-only-" * 8)
     from upload_tests import server
     api = server.api
-    routes = {r.path: r for r in api.app.routes if hasattr(r, "endpoint")}
+    routes = {r.path: r for r in api.app.routes
+              if hasattr(r, "endpoint") and "POST" in getattr(r, "methods", set())}
     for path in ("/api/projects/{id}/sources", "/api/projects/{id}/bass-sample",
                  "/api/kits/{kit}/{inst}"):
         assert type(routes[path]).__name__ == "UploadRoute"
