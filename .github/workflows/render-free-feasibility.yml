@@ -15,8 +15,11 @@ jobs:
       - uses: actions/checkout@v5
       - name: Build the pinned pushed application, not the hosting integration
         run: |
-          git archive 4d62d58a6ba64f2f8efe642777ba3c057fcc8e64 | tar -x -C "$RUNNER_TEMP"
-          docker build -t choplab:render-free "$RUNNER_TEMP"
+          set -euo pipefail
+          git fetch --depth=1 origin 4d62d58a6ba64f2f8efe642777ba3c057fcc8e64
+          mkdir "$RUNNER_TEMP/pinned-source"
+          git archive 4d62d58a6ba64f2f8efe642777ba3c057fcc8e64 | tar -x -C "$RUNNER_TEMP/pinned-source"
+          docker build -t choplab:render-free "$RUNNER_TEMP/pinned-source"
       - name: Measure real API operations with hard cgroup limits
         timeout-minutes: 28
         run: |
