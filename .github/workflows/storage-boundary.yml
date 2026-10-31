@@ -1,0 +1,116 @@
+name: Disposable S3 storage boundary
+on:
+  push:
+    branches: [michaelabatetsu-neon-audio-storage]
+    paths:
+      - "backend/src/choplab/object_storage.py"
+      - "backend/storage_tests/**"
+      - ".github/workflows/storage-boundary.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  boundary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build isolated adapter-only image
+        run: docker build -f backend/storage_tests/Boundary.Dockerfile -t storage-boundary .
+      - name: Run unit tests on Linux
+        run: docker run --rm --network none storage-boundary python -m pytest /tests/test_object_storage.py -q
+      - name: Real TLS multipart transfers under 512 MiB without swap
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/storage-evidence"
+          certs="$RUNNER_TEMP/storage-certs"
+          mkdir -p "$evidence" "$certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=s3' \
+            -addext 'subjectAltName=DNS:s3,DNS:localhost' \
+            -keyout "$certs/private.key" -out "$certs/public.crt" 2>/dev/null
+          docker network create storage-boundary
+          cleanup() {
+            docker logs storage-s3 > "$evidence/service.log" 2>&1 || true
+            docker rm -f storage-transfer storage-oom storage-s3 || true
+            docker network rm storage-boundary || true
+          }
+          trap cleanup EXIT
+          docker run -d --name storage-s3 --network storage-boundary --network-alias s3 \
+            --memory=1536m --memory-swap=1536m \
+            -e MINIO_ROOT_USER=synthetic-access -e MINIO_ROOT_PASSWORD=synthetic-secret \
+            -v "$certs:/certs:ro" -p 127.0.0.1:9000:9000 \
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z \
+            server /data --certs-dir /certs
+          for i in {1..60}; do
+            test "$(docker inspect -f '{{.State.Running}}' storage-s3)" = true
+            if curl --fail --silent --cacert "$certs/public.crt" https://localhost:9000/minio/health/ready; then break; fi
+            sleep 2
+          done
+          curl --fail --silent --cacert "$certs/public.crt" https://localhost:9000/minio/health/ready
+          # /working must be disk-backed; tmpfs would charge the whole object to memory.
+          mkdir -p "$RUNNER_TEMP/storage-working"
+          docker create --name storage-transfer --network storage-boundary \
+            --memory=512m --memory-swap=512m --cpus=1 --read-only --tmpfs /tmp:size=16m \
+            -v "$certs/public.crt:/certs/public.crt:ro" -v "$evidence:/evidence" \
+            -v "$RUNNER_TEMP/storage-working:/working" storage-boundary
+          set +e
+          docker start -a storage-transfer 2>&1 | tee "$evidence/transfer.log"
+          transfer_code=${PIPESTATUS[0]}
+          set -e
+          docker inspect storage-transfer > "$evidence/transfer-inspect.json"
+          docker inspect storage-s3 > "$evidence/service-inspect.json"
+          test "$transfer_code" -eq 0
+          docker create --name storage-oom --network none --memory=512m --memory-swap=512m \
+            storage-boundary python -c \
+            'from pathlib import Path; p=Path("/sys/fs/cgroup"); print("memory.max", (p/"memory.max").read_text(), "memory.swap.max", (p/"memory.swap.max").read_text(), flush=True); x=bytearray(640*1024*1024)'
+          set +e
+          docker start -a storage-oom > "$evidence/oom-control.log" 2>&1
+          control_code=$?
+          set -e
+          docker inspect storage-oom > "$evidence/oom-inspect.json"
+          test "$control_code" -eq 137
+          python3 - "$evidence" <<'PY'
+          import json, pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          data = json.loads((p/"result.json").read_text())
+          transfer = json.loads((p/"transfer-inspect.json").read_text())[0]
+          control = json.loads((p/"oom-inspect.json").read_text())[0]
+          service = json.loads((p/"service-inspect.json").read_text())[0]
+          assert data["status"] == "passed" and data["object_bytes"] > 512*1048576
+          assert data["cgroup"]["max_bytes"] == 512*1048576 and data["cgroup"]["swap_max_bytes"] == 0
+          assert not transfer["State"]["OOMKilled"] and transfer["State"]["ExitCode"] == 0
+          assert control["State"]["OOMKilled"] and control["State"]["ExitCode"] == 137
+          assert not service["State"]["OOMKilled"]
+          print(json.dumps(data, indent=2))
+          PY
+      - name: Publish precise cgroup and OOM evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path(os.environ["RUNNER_TEMP"], "storage-evidence")
+          result = p/"result.json"
+          if not result.exists():
+              raise SystemExit("No S3 boundary measurement produced")
+          data = json.loads(result.read_text())
+          m = data["cgroup"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write(f"## Adapter-only real S3 boundary (not Neon or full app)\n"
+                        f"Revision: `{os.environ['GITHUB_SHA']}`\n\n"
+                        f"Status: **{data['status']}**; object: {data['object_bytes']} bytes; "
+                        f"memory cap: {m['max_bytes']} bytes; swap cap: {m['swap_max_bytes']} bytes; "
+                        f"cgroup peak: {m['peak_bytes']} bytes; process max RSS: {m['process_max_rss_bytes']} bytes; "
+                        f"memory events: `{m['events']}`.\n\n"
+                        "Separate MinIO service excluded from the adapter cap. "
+                        "Disk page cache is included in cgroup peak. CPU cap is 1 CPU, not Render's CPU allocation.\n\n"
+                        "| Check | Seconds |\n|---|---|\n")
+              for row in data["checks"]:
+                  out.write(f"| {row['check']} | {row['seconds']} |\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: storage-boundary-evidence
+          path: ${{ runner.temp }}/storage-evidence/
+          retention-days: 7
