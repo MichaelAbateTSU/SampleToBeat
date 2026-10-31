@@ -154,7 +154,9 @@ def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_st
             y = y[:body]
         bufs[tr["id"]] = np.nan_to_num(y.astype(np.float32))
     length = body if scope == "loop" else n
-    mix = np.sum(list(bufs.values()), axis=0) if bufs else np.zeros((length, 2), np.float32)
+    mix = np.zeros((length, 2), np.float32)
+    for buf in bufs.values():
+        mix += buf
     if not master:
         return {"master": mix, "stems": bufs, "metrics": {}}
     return _master(mix, bufs, arr.get("master", {}).get("target_lufs", -14.0))
@@ -162,7 +164,14 @@ def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_st
 
 def true_peak(y: np.ndarray) -> float:
     """4x-oversampled peak estimate (ITU-style approximation)."""
-    return float(np.abs(resample_poly(y, 4, 1, axis=0)).max()) if len(y) else 0.0
+    peak = 0.0
+    block, halo = SR, 32  # default polyphase FIR is shorter than this overlap
+    for start in range(0, len(y), block):
+        end = min(start + block, len(y))
+        lo, hi = max(0, start - halo), min(len(y), end + halo)
+        up = resample_poly(y[lo:hi], 4, 1, axis=0)
+        peak = max(peak, float(np.abs(up[(start - lo) * 4:(end - lo) * 4]).max()))
+    return peak
 
 
 def loudness(y: np.ndarray) -> float | None:
@@ -193,13 +202,17 @@ def _master(mix: np.ndarray, bufs: dict, target_lufs: float) -> dict:
     if tp > db_to_gain(CEILING_DB):
         out *= np.float32(db_to_gain(CEILING_DB) / tp)
         tp = true_peak(out)
-    stems = {k: v * np.float32(db_to_gain(g_db)) for k, v in bufs.items()}
+    stems = bufs
+    for v in stems.values():
+        v *= np.float32(db_to_gain(g_db))
     sp = max((float(np.abs(v).max()) for v in stems.values()), default=0.0)
     stem_trim = min(1.0, 0.98 / sp) if sp > 0 else 1.0  # stems are unlimited: one common trim keeps balance
-    stems = {k: v * np.float32(stem_trim) for k, v in stems.items()}
+    for v in stems.values():
+        v *= np.float32(stem_trim)
     peak = float(np.abs(out).max()) if len(out) else 0.0
+    lufs_out = loudness(out)
     metrics = {"duration_s": round(len(out) / SR, 3), "lufs_in": None if lufs_in is None else round(lufs_in, 2),
-               "lufs": None if loudness(out) is None else round(loudness(out), 2), "master_gain_db": round(g_db, 2),
+               "lufs": None if lufs_out is None else round(lufs_out, 2), "master_gain_db": round(g_db, 2),
                "peak_dbfs": round(20 * np.log10(max(peak, 1e-9)), 2), "true_peak_dbfs": round(20 * np.log10(max(tp, 1e-9)), 2),
                "clipped_samples": int((np.abs(out) >= 1.0).sum()), "limited_samples_pre": clipped_pre,
                "stem_trim_db": round(20 * np.log10(stem_trim), 2), "rms_dbfs": round(20 * np.log10(np.sqrt(np.mean(out ** 2)) + 1e-9), 2)}

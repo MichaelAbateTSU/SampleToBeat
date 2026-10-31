@@ -121,6 +121,20 @@ def load(path: Path) -> np.ndarray:
     return resample(_to_stereo(y), sr, SR)
 
 
+def load_region(path: Path, start: int, end: int) -> np.ndarray:
+    """Read just an internal 48 kHz region; preserve the existing resampler for other rates."""
+    with sf.SoundFile(str(path)) as f:
+        if f.samplerate != SR:
+            y = load(path)
+            if not 0 <= start < end <= len(y) + 1:
+                raise ValueError("Invalid sample bounds for audio.")
+            return y[start:end].copy()
+        if not 0 <= start < end <= len(f) + 1:
+            raise ValueError("Invalid sample bounds for audio.")
+        f.seek(start)
+        return _to_stereo(f.read(end - start, dtype="float32", always_2d=True))
+
+
 def write_wav(path: Path, y: np.ndarray, sr: int = SR, subtype: str = "FLOAT") -> Path:
     """Atomic write: never leaves a half-written file under the final name."""
     path = Path(path)

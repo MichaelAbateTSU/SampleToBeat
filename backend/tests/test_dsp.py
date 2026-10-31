@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from choplab import bass, drums, transform
+from choplab import audio_io, bass, drums, render, transform
 from choplab.core import SR, TICKS_PER_BAR, midi_to_hz, ticks_to_samples
 from conftest import dominant_hz
 
@@ -97,3 +97,44 @@ def test_kit_sounds_are_valid(kit):
         y = drums.sound(kit, inst)
         assert y.ndim == 2 and y.shape[1] == 2 and len(y) > 100
         assert np.isfinite(y).all() and 0.05 < np.abs(y).max() <= 1.0
+
+
+@pytest.mark.parametrize("length", [17, SR - 1, SR, SR + 1, 3 * SR + 7])
+def test_blockwise_true_peak_matches_full_polyphase_filter(length):
+    from scipy.signal import resample_poly
+
+    y = np.random.default_rng(91).normal(0, 0.2, (length, 2)).astype(np.float32)
+    for position in (0, SR - 1, SR, SR + 1, length - 1):
+        if position < length:
+            y[position] = [1.0, -0.9]
+    expected = float(np.abs(resample_poly(y, 4, 1, axis=0)).max())
+    assert render.true_peak(y) == pytest.approx(expected, abs=1e-7)
+    assert render.true_peak(y[:0]) == 0
+
+
+def test_partial_region_reads_match_aligned_stem_sum_without_source_cache(tmp_path, monkeypatch):
+    a = sine(220, 2)
+    b = sine(440, 2, amp=0.1)
+    paths = tuple(str(audio_io.write_wav(tmp_path / f"{i}.wav", y)) for i, y in enumerate((a, b)))
+    def no_full_read(*_):
+        raise AssertionError("Region reads should not load an entire internal source.")
+    monkeypatch.setattr(transform, "source_audio", no_full_read)
+    result = transform.region(paths, 0.25, 1.25)
+    np.testing.assert_array_equal(result, (a + b)[SR // 4:5 * SR // 4])
+    assert result.dtype == np.float32
+    with pytest.raises(ValueError, match="bounds"):
+        transform.region(paths, 0, 3)
+
+
+def test_master_stem_gain_and_metrics_preserve_dsp(tmp_path):
+    y = sine(220, 2.1, amp=0.2)
+    original = {"left": y.copy(), "right": y * np.float32(0.4)}
+    mix = np.sum(list(original.values()), axis=0)
+    result = render._master(mix, {k: v.copy() for k, v in original.items()}, -14)
+    gain = np.float32(10 ** (result["metrics"]["master_gain_db"] / 20))
+    # Gain in the reported metric is rounded; compare at the corresponding tolerance.
+    trim = np.float32(10 ** (result["metrics"]["stem_trim_db"] / 20))
+    for name, stem in result["stems"].items():
+        np.testing.assert_allclose(stem, original[name] * gain * trim, atol=5e-4)
+    assert result["metrics"]["clipped_samples"] == 0
+    assert result["metrics"]["true_peak_dbfs"] <= -0.9

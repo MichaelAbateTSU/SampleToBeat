@@ -6,6 +6,17 @@ from choplab import analysis, demo
 from choplab.audio_io import AudioError
 
 
+@pytest.mark.parametrize("length", [137, 256, 513, 2000])
+def test_bounded_tempogram_preserves_global_tempo(length):
+    import librosa
+
+    oenv = np.random.default_rng(9).random(length).astype(np.float32)
+    oenv[::113] += 8
+    expected = float(librosa.feature.tempo(onset_envelope=oenv, sr=analysis.ASR,
+                                          hop_length=analysis.BHOP)[0])
+    assert analysis._tempo(oenv) == expected
+
+
 def test_demo_tempo_key_and_downbeat(demo_analysis):
     doc, feats = demo_analysis
     assert doc["bpm"] == pytest.approx(92, abs=0.5)

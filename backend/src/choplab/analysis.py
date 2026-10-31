@@ -101,6 +101,19 @@ def _sync(m: np.ndarray, idx: np.ndarray) -> np.ndarray:
     return np.stack([m[:, a:max(b, a + 1)].mean(axis=1) for a, b in zip(bounds[:-1], bounds[1:])], axis=1)
 
 
+def _tempo(oenv: np.ndarray) -> float:
+    """The same mean tempogram/prior, without an entire recording's FFT workspace."""
+    window = int(librosa.time_to_frames(8.0, sr=ASR, hop_length=BHOP))
+    padded = np.pad(oenv, (window // 2, window // 2), mode="linear_ramp", end_values=(0, 0))
+    total = np.zeros((window, 1), np.float64)
+    for start in range(0, len(oenv), 256):
+        end = min(len(oenv), start + 256)
+        tg = librosa.feature.tempogram(onset_envelope=padded[start:end + window - 1],
+                                      sr=ASR, hop_length=BHOP, win_length=window, center=False)
+        total += tg.sum(axis=1, keepdims=True)
+    return float(librosa.feature.tempo(tg=total / len(oenv), sr=ASR, hop_length=BHOP)[0])
+
+
 def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | None = None) -> tuple[dict, dict]:
     """Returns (analysis document, per-beat feature arrays). `override` = user corrections
     {bpm, grid_offset (a downbeat time), downbeat_phase, key}."""
@@ -114,8 +127,7 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     oenv_f = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP)
     low = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmax=200, n_mels=32)[: len(oenv_f)]
     high = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmin=1500, n_mels=32)[: len(oenv_f)]
-    base_tempo, _ = librosa.beat.beat_track(onset_envelope=oenv_f, sr=ASR, hop_length=BHOP)
-    base_tempo = float(np.atleast_1d(base_tempo)[0]) or 90.0
+    base_tempo = _tempo(oenv_f) or 90.0
     base_tempo, frames, cands = _pick_tempo(oenv_f, low, high, base_tempo)
     beat_times = librosa.frames_to_time(frames, sr=ASR, hop_length=BHOP)
     weak_grid = len(beat_times) < 8

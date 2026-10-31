@@ -1,0 +1,73 @@
+name: Render Free memory measurements
+on:
+  workflow_dispatch:
+  push:
+    branches: [michaelabatetsu-choplab-production-hosting]
+    paths:
+      - ".github/workflows/render-memory.yml"
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build current audio engine and reuse pinned baseline harness
+        run: |
+          set -euo pipefail
+          docker build -t choplab:render-free .
+          git fetch --depth=1 origin 504e97584d2b5992e2e48cedfb7067c8bd877691
+          git show 504e97584d2b5992e2e48cedfb7067c8bd877691:.github/benchmarks/render_free.py \
+            > "$RUNNER_TEMP/render-memory.py"
+          python3 - <<'PY'
+          import os, pathlib
+          path = pathlib.Path(os.environ["RUNNER_TEMP"], "render-memory.py")
+          source = path.read_text()
+          source = source.replace('REVISION = "4d62d58a6ba64f2f8efe642777ba3c057fcc8e64"',
+                                  f'REVISION = "{os.environ["GITHUB_SHA"]}"')
+          source = source.replace('short_passed = run_case(16)\n        if not short_passed:\n            run_case(4)',
+                                  'run_case(4)\n        run_case(16)')
+          path.write_text(source)
+          PY
+          python3 -m py_compile "$RUNNER_TEMP/render-memory.py"
+      - name: Measure full audio at 512 MiB no swap and 0.1 CPU
+        timeout-minutes: 35
+        run: |
+          sudo timeout --signal=TERM --kill-after=15s 2000s \
+            python3 -u "$RUNNER_TEMP/render-memory.py" "$RUNNER_TEMP/render-memory-results"
+      - name: Make evidence readable and summarize every measured outcome
+        if: always()
+        run: |
+          if test -d "$RUNNER_TEMP/render-memory-results"; then
+            sudo find "$RUNNER_TEMP/render-memory-results" -type f -exec chmod 644 {} +
+          fi
+          python3 - <<'PY'
+          import json, os, pathlib
+          path = pathlib.Path(os.environ["RUNNER_TEMP"], "render-memory-results", "results.json")
+          if not path.exists():
+              raise SystemExit("No measurement evidence produced.")
+          data = json.loads(path.read_text())
+          lines = ["## Capped audio measurements (not a Render deployment)",
+                   f"Revision: `{data['revision']}`; limits: `{data['limits']}`",
+                   "| Input | Stage | Outcome | Seconds | Peak MiB | OOM killed |",
+                   "|---|---|---|---|---|---|"]
+          for case in data["cases"]:
+              for row in case["operations"]:
+                  lines.append(f"| {case['input_seconds']}s | {row['operation']} | {row['outcome']} | "
+                               f"{row['duration_seconds']} | {row['sampled_peak_memory_bytes']/1048576:.2f} | "
+                               f"{row['container_state']['OOMKilled']} |")
+              if case.get("skipped"):
+                  lines.append(f"\n{case['input_seconds']}s untested: {case['skipped']}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("\n".join(lines))
+          PY
+      - name: Preserve peaks timings output checks and container state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-memory-results
+          path: |
+            ${{ runner.temp }}/render-memory-results/*.json
+            ${{ runner.temp }}/render-memory-results/*.log
+          retention-days: 7

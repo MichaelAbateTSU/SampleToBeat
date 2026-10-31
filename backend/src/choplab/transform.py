@@ -36,11 +36,14 @@ def source_audio(paths: tuple[str, ...]) -> np.ndarray:
 
 
 def region(paths: tuple[str, ...], start: float, end: float) -> np.ndarray:
-    y = source_audio(paths)
     a, b = int(round(start * SR)), int(round(end * SR))
-    if not (0 <= a < b <= len(y) + 1):
-        raise ValueError(f"Invalid sample bounds {start:.3f}-{end:.3f}s for audio of {len(y) / SR:.3f}s")
-    return y[a:b].copy()
+    out = audio_io.load_region(Path(paths[0]), a, b)
+    for path in paths[1:]:
+        y = audio_io.load_region(Path(path), a, b)
+        n = min(len(out), len(y))
+        out = out[:n]
+        out += y[:n]
+    return out
 
 
 def fade(y: np.ndarray, in_ms: float, out_ms: float) -> np.ndarray:
