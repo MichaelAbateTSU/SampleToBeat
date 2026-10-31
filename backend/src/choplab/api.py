@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from . import analysis, audio_io, bass, compose, drums, durable, jobs, render, sampling, schemas, separation, store, transform
 from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, TICKS_PER_BAR, cache_key, data_path, log, parse_key
+from .capacity import storage_capacity
 from .hosting import HOSTING, OwnerAccess, listening_port
 
 MAX_UPLOAD = int(os.environ.get("CHOPLAB_MAX_UPLOAD_MB", "100" if HOSTING else "1024")) * (1 << 20)
@@ -914,6 +915,7 @@ def capabilities():
             "metadata_store": store.backend_name(),
             "max_audio_seconds": audio_io.MAX_SECONDS,
             "disk_free_gb": round(free / 1e9, 1), "schema_version": SCHEMA_VERSION,
+            **storage_capacity(DATA_DIR),
             "genres": {k: {**v, "bpm": list(v["bpm"]), "swing": list(v["swing"])} for k, v in drums.GENRES.items()},
             "strategies": compose.STRATEGIES, "kits": list(drums.KITS), "instruments": drums.INSTRUMENTS,
             "track_of": drums.TRACK_OF, "fx_defaults": transform.DEFAULT_FX, "transform_defaults": transform.DEFAULT_TRANSFORM,

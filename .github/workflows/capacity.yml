@@ -1,0 +1,45 @@
+name: Storage capacity capability
+on:
+  workflow_dispatch:
+  push:
+    branches: [michaelabatetsu-capacity-ready]
+permissions:
+  contents: read
+jobs:
+  capacity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build production image and disposable test runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t choplab:capacity .
+          printf '%s\n' 'FROM choplab:capacity' 'USER root' \
+            'RUN /opt/venv/bin/python -m ensurepip && /opt/venv/bin/python -m pip install pytest httpx' \
+            'USER choplab' > "$RUNNER_TEMP/capacity.Dockerfile"
+          docker build -f "$RUNNER_TEMP/capacity.Dockerfile" -t choplab:capacity-test "$RUNNER_TEMP"
+      - name: Unit and local capability tests
+        shell: bash
+        run: |
+          docker run --rm --entrypoint python --read-only --tmpfs /tmp:uid=10001,gid=10001 \
+            -v "$PWD/backend/tests:/workspace/backend/tests:ro" choplab:capacity-test \
+            -m pytest -q -p no:cacheprovider /workspace/backend/tests/test_capacity.py /workspace/backend/tests/test_api.py
+      - name: Capped distinct synthetic Linux filesystems
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python --read-only \
+            --tmpfs /tmp:size=64m,uid=10001,gid=10001 --tmpfs /syn-data:size=32m,uid=10001,gid=10001 \
+            -e CHOPLAB_DATA=/syn-data choplab:capacity-test -c '
+          import json, shutil, tempfile
+          from fastapi.testclient import TestClient
+          from choplab import api
+          body = TestClient(api.app).get("/api/system/capabilities").json()
+          assert body["data_free_bytes"] == shutil.disk_usage("/syn-data").free <= 32 << 20
+          assert body["temp_free_bytes"] == shutil.disk_usage(tempfile.gettempdir()).free <= 64 << 20
+          assert body["data_temp_same_filesystem"] is False and not body["data_free_error"] and not body["temp_free_error"]
+          assert "disk_free_gb" in body
+          print(json.dumps({k: body[k] for k in ("data_free_bytes","temp_free_bytes","data_temp_same_filesystem")}))
+          '
