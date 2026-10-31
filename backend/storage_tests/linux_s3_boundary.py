@@ -2,6 +2,7 @@
 print("boundary interpreter started", flush=True)
 import hashlib
 import json
+import os
 import resource
 import time
 from dataclasses import replace
@@ -85,6 +86,10 @@ def main():
             while remaining:
                 stream.write(block[:min(remaining, len(block))])
                 remaining -= min(remaining, len(block))
+                if remaining % PART_BYTES == 17 or remaining == 0:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                    os.posix_fadvise(stream.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
     check("generate 640 MiB plus 17 bytes without buffering the object", generate)
     expected = digest(source)
     ref_box = []
