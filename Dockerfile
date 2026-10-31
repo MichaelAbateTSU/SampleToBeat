@@ -14,7 +14,7 @@ RUN uv venv /opt/venv && uv pip install --compile-bytecode --python /opt/venv/bi
     && uv pip freeze --python /opt/venv/bin/python > /opt/requirements-installed.txt
 
 FROM python:3.12-slim-bookworm AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg libsndfile1 libgomp1 libatomic1 \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg libsndfile1 libgomp1 libatomic1 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 choplab && groupadd --gid 1000 render-secrets \
     && useradd --uid 10001 --gid choplab --groups render-secrets --create-home choplab \
@@ -30,5 +30,5 @@ WORKDIR /home/choplab
 RUN NUMBA_CACHE_DIR=/home/choplab/.cache/numba python -c "from choplab import demo, analysis; analysis.analyze(demo.make(bars=2))"
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD python -c "import urllib.request; from choplab.hosting import listening_port; urllib.request.urlopen(f'http://127.0.0.1:{listening_port()}/api/health', timeout=3)"
-CMD ["sh", "-c", "mkdir -p /tmp/numba && cp -R /home/choplab/.cache/numba/. /tmp/numba/ && exec choplab"]
+    CMD curl --fail --silent --show-error --max-time 4.5 "http://127.0.0.1:$(cat /tmp/choplab-health-port)/api/health"
+CMD ["sh", "-c", "mkdir -p /tmp/numba && cp -R /home/choplab/.cache/numba/. /tmp/numba/ && python -c 'from choplab.hosting import listening_port; print(listening_port())' > /tmp/choplab-health-port && exec choplab"]

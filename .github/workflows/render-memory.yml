@@ -41,10 +41,30 @@ jobs:
           source = source.replace('if result["status"] == "completed":',
                                   'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "current_stage", "progress", "error_message")}\n        stage = result.get("current_stage")\n        if stage != RESULTS.get("profile_stage"):\n            RESULTS["profile_stage"] = stage\n            print(json.dumps({"profile_stage": stage, "monotonic": time.monotonic()}), flush=True)\n        if result["status"] == "completed":')
           source = source.replace('samples = []', 'samples = []\n        memory_profile = []')
+          source = source.replace('stop = threading.Event()', '''stop = threading.Event()
+                  http_liveness = []
+                  def probe_liveness():
+                      while not stop.is_set():
+                          started = time.monotonic()
+                          observation = {"monotonic": started}
+                          try:
+                              assert api("GET", "/api/health", timeout=5)["ok"]
+                              observation["outcome"] = "passed"
+                          except (OSError, RuntimeError, ValueError, AssertionError) as error:
+                              observation.update(outcome="failed", error=f"{type(error).__name__}: {error}")
+                          observation["seconds"] = time.monotonic() - started
+                          http_liveness.append(observation)
+                          stop.wait(1)
+                  probe = threading.Thread(target=probe_liveness, daemon=True)
+                  if label != "startup_and_protected_frontend":
+                      probe.start()''')
+          source = source.replace('thread.join(timeout=15)', '''thread.join(timeout=15)
+                      if probe.is_alive():
+                          probe.join(timeout=7)''')
           source = source.replace('samples.append(int((self.group / "memory.current").read_text()))',
                                   'samples.append(int((self.group / "memory.current").read_text()))\n                        stat = dict(line.split() for line in (self.group / "memory.stat").read_text().splitlines())\n                        cpu = dict(line.split() for line in (self.group / "cpu.stat").read_text().splitlines())\n                        rss = 0\n                        for pid in (self.group / "cgroup.procs").read_text().split():\n                            try:\n                                rss += int(next(line.split()[1] for line in pathlib.Path("/proc", pid, "status").read_text().splitlines() if line.startswith("VmRSS:"))) * 1024\n                            except (FileNotFoundError, StopIteration, ProcessLookupError):\n                                pass\n                        memory_profile.append({"monotonic": time.monotonic(), "cpu_usage_usec": int(cpu["usage_usec"]), "rss_bytes": rss, "stage": RESULTS.get("profile_stage"), "current": samples[-1], **{k: int(stat.get(k, 0)) for k in ("anon", "file", "kernel")}})')
           source = source.replace('"duration_seconds": round(time.monotonic() - before, 3),',
-                                  '"last_job": RESULTS.get("last_job"),\n                "memory_profile": memory_profile,\n                "duration_seconds": round(time.monotonic() - before, 3),')
+                                  '"last_job": RESULTS.get("last_job"),\n                "memory_profile": memory_profile,\n                "http_liveness": http_liveness,\n                "duration_seconds": round(time.monotonic() - before, 3),')
           path.write_text(source)
           PY
           python3 -m py_compile "$RUNNER_TEMP/render-memory.py"
