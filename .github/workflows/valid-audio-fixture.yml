@@ -1,0 +1,27 @@
+name: valid-audio-fixture
+on:
+  push:
+    branches: [michaelabatetsu-valid-audio-fixture, michaelabatetsu-valid-audio-ready]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          docker build -q -f tools/valid-audio-preflight/Dockerfile -t valid-audio . >/dev/null
+          mkdir -p audio-results
+          docker run --rm --memory=512m --memory-swap=512m valid-audio python -m unittest -q test_fixture
+          docker run --name valid-audio-full --memory=512m --memory-swap=512m valid-audio \
+            python verify_linux.py --allow-gib-fixture --out /tmp/offline-result.json
+          docker cp valid-audio-full:/tmp/offline-result.json audio-results/offline-result.json
+          docker inspect valid-audio-full --format '{{.State.OOMKilled}}' | grep -q false
+          docker rm valid-audio-full
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: valid-audio-offline-results
+          path: audio-results
