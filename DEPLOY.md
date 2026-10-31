@@ -78,9 +78,18 @@ Caddy/Compose stack on Render: Render supplies TLS, and Compose's persistent vol
 This is a **conditional deployment contract, not a deploy-ready Blueprint**. Do not create a full studio on
 an ephemeral disk or call it durable because the metadata uses Neon:
 
-* An independent controlled Linux container benchmark applied Render Free's documented 512 MiB RAM and
-  0.1 CPU limits. Generation from both four-second and sixteen-second recordings, and a five-minute
-  import, were OOM-killed. These are supported studio workflows, not optional Demucs tests. Port handling,
+* The independent **Render Free feasibility measurements** benchmark applied Render Free's documented
+  512 MiB RAM and 0.1 CPU limits. The measured jobs produced these results despite a later report-artifact
+  packaging failure:
+
+  | Synthetic input | Import peak | HPSS peak | Eight-bar generation |
+  | --- | --- | --- | --- |
+  | 4 seconds | Passed, 294.81 MiB | Passed, 344.02 MiB | OOM-killed, 511.99 MiB |
+  | 16 seconds | Passed, 381.43 MiB | Passed, 460.40 MiB | OOM-killed, 512 MiB |
+  | 300 seconds | OOM-killed, 511.98 MiB | Not tested | Not tested |
+
+  HQ preview and export were not tested at these limits. These are supported studio workflows, not optional
+  Demucs tests. Port handling,
   successful startup or a healthy endpoint does not establish Free-tier suitability. **Do not deploy the
   unchanged full studio to Render Free.** Neon object storage cannot fix an audio computation's memory
   requirement; an unvalidated storage rewrite is not a solution to these measured failures.
