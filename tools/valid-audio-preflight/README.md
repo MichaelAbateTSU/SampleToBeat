@@ -22,7 +22,10 @@ Body SHA-256:
 The Linux full test independently decodes every frame with libsndfile, validates
 FFprobe PCM metadata/frame timestamps, decodes through FFmpeg to null, invokes
 the copied production `audio_io.probe`, and verifies full loopback body/file
-hashes against the independently read file. It does not call production decode,
+hashes against the independently read file. It also measures full-size production
+`write_wav` output from independently FFmpeg-decoded 48-kHz first-two-channel
+float32 data in a disk-backed memmap; this is **not** the app's SciPy decode.
+It does not call production decode,
 analysis, durable storage, authentication or jobs.
 
 From this directory (Python 3.11+):
@@ -37,6 +40,8 @@ python fixture.py --write synthetic.wav --allow-gib-fixture
 
 Generation uses exclusive `.part` and final paths, cleans only its own partial
 file on failure, validates declared byte count, and checks available disk space.
+Linux file generation flushes/releases write cache in 8-MiB windows; Windows
+retains normal filesystem behavior.
 Only explicitly generated `synthetic.wav` needs manual removal after inspection.
 
 Linux offline container, from repository root:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import struct
@@ -74,6 +75,7 @@ def write(path: Path, frames: int):
         raise OSError("insufficient measured free space for offline fixture plus 64 MiB margin")
     digest, count = hashlib.sha256(), 0
     created = False
+    since_flush = 0
     try:
         with partial.open("xb") as stream:
             created = True
@@ -81,10 +83,19 @@ def write(path: Path, frames: int):
                 stream.write(piece)
                 digest.update(piece)
                 count += len(piece)
+                since_flush += len(piece)
+                if since_flush >= (8 << 20) and hasattr(os, "posix_fadvise"):
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                    os.posix_fadvise(stream.fileno(), 0, count, os.POSIX_FADV_DONTNEED)
+                    since_flush = 0
+            stream.flush()
+            os.fsync(stream.fileno())
+            if hasattr(os, "posix_fadvise"):
+                os.posix_fadvise(stream.fileno(), 0, count, os.POSIX_FADV_DONTNEED)
         if count != expected:
             raise ValueError("fixture size differs from declared header; refusing publication")
         # Hard link provides exclusive destination publication without overwriting.
-        import os
         os.link(partial, path)
         return {**describe(frames), "actual_bytes": count, "sha256": digest.hexdigest()}
     finally:

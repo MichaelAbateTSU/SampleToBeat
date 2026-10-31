@@ -80,6 +80,42 @@ def main():
         small_internal = Path(work) / "internal-small.wav"
         audio_io.write_wav(small_internal, np.zeros((1001, 2), dtype=np.float32))
         internal_header_bytes = small_internal.stat().st_size - (1001 * 2 * 4)
+        raw_internal = Path(work) / "internal.raw"
+        error_file = Path(work) / "ffmpeg-error.txt"
+        with error_file.open("wb") as errors, raw_internal.open("wb") as raw:
+            # Decode/downsample independently with FFmpeg; not the app's SciPy decode.
+            proc = subprocess.Popen(
+                ["ffmpeg","-v","error","-nostdin","-i",str(path),
+                 "-af","pan=stereo|c0=c0|c1=c1","-ar","48000","-c:a","pcm_f32le",
+                 "-f","f32le","pipe:1"], stdout=subprocess.PIPE, stderr=errors)
+            count_raw = since_flush = 0
+            try:
+                while piece := proc.stdout.read(737280):
+                    raw.write(piece); count_raw += len(piece); since_flush += len(piece)
+                    if since_flush >= (8 << 20):
+                        raw.flush(); os.fsync(raw.fileno())
+                        os.posix_fadvise(raw.fileno(),0,count_raw,os.POSIX_FADV_DONTNEED)
+                        since_flush = 0
+                assert proc.wait(timeout=30) == 0
+                raw.flush(); os.fsync(raw.fileno())
+                os.posix_fadvise(raw.fileno(),0,count_raw,os.POSIX_FADV_DONTNEED)
+            finally:
+                proc.stdout.close()
+                if proc.poll() is None:
+                    proc.kill(); proc.wait(timeout=30)
+        assert count_raw == client.INTERNAL_PCM_BYTES
+        before_internal_writer_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        mapped = np.memmap(raw_internal, dtype=np.float32, mode="r",
+                           shape=(client.INTERNAL_FRAMES,2))
+        full_internal = Path(work) / "internal-full.wav"
+        audio_io.write_wav(full_internal, mapped)
+        del mapped
+        full_internal_info = sf.info(full_internal)
+        assert full_internal_info.frames == client.INTERNAL_FRAMES
+        assert full_internal_info.samplerate == 48000 and full_internal_info.channels == 2
+        assert full_internal_info.subtype == "FLOAT"
+        actual_internal_bytes = full_internal.stat().st_size
+        assert actual_internal_bytes == client.INTERNAL_PCM_BYTES + internal_header_bytes
 
         observed = {}
         class Handler(BaseHTTPRequestHandler):
@@ -125,7 +161,10 @@ def main():
                   "soundfile_version":sf.__version__,"libsndfile_version":sf.__libsndfile_version__,
                   "production_audio_io_sha256":hashlib.sha256(Path(audio_io.__file__).read_bytes()).hexdigest(),
                   "actual_small_production_internal_wav_header_bytes":internal_header_bytes,
-                  "inferred_full_internal_wav_bytes":client.INTERNAL_PCM_BYTES + internal_header_bytes,
+                  "actual_full_production_written_internal_wav_bytes":actual_internal_bytes,
+                  "actual_internal_frame_count":full_internal_info.frames,
+                  "internal_decode":"independent FFmpeg pan first two channels/resample; production write_wav, NOT production decode/analysis",
+                  "rss_before_full_internal_memmap_writer_kib":before_internal_writer_rss,
                   "non_silent_peak":maximum,"rms":(sumsquares/values)**0.5,
                   "full_loopback_stream":observed,"rss_max_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
     report["temporary_fixture_removed"] = not path.exists()
