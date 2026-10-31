@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import struct
 
 FILE_BYTES = 1 << 30
@@ -67,6 +68,10 @@ def write(path: Path, frames: int):
     partial = path.with_name(path.name + ".part")
     if path.exists():
         raise FileExistsError(path)
+    expected = HEADER_BYTES + frames * ALIGN
+    header(frames)
+    if shutil.disk_usage(path.parent).free < expected + (64 << 20):
+        raise OSError("insufficient measured free space for offline fixture plus 64 MiB margin")
     digest, count = hashlib.sha256(), 0
     created = False
     try:
@@ -76,6 +81,8 @@ def write(path: Path, frames: int):
                 stream.write(piece)
                 digest.update(piece)
                 count += len(piece)
+        if count != expected:
+            raise ValueError("fixture size differs from declared header; refusing publication")
         # Hard link provides exclusive destination publication without overwriting.
         import os
         os.link(partial, path)

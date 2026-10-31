@@ -36,11 +36,14 @@ def main():
             os.fsync(f.fileno())
             os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
         read_hash = hashlib.sha256()
+        expected_body = hashlib.sha256(client.PREFIX)
         with path.open("rb") as f:
             while piece := f.read(737280):
                 read_hash.update(piece)
+                expected_body.update(piece)
                 os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
         assert read_hash.hexdigest() == written["sha256"]
+        expected_body.update(client.SUFFIX)
         count, maximum, sumsquares, values = 0, 0.0, 0.0, 0
         with sf.SoundFile(path) as f:
             info = {"frames":len(f),"samplerate":f.samplerate,"channels":f.channels,
@@ -80,13 +83,18 @@ def main():
             def do_POST(self):
                 n = int(self.headers["Content-Length"])
                 h = hashlib.sha256()
+                fh = hashlib.sha256()
                 received = 0
                 while n:
                     piece = self.rfile.read(min(n, 737280))
                     if not piece:
                         raise RuntimeError("early EOF")
+                    start = max(0, len(client.PREFIX) - received)
+                    end = min(len(piece), len(client.PREFIX) + fixture.FILE_BYTES - received)
+                    if end > start:
+                        fh.update(piece[start:end])
                     h.update(piece); received += len(piece); n -= len(piece)
-                observed.update(body_bytes=received, body_sha256=h.hexdigest())
+                observed.update(body_bytes=received, body_sha256=h.hexdigest(), file_sha256=fh.hexdigest())
                 data = b'{"source":{"id":"offline"},"job":{"id":"offline"}}'
                 self.send_response(202)
                 self.send_header("Content-Length",str(len(data)))
@@ -104,14 +112,20 @@ def main():
             assert observed["body_bytes"] == 1073742002
             assert result["sent_file_sha256"] == written["sha256"]
             assert result["sent_multipart_sha256"] == observed["body_sha256"]
+            assert observed["body_sha256"] == expected_body.hexdigest()
+            assert observed["file_sha256"] == written["sha256"]
         finally:
             server.shutdown();server.server_close();thread.join()
         report = {"offline_only":True,"provider_requests":0,"fixture":written,
                   "decoded_frame_count":count,"libsndfile":info,"production_probe":meta,
                   "ffprobe":stream,"ffmpeg_full_decode_exit":0,
+                  "soundfile_version":sf.__version__,"libsndfile_version":sf.__libsndfile_version__,
+                  "production_audio_io_sha256":hashlib.sha256(Path(audio_io.__file__).read_bytes()).hexdigest(),
                   "non_silent_peak":maximum,"rms":(sumsquares/values)**0.5,
                   "full_loopback_stream":observed,"rss_max_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
     report["temporary_fixture_removed"] = not path.exists()
+    report["cgroup"] = {name:Path("/sys/fs/cgroup", name).read_text().strip()
+                        for name in ("memory.max","memory.swap.max","memory.peak","memory.events")}
     args.out.write_text(json.dumps(report,indent=2))
     print(json.dumps(report,indent=2))
 

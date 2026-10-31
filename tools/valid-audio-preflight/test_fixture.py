@@ -179,8 +179,22 @@ class ClientTests(unittest.TestCase):
         client.execute(transport, state, lambda:None, "digest", max_polls=1, sleep=lambda _:None)
         self.assertEqual(sum(m == "UPLOAD" for m, _ in transport.writes), 1)
         self.assertFalse(transport.deleted)
-        self.assertEqual(state["cleanup"]["outcome"], "active_or_unknown_jobs_retained")
+        self.assertEqual(state["cleanup"]["outcome"], "unknown_upload_retained")
         self.assertEqual(state["outcome"], "failed_or_unknown")
+
+    def test_unknown_upload_no_job_yet_is_not_deleted(self):
+        transport, state = FakeTransport(unknown_upload=True, active=False), self.state()
+        client.execute(transport, state, lambda:None, "digest", max_polls=1, sleep=lambda _:None)
+        self.assertFalse(transport.deleted)
+        self.assertEqual(state["cleanup"]["outcome"], "unknown_upload_retained")
+
+    def test_cleanup_only_budget_does_not_require_spent_upload_quota(self):
+        b = budget()
+        b["input_ingress_bytes"] = b["object_storage_available_bytes"] = b["app_egress_available_bytes"] = 0
+        b["max_http_requests"] = 10
+        client.validate_budget(b, b["origin"], b["final_source_sha"], cleanup_only=True)
+        with self.assertRaises(ValueError):
+            client.validate_budget(b, b["origin"], b["final_source_sha"])
 
     def test_verified_import_metadata_cleanup_not_object_claim(self):
         transport, state = FakeTransport(), self.state()
