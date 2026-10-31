@@ -1,10 +1,12 @@
 name: Render Free memory measurements
 on:
   workflow_dispatch:
-  push:
-    branches: [michaelabatetsu-choplab-production-hosting]
-    paths:
-      - ".github/workflows/render-memory.yml"
+    inputs:
+      cases:
+        description: Remaining import and export cases, or export-only follow-up
+        type: choice
+        options: [remaining, export]
+        default: remaining
 permissions:
   contents: read
 jobs:
@@ -14,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Build current audio engine and reuse pinned baseline harness
+        env:
+          CASES: ${{ inputs.cases }}
         run: |
           set -euo pipefail
           docker build -t choplab:render-free .
@@ -28,6 +32,8 @@ jobs:
                                   f'REVISION = "{os.environ["GITHUB_SHA"]}"')
           source = source.replace('short_passed = run_case(16)\n        if not short_passed:\n            run_case(4)',
                                   'run_case(16)')
+          if os.environ["CASES"] == "export":
+              source = source.replace('        run_case(300)', '')
           source = source.replace('if result["status"] == "completed":',
                                   'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "current_stage", "progress", "error_message")}\n        if result["status"] == "completed":')
           source = source.replace('"duration_seconds": round(time.monotonic() - before, 3),',

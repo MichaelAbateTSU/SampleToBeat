@@ -171,22 +171,43 @@ def test_streamed_beat_rms_matches_full_source_reduceat(tmp_path, monkeypatch):
     np.testing.assert_allclose(sampling._beat_rms((path,), beats), expected, atol=1e-14)
 
 
-@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("fail", [False, True, "pipe"])
 def test_mp3_uses_exact_bounded_pcm_and_cleans_partial_files(tmp_path, monkeypatch, fail):
-    from types import SimpleNamespace
+    from io import BytesIO
+    from pathlib import Path
 
     y = sine(220, 2.1, amp=1.2)
     expected = np.clip(y, -1, 1).astype(np.float32).tobytes()
     original = y.copy()
     monkeypatch.setattr(audio_io, "ffmpeg_exe", lambda: "synthetic-ffmpeg")
-    def encode(args, **kwargs):
-        assert "input" not in kwargs
-        pcm_path = Path(args[args.index("-i") + 1])
-        assert pcm_path.read_bytes() == expected
-        Path(args[-1]).write_bytes(b"synthetic mp3")
-        return SimpleNamespace(returncode=int(fail), stderr=b"synthetic encoding error")
-    from pathlib import Path
-    monkeypatch.setattr(audio_io.subprocess, "run", encode)
+    class Input(BytesIO):
+        def write(self, block):
+            assert len(block) <= 65536 * 2 * 4
+            if fail == "pipe":
+                raise BrokenPipeError("synthetic closed encoder")
+            return super().write(block)
+
+        def close(self):
+            if fail != "pipe":
+                assert self.getvalue() == expected
+
+    class Encoder:
+        def __init__(self, args, **kwargs):
+            assert args[args.index("-i") + 1] == "-"
+            self.stdin = Input()
+            Path(args[-1]).write_bytes(b"synthetic mp3")
+            kwargs["stderr"].write(b"synthetic encoding error")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def wait(self):
+            return int(fail is True)
+
+    monkeypatch.setattr(audio_io.subprocess, "Popen", Encoder)
     target = tmp_path / "out.mp3"
     if fail:
         with pytest.raises(audio_io.AudioError, match="encoding failed"):
