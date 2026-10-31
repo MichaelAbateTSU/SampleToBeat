@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 
 from . import audio_io, store, transform
 from .core import NOTE_NAMES, SR
@@ -37,10 +38,22 @@ def resolve(source: dict, stems: list[str]) -> tuple[tuple[str, ...], tuple[str,
 
 
 def _beat_rms(paths: tuple[str, ...], beat_times: np.ndarray) -> np.ndarray:
-    y = transform.source_audio(paths).mean(axis=1)
-    idx = np.clip((beat_times * SR).astype(int), 0, len(y) - 1)
-    sq = np.add.reduceat(y.astype(np.float64) ** 2, idx) / np.maximum(1, np.diff(np.append(idx, len(y))))
-    return np.sqrt(sq)
+    info = [sf.info(path) for path in paths]
+    if any(f.samplerate != SR for f in info):
+        y = transform.source_audio(paths).mean(axis=1)
+        idx = np.clip((beat_times * SR).astype(int), 0, len(y) - 1)
+        sq = np.add.reduceat(y.astype(np.float64) ** 2, idx) / np.maximum(1, np.diff(np.append(idx, len(y))))
+        return np.sqrt(sq)
+    length = min(f.frames for f in info)
+    idx = np.clip((beat_times * SR).astype(int), 0, length - 1)
+    end = np.append(idx[1:], length)
+    rms = []
+    for start, stop in zip(idx, end):
+        # reduceat's repeated index is one sample, not an empty interval.
+        stop = max(start + 1, stop)
+        region = transform.region(paths, start / SR, stop / SR).mean(axis=1)
+        rms.append(np.sqrt(np.sum(region.astype(np.float64) ** 2) / max(1, stop - start)))
+    return np.asarray(rms)
 
 
 def _peaky(chroma: np.ndarray) -> np.ndarray:

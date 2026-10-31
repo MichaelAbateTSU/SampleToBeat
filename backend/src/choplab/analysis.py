@@ -114,6 +114,21 @@ def _tempo(oenv: np.ndarray) -> float:
     return float(librosa.feature.tempo(tg=total / len(oenv), sr=ASR, hop_length=BHOP)[0])
 
 
+def _onset_strength(mono: np.ndarray, hop: int, **kwargs) -> np.ndarray:
+    """Keep the identical centered mel frames/global dB floor, with a bounded STFT workspace."""
+    n_fft, frames = 2048, 1 + len(mono) // hop
+    mel = np.empty((kwargs.get("n_mels", 128), frames), dtype=mono.dtype)
+    for start in range(0, frames, 256):
+        end = min(frames, start + 256)
+        lo, hi = start * hop - n_fft // 2, (end - 1) * hop + n_fft // 2
+        audio = mono[max(0, lo):min(len(mono), hi)]
+        if lo < 0 or hi > len(mono):
+            audio = np.pad(audio, (max(0, -lo), max(0, hi - len(mono))))
+        mel[:, start:end] = librosa.feature.melspectrogram(
+            y=audio, sr=ASR, n_fft=n_fft, hop_length=hop, center=False, **kwargs)
+    return librosa.onset.onset_strength(S=librosa.power_to_db(mel), sr=ASR, hop_length=hop)
+
+
 def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | None = None) -> tuple[dict, dict]:
     """Returns (analysis document, per-beat feature arrays). `override` = user corrections
     {bpm, grid_offset (a downbeat time), downbeat_phase, key}."""
@@ -123,10 +138,10 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         raise AudioError("The recording is silent; nothing to analyze.")
 
     progress("tempo", 0.1)
-    oenv = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=HOP)
-    oenv_f = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP)
-    low = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmax=200, n_mels=32)[: len(oenv_f)]
-    high = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmin=1500, n_mels=32)[: len(oenv_f)]
+    oenv = _onset_strength(mono, HOP)
+    oenv_f = _onset_strength(mono, BHOP)
+    low = _onset_strength(mono, BHOP, fmax=200, n_mels=32)[: len(oenv_f)]
+    high = _onset_strength(mono, BHOP, fmin=1500, n_mels=32)[: len(oenv_f)]
     base_tempo = _tempo(oenv_f) or 90.0
     base_tempo, frames, cands = _pick_tempo(oenv_f, low, high, base_tempo)
     beat_times = librosa.frames_to_time(frames, sr=ASR, hop_length=BHOP)

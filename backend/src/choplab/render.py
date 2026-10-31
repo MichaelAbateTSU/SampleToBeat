@@ -175,10 +175,34 @@ def true_peak(y: np.ndarray) -> float:
 
 
 def loudness(y: np.ndarray) -> float | None:
-    try:
-        v = pyloudnorm.Meter(SR).integrated_loudness(y.astype(np.float64)) if len(y) > SR // 2 else None
-    except ValueError:
+    if len(y) <= SR // 2:
         return None
+    meter = pyloudnorm.Meter(SR)
+    step = 1.0 - meter.overlap
+    count = int(np.round((len(y) / SR - meter.block_size) / (meter.block_size * step))) + 1
+    energy = np.zeros((y.shape[1], count), np.float64)
+    # BS.1770 weighting/gating is channel-independent up to the final channel sum.
+    # Filter one channel at a time rather than copying/filtering full stereo buffers.
+    for channel in range(y.shape[1]):
+        weighted = y[:, channel].astype(np.float64)
+        for stage in meter._filters.values():
+            weighted = stage.apply_filter(weighted)
+        for block in range(count):
+            lo = int(meter.block_size * block * step * SR)
+            hi = int(meter.block_size * (block * step + 1) * SR)
+            energy[channel, block] = np.sum(np.square(weighted[lo:hi])) / (meter.block_size * SR)
+        del weighted
+    gains = np.asarray([1.0, 1.0, 1.0, 1.41, 1.41])[:y.shape[1]]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        levels = -0.691 + 10 * np.log10(gains @ energy)
+        absolute = levels >= -70
+        if not absolute.any():
+            return None
+        relative = -0.691 + 10 * np.log10(gains @ energy[:, absolute].mean(axis=1)) - 10
+        gated = (levels > relative) & (levels > -70)
+        if not gated.any():
+            return None
+        v = -0.691 + 10 * np.log10(gains @ energy[:, gated].mean(axis=1))
     return None if v is None or not np.isfinite(v) or v < -70 else float(v)
 
 
@@ -198,6 +222,7 @@ def _master(mix: np.ndarray, bufs: dict, target_lufs: float) -> dict:
     pre = mix * np.float32(db_to_gain(g_db))
     clipped_pre = int((np.abs(pre) >= 1.0).sum())
     out = limit(pre, db_to_gain(CEILING_DB))
+    del pre
     tp = true_peak(out)
     if tp > db_to_gain(CEILING_DB):
         out *= np.float32(db_to_gain(CEILING_DB) / tp)

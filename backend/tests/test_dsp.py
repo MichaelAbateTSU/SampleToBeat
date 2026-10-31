@@ -138,3 +138,34 @@ def test_master_stem_gain_and_metrics_preserve_dsp(tmp_path):
         np.testing.assert_allclose(stem, original[name] * gain * trim, atol=5e-4)
     assert result["metrics"]["clipped_samples"] == 0
     assert result["metrics"]["true_peak_dbfs"] <= -0.9
+
+
+@pytest.mark.parametrize("seconds,amplitude", [(0.51, 0.2), (1.73, 0.4), (3.05, 0.01), (1, 0)])
+def test_channelwise_loudness_matches_bs1770_meter(seconds, amplitude):
+    import pyloudnorm
+
+    y = sine(220, seconds, amp=amplitude)
+    y[len(y)//3:len(y)//2] *= 0.01
+    y[:, 1] *= 0.37
+    reference = pyloudnorm.Meter(SR).integrated_loudness(y.astype(np.float64))
+    measured = render.loudness(y)
+    if not np.isfinite(reference) or reference < -70:
+        assert measured is None
+    else:
+        assert measured == pytest.approx(reference, abs=1e-10)
+
+
+def test_streamed_beat_rms_matches_full_source_reduceat(tmp_path, monkeypatch):
+    from choplab import sampling
+
+    y = sine(220, 2.13)
+    path = str(audio_io.write_wav(tmp_path / "rms.wav", y))
+    beats = np.array([0.0, 0.21, 0.21, 0.93, 1.37, 2.12])
+    indices = np.clip((beats * SR).astype(int), 0, len(y) - 1)
+    mono = y.mean(axis=1)
+    expected = np.sqrt(np.add.reduceat(mono.astype(np.float64) ** 2, indices)
+                       / np.maximum(1, np.diff(np.append(indices, len(y)))))
+    def full_read(*_):
+        raise AssertionError("Internal beat RMS must not retain a full-source cache.")
+    monkeypatch.setattr(transform, "source_audio", full_read)
+    np.testing.assert_allclose(sampling._beat_rms((path,), beats), expected, atol=1e-14)

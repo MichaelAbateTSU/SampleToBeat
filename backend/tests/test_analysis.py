@@ -17,6 +17,19 @@ def test_bounded_tempogram_preserves_global_tempo(length):
     assert analysis._tempo(oenv) == expected
 
 
+@pytest.mark.parametrize("hop,kwargs", [(analysis.HOP, {}), (analysis.BHOP, {}),
+                                       (analysis.BHOP, {"fmax": 200, "n_mels": 32}),
+                                       (analysis.BHOP, {"fmin": 1500, "n_mels": 32})])
+def test_bounded_onset_frames_match_full_spectrogram(hop, kwargs):
+    import librosa
+
+    mono = np.random.default_rng(15).normal(0, 0.1, 79031).astype(np.float32)
+    mono[:1000] *= 0.0001
+    expected = librosa.onset.onset_strength(y=mono, sr=analysis.ASR, hop_length=hop, **kwargs)
+    actual = analysis._onset_strength(mono, hop, **kwargs)
+    np.testing.assert_allclose(actual, expected, atol=2e-6, rtol=2e-6)
+
+
 def test_demo_tempo_key_and_downbeat(demo_analysis):
     doc, feats = demo_analysis
     assert doc["bpm"] == pytest.approx(92, abs=0.5)
