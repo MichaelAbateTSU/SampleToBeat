@@ -5,7 +5,7 @@ on:
       cases:
         description: Remaining import and export cases, or export-only follow-up
         type: choice
-        options: [remaining, export, repeated]
+        options: [remaining, export, repeated, cold]
         default: remaining
 permissions:
   contents: read
@@ -35,9 +35,15 @@ jobs:
                                   'run_case(16)')
           if os.environ["CASES"] == "export":
               source = source.replace('        run_case(300)', '')
-          elif os.environ["CASES"] == "repeated":
+          elif os.environ["CASES"] in ("repeated", "cold"):
               source = source.replace('        run_case(16)\n        run_case(300)',
                                       '        for repeat in range(2):\n            run_case(16)\n            run_case(300)')
+          if os.environ["CASES"] == "cold":
+              source = source.replace('source = create_input(seconds)', '''source = create_input(seconds)
+              code = "import os; paths = (os.path.join(root, name) for root, dirs, files in os.walk('/opt/venv') for name in files if '.so' in name or name.endswith('.pyc')); count = 0\\nfor path in paths:\\n with open(path, 'rb') as file: os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)\\n count += 1\\nprint('Released scientific code cache for', count, 'files')"
+              command("docker", "run", "--rm", "--entrypoint", "/usr/local/bin/python", IMAGE, "-c", code)''')
+              source = source.replace('"storage": "Disposable Docker volume; NOT proof of provider persistence",',
+                                      '"cold_scientific_code_cache": True,\n    "storage": "Disposable Docker volume; NOT proof of provider persistence",')
           source = source.replace('if result["status"] == "completed":',
                                   'RESULTS["last_job"] = {k: result.get(k) for k in ("id", "status", "current_stage", "progress", "error_message")}\n        stage = result.get("current_stage")\n        if stage != RESULTS.get("profile_stage"):\n            RESULTS["profile_stage"] = stage\n            print(json.dumps({"profile_stage": stage, "monotonic": time.monotonic()}), flush=True)\n        if result["status"] == "completed":')
           source = source.replace('samples = []', 'samples = []\n        memory_profile = []')
@@ -53,6 +59,8 @@ jobs:
                           except (OSError, RuntimeError, ValueError, AssertionError) as error:
                               observation.update(outcome="failed", error=f"{type(error).__name__}: {error}")
                           observation["seconds"] = time.monotonic() - started
+                          if observation["seconds"] > 5 and observation.get("outcome") == "passed":
+                              observation.update(outcome="failed", error="HTTP response exceeded five seconds")
                           http_liveness.append(observation)
                           stop.wait(1)
                   probe = threading.Thread(target=probe_liveness, daemon=True)

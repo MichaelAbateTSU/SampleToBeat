@@ -16,6 +16,7 @@ import soundfile as sf
 from . import audio_io
 from .core import SR, cache_key, data_path, log
 from .hpss import blocks
+from .memory import release_unused
 
 
 class Adapter:
@@ -44,6 +45,7 @@ class HPSSAdapter(Adapter):
     est_memory_gb = 0.5
 
     def separate(self, wav, out_dir, progress):
+        release_unused()
         progress("hpss", 0.3)
         with sf.SoundFile(wav) as source:
             if source.samplerate != SR or source.channels != 2:

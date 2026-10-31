@@ -119,8 +119,10 @@ def decode(path: Path, sr: int = SR) -> np.ndarray:
         raise AudioError("Audio file is empty (zero length).")
     if len(y) / sr > MAX_SECONDS:
         raise AudioError(f"Recording is longer than {MAX_SECONDS} seconds; trim it before importing.")
-    if not np.isfinite(y).all():
-        y = np.nan_to_num(y)
+    for start in range(0, len(y), 65536):
+        chunk = y[start:start + 65536]
+        if not np.isfinite(chunk).all():
+            chunk[:] = np.nan_to_num(chunk)
     _release_file_cache(path)
     return y
 

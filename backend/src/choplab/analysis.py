@@ -10,6 +10,7 @@ from .core import NOTE_NAMES, SR, parse_key
 from .render import loudness
 from .hpss import blocks
 from .cqt import chroma as _chroma
+from .memory import release_unused
 
 ASR = 22050  # analysis rate
 HOP = 512
@@ -243,11 +244,13 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     harm = _harmonic(mono)
     rms_p = _rms(mono - harm)[:n_frames]
     del mono
+    release_unused()
     progress("key_chroma", 0.25)
     tuning = _tuning(harm)
     progress("key_cqt", 0.25)
     chroma = _chroma(harm, ASR, HOP, tuning)[:, :n_frames]
     del harm
+    release_unused()
     keys = estimate_key(chroma.sum(axis=1))
     key_conf = round(max(0.0, keys[0]["score"] - keys[1]["score"]) * 5 + max(0.0, keys[0]["score"]) * 0.5, 3)
     chroma_b = _sync(chroma, beats)

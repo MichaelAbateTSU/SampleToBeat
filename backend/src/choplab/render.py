@@ -13,6 +13,7 @@ from scipy.ndimage import minimum_filter1d, uniform_filter1d
 from scipy.signal import lfilter, resample_poly
 
 from . import audio_io, bass, drums, sampling, transform
+from .memory import release_unused
 from .core import PPQ, SR, TICKS_PER_BAR, db_to_gain, swing_offset_ticks, ticks_to_samples
 
 TAIL_S = 2.0  # reverb/808 ring-out after the last bar (full renders); wrapped to the start for loops
@@ -117,6 +118,7 @@ def _bass_track(tl, params, bpm, n, swing, a, kick_ticks) -> np.ndarray:
 def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_start_bar: int = 0,
            loop_bars: int = 4, master: bool = True) -> dict:
     """Returns {"master": (n,2), "stems": {track_id: (n,2)}, "metrics": {...}} - stems share gain and length."""
+    release_unused()
     bpm, swing = float(arr["bpm"]), float(arr.get("swing", 50))
     if scope == "loop":
         a = int(loop_start_bar) * TICKS_PER_BAR
@@ -306,8 +308,10 @@ def export(arr: dict, samples: dict, sources: dict, out_dir: Path, filename: str
     progress("writing", 0.6)
     if not stems:
         res["stems"].clear()
+        release_unused()
     main = write_audio(out_dir / f"{name}.{FORMATS[fmt][0]}", res["master"], fmt)
     del res["master"]
+    release_unused()
     files.append({"kind": "mix", "name": main.name, "path": str(main), "check": verify(main)})
     if stems:
         progress("writing stems", 0.75)
