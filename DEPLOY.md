@@ -3,10 +3,12 @@
 **No live deployment is configured.** The user selected Render for application compute and Neon for data,
 instead of the initially investigated VM host.
 The protected container supports Neon-compatible PostgreSQL metadata and optional private S3-compatible
-audio with database-fenced runtime ownership. Combined-state acceptance is still pending; Neon does not
+audio with database-fenced runtime ownership. Combined functional container/storage acceptance passed
+through `33c0cb7`; final original-limit capped and real-provider acceptance remain pending. Neon does not
 host the Python app or frontend. The dedicated Free Neon project and private audio bucket have been provisioned, but their production
-credentials are not wired to an app host. Final Render configuration, suitable compute and integrated
-durability validation remain unresolved.
+credentials are not wired to a production app host. Authorized Render and Neon accounts are available;
+account access is not the current blocker. Final Render configuration, safe full-limit compute and
+edge-to-app/durable validation remain unresolved.
 A temporary synthetic test database is not a deployed studio or permanent production database.
 
 ## What Neon can host
@@ -16,7 +18,7 @@ Current official docs checked on 2026-10-31:
 | Neon service | Free allowance | Fit for ChopLab |
 | --- | --- | --- |
 | [Lakebase Postgres](https://neon.com/pricing) | 1 GB/project, 100 CU-hours/project, 5 GB shared egress | Optional metadata backend implemented, including projects and job state |
-| [Object Storage](https://neon.com/docs/storage/overview) | 5 GB/project, S3-style private buckets | Could hold audio and exports; not a filesystem mount |
+| [Object Storage](https://neon.com/docs/storage/overview) | 5 GB/project across branches, S3-style private buckets | Integrated private audio/export path with fenced PostgreSQL references; not a filesystem mount |
 | [Functions](https://neon.com/docs/compute/functions/overview) | 10 active / 400 waiting Capacity-Hours and 1M invocations | **JS/TS on Node.js 24 only, not Python** |
 
 Neon Functions explicitly do not host websites or own durable background job queues. This app uses Python
@@ -38,14 +40,16 @@ disposable Claimable Neon database using only synthetic records; no production c
 
 ## Complementary hosting constraints
 
-The unchanged audio engine needs a separate **Python/container runtime** with enough CPU/RAM and either
-durable disk or a complete Neon object-storage integration. The React frontend can be served by this same
+The audio engine needs a separate **Python/container runtime** with enough CPU/RAM and either
+durable disk or its explicitly configured private object-storage integration. The React frontend can be served by this same
 container, avoiding cross-origin auth, SSE, download and audio-range complications.
 
 * [Render free](https://render.com/docs/free) is the selected application host, but its
   [0.1 CPU / 512 MB](https://render.com/docs/compute-plans) limit, sleep and ephemeral disk remain
-  hard blockers: the baseline OOM-killed short generation and five-minute import. Subsequent bounded DSP
-  and lifetime changes pass measured five-minute workflows, but their lifetime peaks still reach 512 MiB.
+  acceptance constraints: historical baselines OOM-killed short generation and five-minute import.
+  Subsequent bounded DSP/lifetime revisions passed measured five-minute workflows but still reached
+  512 MiB. Those historical failures do not measure the latest disk-backed pipeline, whose final capped
+  original-limit and configured durable-runtime results are pending.
   Repeated workflows must remain at or below 448 MiB, including the configured durable runtime, before
   treating the compute gate as passed. It is not a production-ready deployment for the full supported studio.
 * [Hugging Face Spaces](https://huggingface.co/docs/hub/spaces-overview) requires a paid plan to create a
@@ -65,11 +69,12 @@ container, avoiding cross-origin auth, SSE, download and audio-range complicatio
 
 No verified provider currently satisfies **Neon + unchanged full audio functionality + durable data +
 guaranteed $0 ongoing compute** with the available authorized accounts. A dedicated permanent Free
-Neon project and private bucket are provisioned; the remaining decision is suitable compute that can run
-the full audio engine. Do not switch providers, select a paid Render plan or remove features without user
-approval. Remote studio validation is still required. No Neon Object Storage bucket is needed for the current volume-backed path.
-An ephemeral host would require a separate complete audio-storage integration. Signing up for Neon alone
-does not resolve the compute blocker.
+Neon project and private bucket are provisioned; the selected Render Free path remains conditional on
+full-limit compute/durable acceptance, not a missing account or unimplemented S3 path. Do not switch
+providers, select a paid Render plan or remove features without user approval. Remote studio validation
+is still required. The generic persistent-volume path does not require an object bucket; Render's ephemeral
+path must enable the already integrated private object-storage configuration and PostgreSQL fencing.
+Signing up for Neon alone does not resolve compute or operational quota constraints.
 Credentials must be configured privately in host/repository secrets, never in frontend variables, git or chat.
 
 ## Selected Render Free path and remaining gates
@@ -80,8 +85,9 @@ hosted ChopLab now honors that port unless `CHOPLAB_PORT` explicitly overrides i
 liveness probe uses the same port. Local port/bind defaults are unchanged. Do not deploy the separate
 Caddy/Compose stack on Render: Render supplies TLS, and Compose's persistent volume is unavailable there.
 
-This is a **conditional deployment contract, not a deploy-ready Blueprint**. Do not create a full studio on
-an ephemeral disk or call it durable because the metadata uses Neon:
+This is a **conditional deployment contract, not a deploy-ready Blueprint**. Do not call an ephemeral studio
+durable merely because its metadata uses Neon; enable and validate the integrated private audio path.
+The following benchmarks are **historical revisions**, not measurements of the latest disk-backed runtime:
 
 * The independent **Render Free feasibility measurements** benchmark applied Render Free's documented
   512 MiB RAM and 0.1 CPU limits. The measured jobs produced these results despite a later report-artifact
@@ -163,7 +169,7 @@ an ephemeral disk or call it durable because the metadata uses Neon:
   approximately 244.9 MiB. Reduced anonymous allocations did not establish safe total-memory headroom.
   All these measurements use local metadata/audio, **not configured PostgreSQL/S3**, and exclude the
   durable SDK, lease activity and storage transfers. They cannot establish combined-runtime readiness.
-* Original input compatibility remains unverified. Hosted defaults are still 300 seconds / 100 MiB;
+* Full original-input runtime compatibility remains unverified. Hosted defaults are still 300 seconds / 100 MiB;
   local defaults remain 1,200 seconds / 1,024 MiB. Independent test-only overrides accepted a valid
   1,200s stereo 48 kHz PCM16 input at `05eda9d`, but
   [import OOM-killed after 14.217 seconds](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41240082067/artifacts/13056863220)
@@ -178,9 +184,10 @@ an ephemeral disk or call it durable because the metadata uses Neon:
   likewise OOM-killed after 8.514 seconds, with terminal sampled anonymous memory 509.19 MiB and file cache
   0.04 MiB; later stages were skipped. Static sizing identifies a representation blocker independent of
   stack attribution: the whole stereo float32 decode alone occupies 439.45 MiB, and the subsequent
-  full 48 kHz mono mean adds 219.73 MiB before resampling/runtime overhead. Compressed decode also retains
-  full captured PCM plus a copy. Original-limit support requires a safely bounded representation through
-  decode, analysis and other decode/reanalysis callers, not only chunked peak calculation.
+  full 48 kHz mono mean adds 219.73 MiB before resampling/runtime overhead. At those revisions compressed
+  decode also retained full captured PCM plus a copy. The newer private disk decoder and mapped
+  decode/analysis/reanalysis replace these representations, but their full original-limit durable
+  acceptance must still pass; chunked peak calculation or decoder-only success is insufficient.
 * Free web services lose uploaded/generated files on every restart, redeploy and 15-minute idle spin-down.
   They cannot attach persistent disks, run one-off jobs or use dashboard/SSH shells. The full app currently
   needs `/data` working/cache files. Optional object-storage integration must be explicitly configured and
@@ -197,8 +204,8 @@ an ephemeral disk or call it durable because the metadata uses Neon:
   Signed private URLs can reduce Render traffic, but cannot bypass Neon quotas. Bucket versioning/lifecycle
   settings are not enforced; they are not backups or retention guarantees.
 
-Only after the user approves a viable compute approach and the compute/durable-audio requirements have
-actually been validated, sign in to Render and connect
+Only after the selected compute/durable-audio requirements have actually been validated, use the
+authorized Render account and connect
 the public repository with the reviewed hosting branch (not older `main`), select Docker and **Free**, and
 configure `CHOPLAB_MODE=hosted`, the real `CHOPLAB_PUBLIC_URL=https://...onrender.com`, owner-hash secret file,
 private Neon connection settings and `/api/health` liveness. The password hash file path must match the
@@ -207,7 +214,8 @@ or frontend variables. Do not use Render's expiring Free database instead of Neo
 
 The managed edge's forwarded-header sanitization/trust must be checked against the **real deployed edge**
 before owner login. Do not blindly set `CHOPLAB_PROXY_IPS=*` or trust client-supplied scheme/host headers.
-Without Render account access, that boundary and a live studio cannot be verified. Object-storage writes,
+Authorized disposable Render diagnostics below provide reference-platform evidence, not a live ChopLab
+trust-boundary result. Final app deployment is deliberately held until combined gates pass. Object-storage writes,
 authorized/ranged downloads, cache loss, job recovery and realistic audio within 512 MB must also pass
 before claiming end-to-end Render Free support. Paid resources or silent feature reductions are not a
 solution to these gates.
@@ -261,8 +269,12 @@ An independent Render parser/`_save_upload` preflight compared against `d5f4115`
 2 GiB reserve. It nevertheless peaked at **537,137,152 bytes against a 536,870,912-byte limit**,
 with 6,806 `memory.events:max` events and no OOM/kill: heavy reclaim, not safe headroom.
 It used a disposable probe with a test-only storage predicate and no database, S3, app lifespan or jobs;
-function/parser equality is not production image/runtime equivalence. A bounded multipart follow-up is
-being investigated separately. This does not establish full-app 1 GiB upload readiness.
+function/parser equality is not production image/runtime equivalence. The complete bounded multipart
+follow-up `5f383b4` is now integrated: hosted Linux uses route-scoped Starlette spools with 8 MiB
+write/read cache-release windows, parse-time per-file bounds and explicit failure/cleanup behavior;
+local/Windows retains the standard parser. Its standalone acceptance intentionally omits product
+lifespan, DB/jobs and durable publication; rerun it against the combined revision. This does not establish
+full-app 1 GiB upload readiness.
 
 The unsaved production Render draft explicitly sets `CHOPLAB_MAX_AUDIO_SECONDS=1200` and
 `CHOPLAB_MAX_UPLOAD_MB=1024`; both differ from the current hosted defaults of 300 seconds / 100 MiB.
@@ -274,16 +286,46 @@ files are sampled, so short-lived or child-only temporary files may be missed. O
 and PostgreSQL bytes remain unmeasured in it, not zero; no real Neon quota is consumed. The 1,200-second
 PCM16 fixture also does not prove acceptance of a 1,024-MiB payload or full-length compressed formats.
 
-The next audio pipeline uses the independent `e42630a` disk decoder for import and bounded reads for
+The first original-limit diagnostic at `092df4b`
+[recorded a failed import](https://github.com/MichaelAbateTSU/SampleToBeat/actions/runs/41251751281):
+the actual capabilities confirmed both overrides, but import exceeded its existing 360-second deadline
+(360.506s, still running in `tempo`). HPSS/generation/HQ/WAV/MP3 were therefore skipped. Lifetime peak
+was 536,870,912 bytes, with 185 maximum-pressure events and no OOM/kill. Peak pressure was during
+upload, before the bounded spool integration: sampled anonymous/file maxima were 118.79/379.14 MiB.
+Decoding and tempo stayed below about 333.5 MiB, but used about 10.9/24.2 CPU seconds before timeout.
+All 356 direct HTTP probes passed within five seconds. Sampled working-disk allocated high-water was
+1,365,200,896 bytes; child-only/short-lived files may be missed. This is SQLite/local-storage evidence,
+not PostgreSQL/S3 or provider acceptance, and predates the final decoder/spool/frontend integration.
+The timeout and failed 448 MiB headroom gate are not hidden by the measurement workflow's green status.
+
+The integrated `33c0cb7` audio pipeline uses the independent disk decoder for import and bounded reads for
 analysis/reanalysis and other decode/load callers. Large mono, harmonic, mel and CQT buffers use private
 disk-backed arrays with last-view ownership, cache release and the existing hosted free-space reserve.
 Global resampling, dB floors, centered frames and reductions retain independent numerical references.
-Local backend regressions passed (379 tests / nine platform/network skips), but final native and capped
-runtime checks are pending. The prerequisite's 1,200s **48 kHz stereo PCM16 decode-only** test took
+Local backend regressions passed (379 tests / nine platform/network skips); all five combined native
+x64/ARM, secret-permissions, recovery/SSE, full durable/HTTP and TLS S3-boundary checks passed at
+`33c0cb7`. Final capped runtime checks remain pending. The `e42630a` prerequisite's 1,200s
+**48 kHz stereo PCM16 decode-only** test took
 11.004 seconds and peaked at 70.92 MiB under 512 MiB/no swap/0.1 CPU; it is not full app/DSP evidence.
-Its expansion/channel/coprime-rate edge correction is still pending; no all-rate readiness or limit
-increase is claimed. Temporary arrays add working disk and I/O; after a forced process kill, stop all
+Its complete compatibility follow-up `4dee4d7` is now integrated, superseding the rejecting
+`ace9670` candidate. It bounds channel/expanded/FIR allocations, retains independently frozen
+SciPy/FFmpeg references and preserves large coprime rates using private disk FIR/ordered phase work.
+Independent capped 1,200s/192001-Hz and 60s/1000003-Hz decoder checks passed, but do not prove universal
+practical runtime or whole-app/provider support. Final combined verification, caller cancellation and
+storage cleanup remain required; no limit increase is claimed. Temporary arrays add working disk and I/O; after a forced process kill, stop all
 workers before inspecting/removing orphaned private `.scratch` files. They are not durable assets.
+The combined decoder backend passed 415 tests with nine platform/network skips locally; final native
+and capped verification must include the subsequently integrated multipart/frontend changes.
+
+The complete idle/job follow-up `7db86a6` and waveform follow-up `377718d` are integrated too.
+Confirmed hosted idle health pauses after 60 seconds without interaction or when hidden; unknown/local
+bootstrap retains retry behavior, and genuine hidden jobs are observed with bounded status retries.
+Returning to the page reconciles state. See `frontend/HEALTH.md`; the 10-second database lease heartbeat
+is unchanged, so pausing browser traffic does not itself make Neon scale to zero while a runtime owns
+the lease. Waveforms with peaks/duration explicitly own a preload-none media element before assigning
+the source URL and clean it up on unmount; incomplete metadata retains decode/metadata fallback.
+All 72 combined frontend regressions, typecheck, production build and lint passed locally, but
+whole-runtime/real-provider acceptance is still required.
 
 The complete recovery/storage final tree `240f23f` was integrated atomically at `fd53e2a`, not deployed
 as a recovery-only intermediate. Its combined hosted x64/ARM, secret permissions, isolated recovery,

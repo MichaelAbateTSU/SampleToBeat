@@ -33,8 +33,11 @@ export function Waveform({ url, peaks, duration, markers = [], region, onRegion,
   useEffect(() => {
     if (!box.current) return;
     const reg = RegionsPlugin.create();
+    const media = document.createElement("audio");
+    media.preload = peaks?.length && duration ? "none" : "metadata";
     const w = WaveSurfer.create({
       container: box.current,
+      media,
       url,
       peaks: peaks?.length ? [peaks] : undefined,
       duration: peaks?.length && duration ? duration : undefined,
@@ -72,6 +75,11 @@ export function Waveform({ url, peaks, duration, markers = [], region, onRegion,
     }
     return () => {
       w.destroy();
+      // WaveSurfer does not reset caller-owned media on destroy.
+      media.pause();
+      media.removeAttribute("src");
+      media.load();
+      media.remove();
       ws.current = null;
       setReady(false);
     };
