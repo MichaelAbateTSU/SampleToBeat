@@ -15,11 +15,12 @@ from .core import SR, cache_key, data_path
 DEFAULT_TRANSFORM = {
     "pitch_semitones": 0.0, "pitch_cents": 0.0, "stretch_mode": "stretch", "preserve_formants": False,
     "reverse": False, "gain_db": 0.0, "fade_in_ms": 5.0, "fade_out_ms": 8.0,
+    "harmonic": False,  # keep only the sustained (harmonic) part: removes most of a record's own drums
 }
 DEFAULT_FX = {
     "highpass_hz": 0.0, "lowpass_hz": 0.0, "saturation": 0.0, "bitcrush_bits": 0, "reverb": 0.0,
     "delay": 0.0, "delay_beats": 0.75, "width": 1.0, "compress": False, "wobble": 0.0, "vinyl": 0.0,
-    "eq_low_db": 0.0, "eq_mid_db": 0.0, "eq_high_db": 0.0,
+    "eq_low_db": 0.0, "eq_mid_db": 0.0, "eq_high_db": 0.0, "presence_db": 0.0,
 }
 
 
@@ -38,7 +39,9 @@ def source_audio(paths: tuple[str, ...]) -> np.ndarray:
 def region(paths: tuple[str, ...], start: float, end: float) -> np.ndarray:
     y = source_audio(paths)
     a, b = int(round(start * SR)), int(round(end * SR))
-    if not (0 <= a < b <= len(y) + 1):
+    if b <= len(y) + SR // 100:  # bounds are stored rounded: forgive a few ms past the end
+        b = min(b, len(y))
+    if not (0 <= a < b <= len(y)):
         raise ValueError(f"Invalid sample bounds {start:.3f}-{end:.3f}s for audio of {len(y) / SR:.3f}s")
     return y[a:b].copy()
 
@@ -99,9 +102,10 @@ def effects(y: np.ndarray, fx: dict, bpm: float = 90.0, seed: int = 0) -> np.nda
         chain.append(pb.LowpassFilter(cutoff_frequency_hz=float(fx["lowpass_hz"])))
     if fx["bitcrush_bits"]:
         chain.append(pb.Bitcrush(bit_depth=float(fx["bitcrush_bits"])))
-    for key, f in (("eq_low_db", pb.LowShelfFilter), ("eq_mid_db", pb.PeakFilter), ("eq_high_db", pb.HighShelfFilter)):
+    for key, f in (("eq_low_db", pb.LowShelfFilter), ("eq_mid_db", pb.PeakFilter), ("eq_high_db", pb.HighShelfFilter),
+                   ("presence_db", pb.HighShelfFilter)):
         if fx[key]:
-            hz = {"eq_low_db": 120.0, "eq_mid_db": 1000.0, "eq_high_db": 6000.0}[key]
+            hz = {"eq_low_db": 120.0, "eq_mid_db": 1000.0, "eq_high_db": 6000.0, "presence_db": 2200.0}[key]
             chain.append(f(cutoff_frequency_hz=hz, gain_db=float(fx[key])))
     if fx["compress"]:
         chain.append(pb.Compressor(threshold_db=-18, ratio=3, attack_ms=10, release_ms=120))
@@ -134,6 +138,18 @@ def effects(y: np.ndarray, fx: dict, bpm: float = 90.0, seed: int = 0) -> np.nda
     return y
 
 
+def harmonic_only(y: np.ndarray) -> np.ndarray:
+    """Median-filter harmonic/percussive separation, keeping the harmonic part. Producers flip records that
+    already have drums by filtering them down; this does the same job more cleanly so the new drums do not
+    flam against the old ones."""
+    import librosa
+
+    if len(y) < 4096:
+        return y
+    out = [librosa.effects.harmonic(np.ascontiguousarray(y[:, c]), margin=1.5) for c in range(y.shape[1])]
+    return np.stack(out, axis=1).astype(np.float32)
+
+
 def tape_rate(t: dict) -> float:
     """How much faster a tape-mode transform plays the audio (1.0 in stretch mode)."""
     t = {**DEFAULT_TRANSFORM, **(t or {})}
@@ -142,6 +158,8 @@ def tape_rate(t: dict) -> float:
 
 def transform(y: np.ndarray, t: dict, speed: float = 1.0) -> np.ndarray:
     t = {**DEFAULT_TRANSFORM, **(t or {})}
+    if t["harmonic"]:
+        y = harmonic_only(y)
     y = pitch_stretch(y, t["pitch_semitones"] + t["pitch_cents"] / 100.0, speed, t["stretch_mode"],
                       t["preserve_formants"])
     if t["reverse"]:
@@ -168,3 +186,17 @@ def cached_transform(paths: tuple[str, ...], hashes: tuple[str, ...], start: flo
         _mem.clear()
     _mem[key] = y
     return y
+
+
+def release_memory() -> None:
+    """Drops in-memory copies of transformed audio (they stay cached on disk) and hands freed pages back to the
+    OS. Called between variations so a long generation does not accumulate every buffer it ever touched."""
+    import ctypes
+    import gc
+
+    _mem.clear()
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):  # not glibc (macOS, Windows, musl): nothing to trim
+        pass

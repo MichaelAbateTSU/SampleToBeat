@@ -1,0 +1,50 @@
+# Render Blueprint: one web service (API + web app in one container) with a persistent disk.
+# In Render: New > Blueprint > pick this repository and branch. You are asked for the secret values below.
+#
+# Plan: "standard" (2 GB RAM, 1 CPU). The audio engine peaks at 1.1 to 1.4 GB while rendering and needs a persistent disk,
+# and Render only attaches disks to paid instances. The free plan (512 MB, 0.1 CPU, no disk) cannot run it.
+services:
+  - type: web
+    name: choplab
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: standard
+    region: oregon
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: choplab-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: CHOPLAB_DATA
+        value: /data
+      - key: CHOPLAB_TRUST_PROXY
+        value: "1"
+      - key: CHOPLAB_WORKERS
+        value: "1"
+      # Set this once you attach a custom domain; until then the app uses Render's own https URL.
+      - key: CHOPLAB_BASE_URL
+        sync: false
+      # STRIPE_SECRET_KEY is not declared here on purpose: it comes from an environment group linked to the
+      # service in the Render dashboard, and a service-level value (even an empty one) would override it.
+      # The rest are printed by scripts/stripe_setup.py.
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_PRO_MONTHLY
+        sync: false
+      - key: STRIPE_PRICE_PRO_YEARLY
+        sync: false
+      - key: STRIPE_PRICE_STUDIO_MONTHLY
+        sync: false
+      - key: STRIPE_PRICE_STUDIO_YEARLY
+        sync: false
+      # Password-reset email
+      - key: CHOPLAB_SMTP_HOST
+        sync: false
+      - key: CHOPLAB_SMTP_USER
+        sync: false
+      - key: CHOPLAB_SMTP_PASSWORD
+        sync: false
+      - key: CHOPLAB_MAIL_FROM
+        sync: false

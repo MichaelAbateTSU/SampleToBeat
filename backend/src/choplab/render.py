@@ -17,6 +17,7 @@ from .core import PPQ, SR, TICKS_PER_BAR, db_to_gain, swing_offset_ticks, ticks_
 
 TAIL_S = 2.0  # reverb/808 ring-out after the last bar (full renders); wrapped to the start for loops
 CEILING_DB = -1.0  # true-peak ceiling
+LEAD = int(0.03 * SR)
 
 
 class MissingAsset(ValueError):
@@ -47,10 +48,17 @@ def _place(out: np.ndarray, y: np.ndarray, pos: int) -> None:
         out[pos:pos + n] += y[:n]
 
 
-def sample_buffer(s: dict, src: dict, bpm: float, ratio: float, pitch: float) -> tuple[np.ndarray, float]:
-    """The sample region stretched to the project tempo (ratio = project beats per source beat) and pitched."""
+def sample_buffer(s: dict, src: dict, bpm: float, ratio: float, pitch: float, tape: bool = False,
+                  harmonic: bool = False) -> tuple[np.ndarray, float]:
+    """The sample region fitted to the project tempo (ratio = project beats per source beat) and pitched.
+    tape=True pitches by changing speed, like a record or tape (no time-stretch artefacts): only the part of
+    the tempo change the pitch does not already account for is time-stretched."""
     paths, hashes = sampling.resolve(src, s["stems"])
     t = {**transform.DEFAULT_TRANSFORM, **(s.get("transform") or {}), "fade_in_ms": 0.0, "fade_out_ms": 0.0}
+    if tape:
+        t["stretch_mode"] = "tape"
+    if harmonic:
+        t["harmonic"] = True
     t["pitch_semitones"] = float(t["pitch_semitones"]) + float(pitch)
     speed = bpm / (s["source_bpm"] * ratio)
     # grid-locked: a tape-mode pitch already speeds the audio up, so stretch only the remainder
@@ -65,11 +73,14 @@ def _sample_track(tl, samples, sources, bpm, n, swing, a, choke=True) -> np.ndar
         s = samples.get(e["sample_id"])
         if s is None or s["source_id"] not in sources:
             raise MissingAsset(f"Sample {e['sample_id']} referenced by the arrangement no longer exists.")
-        buf, speed = sample_buffer(s, sources[s["source_id"]], bpm, e.get("ratio", 1.0), e.get("pitch", 0.0))
+        buf, speed = sample_buffer(s, sources[s["source_id"]], bpm, e.get("ratio", 1.0), e.get("pitch", 0.0),
+                                   bool(e.get("tape")), bool(e.get("harmonic")))
         tf = {**transform.DEFAULT_TRANSFORM, **(s.get("transform") or {})}
         base = int(round(s.get("pickup", 0.0) / speed * SR))  # buffer index of source beat 0
         off = base + int(round(e["s0"] * e.get("ratio", 1.0) * spb * SR))
-        pre = base if e["s0"] < 1e-6 else 0  # chops from beat 1 keep the lead-in, placed just before the tick
+        # chops from beat 1 keep the phrase's lead-in; later chops start LEAD early so the cut lands just before
+        # the note's attack instead of through it (beats sit on attack peaks, see analysis._phase_shift)
+        pre = base if e["s0"] < 1e-6 else min(off, LEAD)
         length = min(ticks_to_samples(min(e["dur"], c1 - t), bpm),
                      int(round((e["s1"] - e["s0"]) * e.get("ratio", 1.0) * spb * SR)))
         if choke and i + 1 < len(tl):  # mono choke: the next chop cuts this one
@@ -141,6 +152,8 @@ def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_st
             continue
         if tr["kind"] == "sample":
             y = _sample_track(tl, samples, sources, bpm, n, swing, a, tr.get("choke", True))
+            if tr.get("duck"):  # the record breathes around the kick instead of fighting it
+                y = bass.duck(y, kick_ticks, bpm, amount=float(tr["duck"]), attack_ms=8, release_ms=220)
         elif tr["kind"] == "drums":
             y = _drum_track(tl, arr.get("kit", "boombap"), bpm, n, swing, a)
         else:
@@ -162,7 +175,11 @@ def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_st
 
 def true_peak(y: np.ndarray) -> float:
     """4x-oversampled peak estimate (ITU-style approximation)."""
-    return float(np.abs(resample_poly(y, 4, 1, axis=0)).max()) if len(y) else 0.0
+    block, pad, peak = 10 * SR, 64, 0.0  # in blocks: oversampling a whole song at once costs hundreds of MB
+    for a in range(0, len(y), block):
+        seg = y[max(0, a - pad): a + block + pad]
+        peak = max(peak, float(np.abs(resample_poly(seg, 4, 1, axis=0)).max()))
+    return peak
 
 
 def loudness(y: np.ndarray) -> float | None:
@@ -182,7 +199,17 @@ def limit(y: np.ndarray, ceiling: float, window_ms: float = 10.0) -> np.ndarray:
     return (y * g[:, None]).astype(np.float32)
 
 
+def _glue(mix: np.ndarray) -> np.ndarray:
+    """Gentle bus compression: a couple of dB off the loudest hits so drums, bass and sample move as one record
+    instead of sitting on top of each other."""
+    import pedalboard as pb
+
+    board = pb.Pedalboard([pb.Compressor(threshold_db=-16, ratio=2.0, attack_ms=25, release_ms=180)])
+    return board(np.ascontiguousarray(mix.T, dtype=np.float32), SR).T.astype(np.float32)
+
+
 def _master(mix: np.ndarray, bufs: dict, target_lufs: float) -> dict:
+    mix = _glue(mix)
     lufs_in = loudness(mix)
     # conservative gain toward the target; never boost near-silence by more than 12 dB
     g_db = float(np.clip(target_lufs - lufs_in, -24, 12)) if lufs_in is not None else 0.0
@@ -193,10 +220,12 @@ def _master(mix: np.ndarray, bufs: dict, target_lufs: float) -> dict:
     if tp > db_to_gain(CEILING_DB):
         out *= np.float32(db_to_gain(CEILING_DB) / tp)
         tp = true_peak(out)
-    stems = {k: v * np.float32(db_to_gain(g_db)) for k, v in bufs.items()}
-    sp = max((float(np.abs(v).max()) for v in stems.values()), default=0.0)
+    # stems are scaled in place (render() owns these buffers): two extra copies of every track is ~0.5 GB on a long beat
+    sp = max((float(np.abs(v).max()) for v in bufs.values()), default=0.0) * db_to_gain(g_db)
     stem_trim = min(1.0, 0.98 / sp) if sp > 0 else 1.0  # stems are unlimited: one common trim keeps balance
-    stems = {k: v * np.float32(stem_trim) for k, v in stems.items()}
+    stems = bufs
+    for v in stems.values():
+        v *= np.float32(db_to_gain(g_db) * stem_trim)
     peak = float(np.abs(out).max()) if len(out) else 0.0
     metrics = {"duration_s": round(len(out) / SR, 3), "lufs_in": None if lufs_in is None else round(lufs_in, 2),
                "lufs": None if loudness(out) is None else round(loudness(out), 2), "master_gain_db": round(g_db, 2),
@@ -246,9 +275,55 @@ def verify(path: Path) -> dict:
             "silent": bool(np.sqrt(np.mean(y ** 2)) < 1e-4), "channels": int(y.shape[1]), "bytes": path.stat().st_size}
 
 
+GM_DRUMS = {"kick": 36, "rim": 37, "snare": 38, "clap": 39, "hat": 42, "openhat": 46, "crash": 49, "ride": 51, "perc": 63}
+
+
+def _vlq(n: int) -> bytes:
+    out = [n & 0x7F]
+    while n := n >> 7:
+        out.append(0x80 | (n & 0x7F))
+    return bytes(reversed(out))
+
+
+def _midi_track(name: str, msgs: list[tuple[int, bytes]]) -> bytes:
+    body = b"\x00\xff\x03" + _vlq(len(name.encode())) + name.encode()
+    last = 0
+    for tick, data in sorted(msgs, key=lambda m: (m[0], m[1][0] & 0xF0 == 0x90)):  # note-offs before note-ons
+        body += _vlq(max(0, tick - last)) + data
+        last = max(last, tick)
+    body += b"\x00\xff\x2f\x00"
+    return b"MTrk" + len(body).to_bytes(4, "big") + body
+
+
+def midi(arr: dict) -> bytes:
+    """Standard MIDI file (format 1, 480 PPQ) of the arrangement: drums on channel 10 with General MIDI notes,
+    the 808 line, and one trigger note per sample chop (middle C + its pitch offset). Swing is baked in, so the
+    file lines up with the exported audio when dropped into a DAW at the project tempo."""
+    swing = float(arr.get("swing", 50))
+    tempo = int(round(60_000_000 / float(arr["bpm"])))
+    tracks = [_midi_track("ChopLab", [(0, b"\xff\x51\x03" + tempo.to_bytes(3, "big")), (0, b"\xff\x58\x04\x04\x02\x18\x08")])]
+    for ch, tr in enumerate(t for t in arr["tracks"] if not t.get("muted")):
+        msgs = []
+        chan = 9 if tr["kind"] == "drums" else ch % 9
+        for t, e, c1 in timeline(arr, tr):
+            t += swing_offset_ticks(t, swing)
+            vel = int(np.clip(round(e.get("vel", 1.0) * 110), 1, 127))
+            if e["type"] == "drum":
+                note, dur = GM_DRUMS[e["inst"]], 60
+            elif e["type"] == "note":
+                note, dur = int(e["midi"]), int(min(e["dur"], c1 - t))
+            else:
+                note, dur = int(np.clip(60 + round(e.get("pitch", 0)), 0, 127)), int(min(e["dur"], c1 - t))
+            msgs += [(t, bytes([0x90 | chan, note, vel])), (t + max(1, dur), bytes([0x80 | chan, note, 0]))]
+        if msgs:
+            tracks.append(_midi_track(tr["name"], msgs))
+    return b"MThd" + (6).to_bytes(4, "big") + (1).to_bytes(2, "big") + len(tracks).to_bytes(2, "big") + PPQ.to_bytes(2, "big") + b"".join(tracks)
+
+
 def export(arr: dict, samples: dict, sources: dict, out_dir: Path, filename: str = "beat", fmt: str = "wav24",
            scope: str = "full", loop_start_bar: int = 0, loop_bars: int = 4, stems: bool = False,
-           project_json: dict | None = None, progress=lambda s, f=None: None) -> dict:
+           project_json: dict | None = None, progress=lambda s, f=None: None, midi_file: bool = False,
+           license_text: str | None = None) -> dict:
     if fmt not in FORMATS:
         raise ValueError(f"Unknown format {fmt}")
     name = safe_name(filename)
@@ -274,5 +349,13 @@ def export(arr: dict, samples: dict, sources: dict, out_dir: Path, filename: str
         jp = out_dir / f"{name}.choplab.json"
         jp.write_text(json.dumps(project_json, indent=2))
         files.append({"kind": "project", "name": jp.name, "path": str(jp)})
+    if midi_file:
+        mp = out_dir / f"{name}.mid"
+        mp.write_bytes(midi(arr))
+        files.append({"kind": "midi", "name": mp.name, "path": str(mp)})
+    if license_text:
+        lp = out_dir / f"{name}_LICENSE.txt"
+        lp.write_text(license_text)
+        files.append({"kind": "license", "name": lp.name, "path": str(lp)})
     progress("verifying", 0.95)
     return {"files": files, "metrics": res["metrics"], "folder": str(out_dir)}

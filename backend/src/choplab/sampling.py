@@ -105,6 +105,31 @@ def _mmr(cands: list[dict], k: int, diversity: float) -> list[dict]:
     return chosen
 
 
+FULL_MAX_BEATS = 34  # uploads up to ~8 bars are treated as "the sample", not as a song to dig through
+
+
+def _whole(analysis: dict, onsets_t: np.ndarray, period: float) -> dict | None:
+    """The entire upload as one candidate. Loops that are not an exact number of beats get their own tempo
+    (nearest power-of-two beat count within 15%), so they still tile on the grid without a gap."""
+    duration = analysis["duration"]
+    if analysis.get("one_shot"):
+        start = float(onsets_t[0]) if len(onsets_t) and onsets_t[0] < duration / 2 else 0.0
+        return {"kind": "oneshot", "start": start, "bars": 0, "beats": round((duration - start) / period, 3),
+                "source_bpm": analysis["bpm"]}
+    beats = duration / period
+    if beats > FULL_MAX_BEATS or beats < 1.5:
+        return None
+    if analysis.get("weak_grid"):  # no pulse to respect (a pad, a drone): any whole number of bars loops fine
+        q = min((4, 8, 16, 32), key=lambda k: abs(np.log2(beats / k)))
+        return {"kind": "loop", "start": 0.0, "bars": q // 4, "beats": float(q), "source_bpm": round(60.0 * q / duration, 3)}
+    q = int(round(beats / 4)) * 4
+    # a third of a beat of slack in total: over a long file a looser rule would retune the tempo and drift off the beat
+    if q >= 4 and (analysis.get("loop_locked") or (q in (4, 8, 16, 32) and abs(beats - q) < 0.35)):
+        # the file is (very nearly) 1, 2, 4 or 8 bars: it was cut as a loop, so use it as one
+        return {"kind": "loop", "start": 0.0, "bars": q // 4, "beats": float(q), "source_bpm": round(60.0 * q / duration, 3)}
+    return None  # an arbitrary excerpt: the loops found inside it are on the beat, the whole file is not
+
+
 def discover(source: dict, analysis: dict, f: dict, count: int = 16, diversity: float = 0.5,
              weights: dict | None = None) -> list[dict]:
     w = {**WEIGHTS, **(weights or {})}
@@ -141,41 +166,48 @@ def discover(source: dict, analysis: dict, f: dict, count: int = 16, diversity: 
                       "pickup": round(float(pickup), 4),
                       "metrics": {k: round(x, 3) for k, x in m.items()}, "score": round(float(score), 4), "_v": v})
 
-    for stem in sets:
-        for bars in (1, 2, 4, 8):
-            for a in range(phase, n - 4 * bars + 1, 4 if bars < 4 else 2 * 4):
-                b = a + 4 * bars
-                start = bt[a]
-                # pickups: allow an onset just before the bar line to lead in
-                pre = onsets_t[(onsets_t < start) & (onsets_t > start - 0.06)]
-                start = float(pre[0]) if len(pre) else start
-                end = bt[b] if b < n else start + bars * 4 * period
-                add("loop", stem, a, b, start, end, bars, 4 * bars, bt[a] - start)
-        # chops: onset-aligned (note/transient) and beat-aligned half/one/two-beat slices
-        src = rms[stem]
-        for i in range(n - 2):
-            if src[i] < 0.15 * np.median(src):
-                continue  # silence-based boundary: skip empty beats
-            for beats in (0.5, 1, 2):
-                add("chop", stem, i, min(n, i + max(1, int(beats))), bt[i], bt[i] + beats * period, 0, beats)
-        for t in onsets_t:
-            i = int(np.searchsorted(bt, t, side="right") - 1)
-            if 0 <= i < n - 1:
-                nxt = onsets_t[onsets_t > t + 0.08]
-                end = min(float(nxt[0]) if len(nxt) else t + period, t + 2 * period)
-                add("chop", stem, i, i + 1, t, end, 0, round((end - t) / period, 3))
+    if not analysis.get("one_shot"):
+        for stem in sets:
+            for bars in (1, 2, 4, 8):
+                for a in range(phase, n - 4 * bars + 1, 4 if bars < 4 else 2 * 4):
+                    b = a + 4 * bars
+                    start = bt[a]
+                    # pickups: allow an onset just before the bar line to lead in
+                    pre = onsets_t[(onsets_t < start) & (onsets_t > start - 0.06)]
+                    start = float(pre[0]) if len(pre) else start
+                    end = bt[b] if b < n else start + bars * 4 * period
+                    if end > duration + 0.02:
+                        continue
+                    add("loop", stem, a, b, start, end, bars, 4 * bars, bt[a] - start)
+            # chops: onset-aligned (note/transient) and beat-aligned half/one/two-beat slices
+            src = rms[stem]
+            for i in range(n - 2):
+                if src[i] < 0.15 * np.median(src):
+                    continue  # silence-based boundary: skip empty beats
+                for beats in (0.5, 1, 2):
+                    add("chop", stem, i, min(n, i + max(1, int(beats))), bt[i], bt[i] + beats * period, 0, beats)
+            for t in onsets_t:
+                i = int(np.searchsorted(bt, t, side="right") - 1)
+                if 0 <= i < n - 1:
+                    nxt = onsets_t[onsets_t > t + 0.08]
+                    end = min(float(nxt[0]) if len(nxt) else t + period, t + 2 * period)
+                    add("chop", stem, i, i + 1, t, end, 0, round((end - t) / period, 3))
 
+    whole = _whole(analysis, onsets_t, period)
+    if whole:  # short uploads: the sample itself is the star, ahead of anything cut out of it
+        add(whole["kind"], "mix", 0, n, whole["start"], duration, whole["bars"], whole["beats"])
+        cands[-1].update(score=round(max(c["score"] for c in cands) + 0.05, 4), full=True, source_bpm=whole["source_bpm"])
     loops = _mmr([c for c in cands if c["kind"] == "loop"], max(4, count * 2 // 3), diversity)
     chops = _mmr([c for c in cands if c["kind"] == "chop"], max(4, count - len(loops)), diversity)
     out = []
-    for c in loops + chops:
+    for c in [c for c in cands if c["kind"] == "oneshot"] + loops + chops:
         paths, _ = resolve(source, c["stems"])
         y = transform.region(paths, c["start"], c["end"])
         ch = f["chroma"][:, int(np.searchsorted(bt, c["start"])):int(np.searchsorted(bt, c["end"])) + 1]
         pc = int(np.argmax(ch.sum(axis=1))) if ch.size else None
         c.pop("_v")
         out.append({**c, "id": store.new_id("smp"), "source_id": source["id"], "origin": "auto",
-                    "duration": round(c["end"] - c["start"], 4), "source_bpm": analysis["bpm"],
+                    "duration": round(c["end"] - c["start"], 4), "source_bpm": c.pop("source_bpm", analysis["bpm"]),
                     "key": analysis["key"], "dominant_pitch": NOTE_NAMES[pc] if pc is not None else None,
                     "rms_db": round(20 * np.log10(np.sqrt(np.mean(y ** 2)) + 1e-9), 1), "chroma": chroma(y),
                     "transform": {}, "explanation": _explain(c["metrics"], c["kind"]), "tags": _tags(c),
@@ -204,6 +236,8 @@ def _tags(c):
 
 
 def _name(c):
+    if c.get("full"):
+        return "One-shot (whole sample)" if c["kind"] == "oneshot" else f"Whole sample ({c['beats']:g} beats)"
     m, s = divmod(c["start"], 60)
     what = f"{c['bars']}-bar loop" if c["kind"] == "loop" else f"{c['beats']}-beat chop"
     return f"{what} @ {int(m)}:{s:04.1f} ({c['stem']})"

@@ -17,9 +17,12 @@ def test_demo_tempo_key_and_downbeat(demo_analysis):
     assert len(doc["bar_chroma"]) >= 15 and feats  # one chroma per bar + feature arrays for discovery
 
 
-def test_fast_tempo_is_not_halved():
-    doc, _ = analysis.analyze(demo.make(bpm=140, bars=12))
-    assert doc["bpm"] == pytest.approx(140, abs=1.0)
+@pytest.mark.parametrize("bpm", [72, 86, 104, 128, 140])
+def test_tempo_is_exact_up_to_the_octave(bpm):
+    """70 and 140 describe the same grid (the composer picks half or double time per genre); what must never
+    happen is a 3:2 or otherwise unrelated tempo, which puts every chop off the beat."""
+    doc, _ = analysis.analyze(demo.make(bpm=float(bpm), bars=12))
+    assert min(abs(doc["bpm"] * k - bpm) for k in (0.5, 1, 2)) < 0.3
 
 
 def test_user_override_builds_a_strict_grid(demo_audio):
@@ -35,3 +38,28 @@ def test_user_override_builds_a_strict_grid(demo_audio):
 def test_silence_is_rejected():
     with pytest.raises(AudioError):
         analysis.analyze(np.zeros((48000 * 3, 2), np.float32))
+
+
+REAL = [("soul_nodrums_88", 88), ("funk_band_94", 94), ("dark_piano_70", 70), ("jazz_trio_82", 82), ("nylon_guitar_100", 100)]
+
+
+@pytest.mark.parametrize("name,expected", REAL)
+def test_tempo_of_realistic_samples(name, expected):
+    """Generated instrumentals in the styles people sample, three of them without drums. The expected value is the
+    tempo asked for when they were generated, so allow 2%."""
+    from pathlib import Path
+
+    from choplab import audio_io
+
+    doc, _ = analysis.analyze(audio_io.decode(Path(__file__).parent / "audio" / f"{name}.mp3"))
+    assert not doc["weak_grid"]
+    assert min(abs(doc["bpm"] * k / expected - 1) for k in (0.5, 1, 2)) < 0.02, doc["bpm_candidates"]
+
+
+def test_a_pad_with_no_pulse_is_not_given_a_fake_beat():
+    from pathlib import Path
+
+    from choplab import audio_io
+
+    doc, _ = analysis.analyze(audio_io.decode(Path(__file__).parent / "audio" / "strings_choir_65.mp3"))
+    assert doc["weak_grid"] and doc["tempo_confidence"] < analysis.MIN_TEMPO_CONFIDENCE

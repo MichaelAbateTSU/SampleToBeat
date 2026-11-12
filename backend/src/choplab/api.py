@@ -1,5 +1,8 @@
-"""FastAPI service (spec 22). Heavy work runs as persistent background jobs; the UI follows them over SSE.
-Run: uv run choplab  (binds 127.0.0.1 only - this is a local, single-user app)."""
+"""HTTP API. Heavy work runs as persistent background jobs that the UI follows over SSE.
+
+Every project belongs to a user (a guest session until they register); every resource endpoint checks
+ownership, and plan limits are enforced here rather than in the UI.
+Run: uv run choplab   (CHOPLAB_SELF_HOSTED=1 unlocks everything for a single local user)."""
 from __future__ import annotations
 
 import asyncio
@@ -7,33 +10,86 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
+from urllib.parse import urlparse
 
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 
-from . import analysis, audio_io, bass, compose, drums, jobs, render, sampling, schemas, separation, store, transform
-from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, cache_key, data_path, log
+from . import (accounts, analysis, audio_io, bass, billing, compose, drums, jobs, render, sampling, schemas, separation,
+               store, transform)
+from .core import DATA_DIR, ENGINE_VERSION, SCHEMA_VERSION, SR, cache_key, data_path, log, resolve_data
 
-MAX_UPLOAD = 1 << 30  # 1 GiB
 FRONTEND = Path(os.environ.get("CHOPLAB_FRONTEND", Path(__file__).resolve().parents[3] / "frontend" / "dist"))
+GENERATION_JOBS = {"beat", "generate", "regenerate"}
+CSP = ("default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; "
+       "font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+
+
+def purge_expired() -> int:
+    """Deletes expired sessions and reset tokens, and guests nobody can log back into (with their uploads)."""
+    now = store.now()
+    for kind in ("session", "reset"):
+        for d in store.list_(kind):
+            if d["expires"] < now:
+                store.delete(kind, d["id"])
+    removed = 0
+    for u in store.list_("user"):
+        if u.get("guest") and not store.list_("session", u["id"]):
+            for p in store.list_("project", u["id"]):
+                _delete_project(p, force=True)
+            store.delete("user", u["id"])
+            removed += 1
+    return removed
+
+
+async def _housekeeping():
+    while True:
+        try:
+            n = await asyncio.to_thread(purge_expired)
+            if n:
+                log.info("removed %d expired guest accounts", n)
+        except Exception:  # never let cleanup take the server down
+            log.exception("housekeeping failed")
+        await asyncio.sleep(6 * 3600)
 
 
 @asynccontextmanager
 async def lifespan(app):
     jobs.recover_interrupted()
+    task = asyncio.create_task(_housekeeping())
     yield
+    task.cancel()
 
 
-app = FastAPI(title="ChopLab AI", version="0.1.0", lifespan=lifespan,
-              description="Local sample-based beat generator. All audio stays on this machine.")
+_docs = os.environ.get("CHOPLAB_DOCS") == "1"
+app = FastAPI(title="ChopLab", version="1.0.0", lifespan=lifespan, docs_url="/api/docs" if _docs else None,
+              redoc_url=None, openapi_url="/api/openapi.json" if _docs else None,
+              description="Turn any sample into a full instrumental beat.")
 
 
-@app.exception_handler(ValueError)  # includes AudioError and pydantic ValidationError
+@app.middleware("http")
+async def _guard(request: Request, call_next):
+    """Cross-site request protection (on top of SameSite cookies) and security headers."""
+    if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path != "/api/billing/webhook":
+        origin = request.headers.get("origin")
+        if origin and urlparse(origin).netloc != request.headers.get("host") and origin != accounts.base_url():
+            return JSONResponse({"detail": "Cross-site requests are not allowed."}, 403)
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    if not _docs:
+        resp.headers.setdefault("Content-Security-Policy", CSP)
+    if accounts.cookie_secure():
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return resp
+
+
+@app.exception_handler(ValueError)  # includes AudioError, AuthError and pydantic ValidationError
 async def _bad(_, e):
     return JSONResponse({"detail": str(e)}, 400)
 
@@ -50,12 +106,88 @@ async def _missing(_, e):
 
 @app.exception_handler(FileNotFoundError)
 async def _nofile(_, e):
-    return JSONResponse({"detail": f"A referenced audio file is missing: {e}"}, 409)
+    log.error("missing audio file: %s", e)
+    return JSONResponse({"detail": "A referenced audio file is missing."}, 409)
+
+
+@app.exception_handler(accounts.Paywall)
+async def _paywall(_, e):
+    return JSONResponse({"detail": str(e), "code": "upgrade_required", "feature": e.feature, "plan_needed": e.plan_needed}, 402)
+
+
+@app.exception_handler(accounts.SignupRequired)
+async def _signup(_, e):
+    return JSONResponse({"detail": str(e), "code": "signup_required"}, 401)
+
+
+@app.exception_handler(billing.BillingError)
+async def _billing(_, e):
+    return JSONResponse({"detail": str(e), "code": "billing_unavailable"}, 503)
+
+
+# ---------------------------------------------------------------- who is calling
+
+def _ip(request: Request) -> str:
+    if os.environ.get("CHOPLAB_TRUST_PROXY") == "1":  # only behind a proxy that sets the header itself
+        fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if fwd:
+            return fwd
+    return request.client.host if request.client else "unknown"
+
+
+def _limit(request: Request, what: str, limit: int, window_s: float) -> None:
+    if not accounts.rate_limit(f"{what}:{_ip(request)}", limit, window_s):
+        raise HTTPException(429, "Too many attempts. Wait a minute and try again.")
+
+
+def _set_session(response: Response, user_id: str) -> None:
+    response.set_cookie(accounts.SESSION_COOKIE, accounts.start_session(user_id), max_age=accounts.SESSION_DAYS * 86400,
+                        httponly=True, samesite="lax", secure=accounts.cookie_secure(), path="/")
+
+
+def viewer(request: Request) -> dict | None:
+    return accounts.session_user(request.cookies.get(accounts.SESSION_COOKIE))
+
+
+def known_user(request: Request) -> dict:
+    user = viewer(request)
+    if user is None:
+        raise HTTPException(401, "Your session has expired. Reload the page.")
+    return user
+
+
+def any_user(request: Request, response: Response) -> dict:
+    """The signed-in user, or a fresh guest: visitors can make a beat before creating an account."""
+    user = viewer(request)
+    if user is None:
+        _limit(request, "guest", 30, 3600)
+        user = accounts.create_guest()
+        _set_session(response, user["id"])
+    return user
+
+
+Viewer = Annotated[dict | None, Depends(viewer)]
+User = Annotated[dict, Depends(known_user)]
+AnyUser = Annotated[dict, Depends(any_user)]
+
+
+def _registered(user: dict, why: str) -> None:
+    if user.get("guest") and not accounts.self_hosted():
+        raise accounts.SignupRequired(why)
 
 
 def _get(kind: str, id: str) -> dict:
     doc = store.get(kind, id)
     if doc is None:
+        raise HTTPException(404, f"{kind} {id} not found")
+    return doc
+
+
+def _own(kind: str, id: str, user: dict) -> dict:
+    """The document, if it belongs to one of this user's projects. Foreign ids look exactly like missing ones."""
+    doc = store.get(kind, id)
+    proj = doc if kind == "project" else (store.get("project", doc.get("project_id") or "") if doc else None)
+    if doc is None or proj is None or proj.get("user_id") != user["id"]:
         raise HTTPException(404, f"{kind} {id} not found")
     return doc
 
@@ -66,28 +198,51 @@ def _dir(*parts) -> Path:
     return p
 
 
-async def _save_upload(f: UploadFile, dest: Path) -> int:
+async def _save_upload(f: UploadFile, dest: Path, max_mb: int) -> int:
     """Stream to disk under a generated name (the user's file name is metadata only)."""
     n = 0
     tmp = dest.with_suffix(".part")
-    with open(tmp, "wb") as out:
-        while chunk := await f.read(1 << 20):
-            n += len(chunk)
-            if n > MAX_UPLOAD:
-                out.close()
-                tmp.unlink()
-                raise HTTPException(413, "File is larger than 1 GiB.")
-            out.write(chunk)
-    if n == 0:
-        tmp.unlink()
-        raise HTTPException(400, "Uploaded file is empty.")
-    tmp.replace(dest)
+    try:
+        with open(tmp, "wb") as out:
+            while chunk := await f.read(1 << 20):
+                n += len(chunk)
+                if n > max_mb << 20:
+                    raise accounts.Paywall(f"This file is larger than the {max_mb} MB your plan allows.", "max_upload_mb")
+                out.write(chunk)
+        if n == 0:
+            raise HTTPException(400, "Uploaded file is empty.")
+        tmp.replace(dest)
+    finally:
+        tmp.unlink(missing_ok=True)
     return n
 
 
 def _ext(name: str | None) -> str:
     m = re.search(r"\.([A-Za-z0-9]{1,5})$", name or "")
     return f".{m.group(1).lower()}" if m else ".bin"
+
+
+# ---------------------------------------------------------------- what the client may see (no server paths)
+
+def _pub_source(s: dict) -> dict:
+    hide = {"original_file_path", "internal_audio_path", "_parent"}
+    return {**{k: v for k, v in s.items() if k not in hide}, "stems": sorted(s.get("stems") or {}),
+            "has_audio": bool(s.get("internal_audio_path"))}
+
+
+def _pub_variation(v: dict, full: bool = True) -> dict:
+    out = {k: x for k, x in v.items() if k not in ("preview_path", "_parent") and (full or k != "arrangement")}
+    a = v["arrangement"]
+    return out | {"meta": a["meta"], "bpm": a["bpm"], "key": a.get("key"), "bars": a["bars"], "sections": a["sections"]}
+
+
+def _pub_export(e: dict) -> dict:
+    return {**{k: v for k, v in e.items() if k not in ("folder", "_parent")},
+            "files": [{k: v for k, v in f.items() if k != "path"} for f in e.get("files", [])]}
+
+
+def _pub_project(p: dict) -> dict:
+    return {k: v for k, v in p.items() if k != "_parent"}
 
 
 # ---------------------------------------------------------------- data helpers
@@ -122,6 +277,13 @@ def _features_path(src: dict) -> Path:
 
 def _sub(ctx, lo, hi):
     return lambda stage, f=None: ctx.progress(stage, None if f is None else lo + (hi - lo) * f)
+
+
+class _Span:
+    """A job context whose 0..1 progress maps onto a slice of the parent job (for multi-step pipelines)."""
+
+    def __init__(self, ctx, lo: float, hi: float):
+        self.id, self.progress = ctx.id, _sub(ctx, lo, hi)
 
 
 @jobs.handler("import")
@@ -190,6 +352,13 @@ def job_separate(ctx, source_id: str, model_id: str):
     return {"stems": sorted(stems), "samples": n}
 
 
+def _open(v: dict) -> dict:
+    """Makes a variation the project's working arrangement (what the studio edits and export renders)."""
+    arr = schemas.arrangement(v["arrangement"])
+    return store.update("project", v["project_id"], arrangement=arr, target_bpm=arr["bpm"], musical_key=arr["key"],
+                        random_seed=arr["seed"], variation_id=v["id"], genre=arr["genre"])
+
+
 def _store_variation(project_id, v, settings, batch):
     vid = store.new_id("var")
     arr = v["arrangement"]
@@ -198,6 +367,7 @@ def _store_variation(project_id, v, settings, batch):
         "id": vid, "project_id": project_id, "batch": batch, "seed": arr["seed"], "genre": arr["genre"],
         "strategy": arr["strategy"], "source_samples": [x for x in (arr["meta"]["main_sample"], arr["meta"]["secondary_sample"]) if x],
         "generation_parameters": settings, "arrangement": arr, "preview_path": str(path), "render_status": "done",
+        "peaks": audio_io.peaks(v["render"]["master"], 400), "duration": round(len(v["render"]["master"]) / SR, 3),
         "metrics": v["render"]["metrics"], "evaluation": v["evaluation"]}, parent=project_id)
 
 
@@ -210,16 +380,30 @@ def _inputs(project: dict):
 
 
 @jobs.handler("generate")
-def job_generate(ctx, project_id: str, settings: dict):
+def job_generate(ctx, project_id: str, settings: dict, user_id: str | None = None, open_best: bool = False):
     samples, sources, analyses = _inputs(_get("project", project_id))
     out = compose.generate(settings, samples, sources, analyses, _sub(ctx, 0.0, 0.95))
     batch = store.now()
-    ids = [_store_variation(project_id, v, settings, batch)["id"] for v in out]
-    return {"variation_ids": ids}
+    stored = [_store_variation(project_id, v, settings, batch) for v in out]
+    opened = None
+    if open_best and stored:  # one-click flow: the first variation that passed every check is ready to export
+        best = next((v for v in stored if v["evaluation"]["passed"]), stored[0])
+        opened = _open(best)["variation_id"]
+    if user_id:
+        accounts.count_generation(user_id)  # only finished work counts against the plan
+    return {"variation_ids": [v["id"] for v in stored], "opened": opened}
+
+
+@jobs.handler("beat")
+def job_beat(ctx, project_id: str, source_id: str, settings: dict, user_id: str | None = None):
+    """Sample in, beat out: import -> analyze -> find samples -> compose and render variations."""
+    info = job_import(_Span(ctx, 0.0, 0.4), source_id)
+    out = job_generate(_Span(ctx, 0.4, 1.0), project_id, settings, user_id, open_best=True)
+    return {**info, **out}
 
 
 @jobs.handler("regenerate")
-def job_regenerate(ctx, variation_id: str):
+def job_regenerate(ctx, variation_id: str, user_id: str | None = None):
     old = _get("variation", variation_id)
     samples, sources, analyses = _inputs(_get("project", old["project_id"]))
     by = {s["id"]: s for s in samples}
@@ -235,11 +419,13 @@ def job_regenerate(ctx, variation_id: str):
         if ev["passed"]:
             break
     v = _store_variation(old["project_id"], best, old["generation_parameters"], old["batch"])
+    if user_id:
+        accounts.count_generation(user_id)
     return {"variation_ids": [v["id"]]}
 
 
 @jobs.handler("export")
-def job_export(ctx, project_id: str, export_id: str, request: dict):
+def job_export(ctx, project_id: str, export_id: str, request: dict, license_text: str | None = None):
     p = _get("project", project_id)
     if not p.get("arrangement"):
         raise ValueError("Open a variation in the studio before exporting.")
@@ -247,11 +433,13 @@ def job_export(ctx, project_id: str, export_id: str, request: dict):
     samples = {s["id"]: s for s in _samples(p)}
     sources = _sources(p)
     used = {e["sample_id"] for pat in arr["patterns"].values() for e in pat["events"] if e["type"] == "chop"}
-    pj = {"choplab_schema": SCHEMA_VERSION, "engine": ENGINE_VERSION, "project": {k: v for k, v in p.items() if k != "arrangement"},
-          "arrangement": arr, "samples": [samples[i] for i in sorted(used) if i in samples]} if request["project_json"] else None
+    pj = {"choplab_schema": SCHEMA_VERSION, "engine": ENGINE_VERSION,
+          "project": {k: v for k, v in p.items() if k not in ("arrangement", "user_id", "_parent")},
+          "arrangement": arr, "samples": [samples[i] for i in sorted(used) if i in samples]} if request.get("project_json") else None
     try:
         out = render.export(arr, samples, sources, _dir(project_id, "exports", export_id), request["filename"], request["format"],
-                            request["scope"], request["loop_start_bar"], request["loop_bars"], request["stems"], pj, ctx.progress)
+                            request["scope"], request["loop_start_bar"], request["loop_bars"], request["stems"], pj, ctx.progress,
+                            midi_file=bool(request.get("midi")), license_text=license_text)
     except Exception as e:
         store.update("export", export_id, status="failed", error=str(e))
         raise
@@ -259,158 +447,294 @@ def job_export(ctx, project_id: str, export_id: str, request: dict):
     return {"export_id": export_id, "files": [f["name"] for f in out["files"]]}
 
 
+# ---------------------------------------------------------------- accounts
+
+def _me(user: dict | None) -> dict:
+    return {"user": accounts.public(user) if user else None,
+            "plan": accounts.plan(user) if user else accounts.PLANS[accounts.default_plan()],
+            "usage": accounts.usage(user) if user else None,
+            "self_hosted": accounts.self_hosted(), "billing": billing.mode()}
+
+
+@app.get("/api/me")
+def me(user: Viewer):
+    return _me(user)
+
+
+@app.get("/api/plans")
+def plans():
+    return {"plans": accounts.PLANS, "order": accounts.PLAN_ORDER, "guest_generations": accounts.GUEST_GENERATIONS,
+            "billing": billing.mode()}
+
+
+def _adopt(guest: dict | None, user: dict) -> None:
+    """Logging in from a guest session keeps whatever the guest just made."""
+    if not guest or not guest.get("guest") or guest["id"] == user["id"]:
+        return
+    for p in store.list_("project", guest["id"]):
+        store.put("project", {**p, "user_id": user["id"]}, parent=user["id"])
+    accounts.end_all_sessions(guest["id"])
+    store.delete("user", guest["id"])
+
+
+@app.post("/api/auth/register", status_code=201)
+def register(body: schemas.Credentials, request: Request, response: Response, current: Viewer):
+    _limit(request, "register", 10, 60)
+    user = accounts.register(current, body.email, body.password)
+    accounts.end_session(request.cookies.get(accounts.SESSION_COOKIE))  # new privilege level, new session token
+    _set_session(response, user["id"])
+    return _me(user)
+
+
+@app.post("/api/auth/login")
+def login(body: schemas.Credentials, request: Request, response: Response, current: Viewer):
+    _limit(request, "login", 10, 60)
+    user = accounts.authenticate(body.email, body.password)
+    _adopt(current, user)
+    accounts.end_session(request.cookies.get(accounts.SESSION_COOKIE))
+    _set_session(response, user["id"])
+    return _me(user)
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response):
+    accounts.end_session(request.cookies.get(accounts.SESSION_COOKIE))
+    response.delete_cookie(accounts.SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.post("/api/auth/forgot")
+def forgot(body: schemas.EmailOnly, request: Request):
+    _limit(request, "forgot", 10, 60)
+    accounts.request_reset(body.email)
+    return {"ok": True}  # same answer whether or not the address has an account
+
+
+@app.post("/api/auth/reset")
+def reset(body: schemas.ResetPassword, request: Request, response: Response):
+    _limit(request, "reset", 10, 60)
+    user = accounts.reset_password(body.token, body.password)
+    _set_session(response, user["id"])
+    return _me(user)
+
+
+@app.delete("/api/account", status_code=204)
+def delete_account(user: User, response: Response):
+    """Deletes the account and everything it owns (uploads, beats, exports), and stops billing."""
+    billing.cancel_subscription(user)
+    for p in store.list_("project", user["id"]):
+        _delete_project(p, force=True)
+    accounts.end_all_sessions(user["id"])
+    if user.get("email"):
+        store.delete("email", accounts._email_key(user["email"]))
+    store.delete("user", user["id"])
+    response.delete_cookie(accounts.SESSION_COOKIE, path="/")
+
+
+# ---------------------------------------------------------------- billing
+
+@app.post("/api/billing/checkout")
+def checkout(body: schemas.Checkout, user: User):
+    _registered(user, "Create an account before subscribing.")
+    return {"url": billing.checkout_url(user, body.plan, body.interval)}
+
+
+@app.post("/api/billing/portal")
+def portal(user: User):
+    return {"url": billing.portal_url(user)}
+
+
+@app.post("/api/billing/webhook")
+async def webhook(request: Request):
+    payload = await request.body()
+    try:
+        event = billing.verify(payload, request.headers.get("stripe-signature"))
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid webhook: {e}")
+    return {"received": True, "result": billing.handle(event)}
+
+
+@app.get("/api/billing/mock-complete", include_in_schema=False)
+def mock_complete(plan: str, user: User):
+    """Development stand-in for Stripe Checkout / the portal. Disabled unless CHOPLAB_BILLING=mock."""
+    if billing.mode() != "mock" or plan not in accounts.PLANS:
+        raise HTTPException(404)
+    billing.set_plan(user["id"], plan, subscription_status="active" if plan != "free" else "canceled")
+    return RedirectResponse("/app/account?upgraded=1" if plan != "free" else "/app/account", 303)
+
+
 # ---------------------------------------------------------------- projects
 
-@app.post("/api/projects", status_code=201)
-def create_project(body: schemas.ProjectCreate):
-    return store.put("project", {"id": store.new_id("prj"), "name": body.name, "schema_version": SCHEMA_VERSION,
-                                 "source_ids": [], "target_bpm": None, "time_signature": "4/4", "musical_key": None,
-                                 "random_seed": None, "arrangement": None,
+def _new_project(user: dict, name: str) -> dict:
+    limit = accounts.plan(user)["projects"]
+    if len(store.list_("project", user["id"])) >= limit:
+        raise accounts.Paywall(f"Your plan keeps up to {limit} projects. Delete one or upgrade for more room.", "projects")
+    return store.put("project", {"id": store.new_id("prj"), "user_id": user["id"], "name": name[:80] or "Untitled beat",
+                                 "schema_version": SCHEMA_VERSION, "source_ids": [], "target_bpm": None,
+                                 "time_signature": "4/4", "musical_key": None, "random_seed": None, "arrangement": None,
                                  "generator_settings": schemas.GenerateSettings().model_dump(),
-                                 "export_settings": schemas.ExportRequest().model_dump()})
+                                 "export_settings": schemas.ExportRequest().model_dump()}, parent=user["id"])
+
+
+@app.post("/api/projects", status_code=201)
+def create_project(body: schemas.ProjectCreate, user: AnyUser):
+    return _pub_project(_new_project(user, body.name))
 
 
 @app.get("/api/projects")
-def list_projects():
-    return [{k: p.get(k) for k in ("id", "name", "created_at", "updated_at", "source_ids", "target_bpm", "musical_key")}
-            | {"has_arrangement": bool(p.get("arrangement"))} for p in store.list_("project")]
+def list_projects(user: Viewer):
+    if user is None:
+        return []
+    ps = sorted(store.list_("project", user["id"]), key=lambda p: -p["updated_at"])
+    return [{k: p.get(k) for k in ("id", "name", "created_at", "updated_at", "source_ids", "target_bpm", "musical_key",
+                                   "variation_id", "genre")} | {"has_arrangement": bool(p.get("arrangement"))} for p in ps]
 
 
 @app.get("/api/projects/{id}")
-def get_project(id: str):
-    p = _get("project", id)
-    return {**p, "sources": list(_sources(p).values())}
+def get_project(id: str, user: User):
+    p = _own("project", id, user)
+    return {**_pub_project(p), "sources": [_pub_source(s) for s in _sources(p).values()]}
 
 
 @app.patch("/api/projects/{id}")
-def patch_project(id: str, body: schemas.ProjectPatch):
-    _get("project", id)
-    return store.update("project", id, **body.model_dump(exclude_none=True))
+def patch_project(id: str, body: schemas.ProjectPatch, user: User):
+    _own("project", id, user)
+    return _pub_project(store.update("project", id, **body.model_dump(exclude_none=True)))
 
 
-@app.delete("/api/projects/{id}", status_code=204)
-def delete_project(id: str):
-    p = _get("project", id)
-    running = [j for j in store.list_("job", id) if j["status"] not in jobs.TERMINAL]
-    if running:
+def _delete_project(p: dict, force: bool = False) -> None:
+    running = [j for j in store.list_("job", p["id"]) if j["status"] not in jobs.TERMINAL]
+    if running and not force:
         raise HTTPException(409, "Cancel or wait for this project's running jobs first.")
+    for j in running:
+        jobs.cancel(j["id"])
     for sid in p["source_ids"]:
         for s in store.list_("sample", sid):
             store.delete("sample", s["id"])
         store.delete("source", sid)
     for kind in ("variation", "export", "job"):
-        for d in store.list_(kind, id):
+        for d in store.list_(kind, p["id"]):
             store.delete(kind, d["id"])
-    store.delete("project", id)
-    shutil.rmtree(DATA_DIR / "projects" / id, ignore_errors=True)
+    store.delete("project", p["id"])
+    shutil.rmtree(DATA_DIR / "projects" / p["id"], ignore_errors=True)
+
+
+@app.delete("/api/projects/{id}", status_code=204)
+def delete_project(id: str, user: User):
+    _delete_project(_own("project", id, user))
 
 
 # ---------------------------------------------------------------- sources
 
-@app.post("/api/projects/{id}/sources", status_code=202)
-async def upload_source(id: str, file: UploadFile = File(...)):
-    _get("project", id)
-    sid = store.new_id("src")
-    dest = _dir(id, "sources", sid) / f"original{_ext(file.filename)}"
-    await _save_upload(file, dest)
-    try:
-        audio_io.probe(dest)  # reject non-audio before queueing work
-    except audio_io.AudioError:
-        shutil.rmtree(dest.parent, ignore_errors=True)
-        raise
-    src = store.put("source", {"id": sid, "project_id": id, "original_filename": (file.filename or "upload")[:200],
+async def _add_source(project: dict, user: dict, file: UploadFile | None) -> dict:
+    """Stores an upload (or the built-in demo when file is None) as a new source of the project."""
+    pid, sid = project["id"], store.new_id("src")
+    plan = accounts.plan(user)
+    if file is None:
+        from . import demo
+
+        dest = demo.write_sample(_dir(pid, "sources", sid))
+        filename = demo.DEMO_NAME
+    else:
+        dest = _dir(pid, "sources", sid) / f"original{_ext(file.filename)}"
+        try:
+            await _save_upload(file, dest, plan["max_upload_mb"])
+            meta = audio_io.probe(dest)  # reject non-audio before queueing work
+            if meta["duration"] > plan["max_source_minutes"] * 60:
+                raise accounts.Paywall(f"Your plan handles audio up to {plan['max_source_minutes']} minutes long. "
+                                       "Trim the file or upgrade.", "max_source_minutes")
+        except Exception:
+            shutil.rmtree(dest.parent, ignore_errors=True)
+            raise
+        filename = (file.filename or "upload")[:200]
+    src = store.put("source", {"id": sid, "project_id": pid, "original_filename": filename,
                                "original_file_path": str(dest), "internal_audio_path": None, "content_hash": None,
-                               "analysis_status": "queued", "stems": {}, "separation_status": None}, parent=id)
-    p = _get("project", id)
-    store.update("project", id, source_ids=p["source_ids"] + [sid])
-    job = jobs.submit("import", id, {"source_id": sid})
-    return {"source": src, "job": job}
+                               "analysis_status": "queued", "stems": {}, "separation_status": None}, parent=pid)
+    store.update("project", pid, source_ids=_get("project", pid)["source_ids"] + [sid])
+    return src
+
+
+@app.post("/api/projects/{id}/sources", status_code=202)
+async def upload_source(id: str, user: User, file: UploadFile = File(...)):
+    src = await _add_source(_own("project", id, user), user, file)
+    return {"source": _pub_source(src), "job": jobs.submit("import", id, {"source_id": src["id"]})}
 
 
 @app.post("/api/projects/{id}/demo", status_code=202)
-def demo_source(id: str):
+async def demo_source(id: str, user: User):
     """Adds the bundled synthetic demo song (no copyrighted material) - handy for a first run."""
-    from . import demo
-
-    _get("project", id)
-    sid = store.new_id("src")
-    dest = demo.write(_dir(id, "sources", sid) / "original.wav")
-    src = store.put("source", {"id": sid, "project_id": id, "original_filename": "ChopLab demo (synthetic soul loop).wav",
-                               "original_file_path": str(dest), "internal_audio_path": None, "content_hash": None,
-                               "analysis_status": "queued", "stems": {}, "separation_status": None}, parent=id)
-    p = _get("project", id)
-    store.update("project", id, source_ids=p["source_ids"] + [sid])
-    return {"source": src, "job": jobs.submit("import", id, {"source_id": sid})}
+    src = await _add_source(_own("project", id, user), user, None)
+    return {"source": _pub_source(src), "job": jobs.submit("import", id, {"source_id": src["id"]})}
 
 
 @app.get("/api/sources/{id}")
-def get_source(id: str):
-    return _get("source", id)
+def get_source(id: str, user: User):
+    return _pub_source(_own("source", id, user))
 
 
 @app.get("/api/sources/{id}/audio")
-def source_audio(id: str):
-    s = _get("source", id)
+def source_audio(id: str, user: User):
+    s = _own("source", id, user)
     if not s.get("internal_audio_path"):
         raise HTTPException(409, "Audio is still being imported.")
     return FileResponse(s["internal_audio_path"], media_type="audio/wav")
 
 
 @app.get("/api/sources/{id}/waveform")
-def source_waveform(id: str):
-    s = _get("source", id)
+def source_waveform(id: str, user: User):
+    s = _own("source", id, user)
     return {"peaks": s.get("peaks") or [], "duration": s.get("duration_seconds")}
 
 
 @app.get("/api/sources/{id}/analysis")
-def source_analysis(id: str):
-    s = _get("source", id)
+def source_analysis(id: str, user: User):
+    s = _own("source", id, user)
     if not s.get("analysis"):
         raise HTTPException(409, f"Analysis is {s['analysis_status']}.")
     return s["analysis"]
 
 
 @app.post("/api/sources/{id}/analyze", status_code=202)
-def reanalyze(id: str):
-    s = _get("source", id)
+def reanalyze(id: str, user: User):
+    s = _own("source", id, user)
     return jobs.submit("analyze", s["project_id"], {"source_id": id, "override": (s.get("analysis") or {}).get("override")})
 
 
 @app.patch("/api/sources/{id}/analysis", status_code=202)
-def override_analysis(id: str, body: schemas.AnalysisOverride):
+def override_analysis(id: str, body: schemas.AnalysisOverride, user: User):
     """User corrections (tempo, downbeat, key); re-derives the grid and re-discovers samples."""
-    s = _get("source", id)
+    s = _own("source", id, user)
     if not s.get("internal_audio_path"):
         raise HTTPException(409, "Audio is still being imported.")
     return jobs.submit("analyze", s["project_id"], {"source_id": id, "override": body.model_dump(exclude_none=True)})
 
 
 @app.post("/api/sources/{id}/separate", status_code=202)
-def separate(id: str, body: dict):
-    s = _get("source", id)
-    model = body.get("model_id", "demucs-fast")
-    if model not in separation.ADAPTERS:
-        raise HTTPException(400, f"Unknown model {model!r}")
-    ok, why = separation.ADAPTERS[model].available()
+def separate(id: str, body: schemas.SeparateRequest, user: User):
+    s = _own("source", id, user)
+    accounts.require(user, "separation")
+    if body.model_id not in separation.ADAPTERS:
+        raise HTTPException(400, f"Unknown model {body.model_id!r}")
+    ok, why = separation.ADAPTERS[body.model_id].available()
     if not ok:
         raise HTTPException(409, why)
     if not s.get("analysis"):
         raise HTTPException(409, "Wait for analysis to finish first.")
     store.update("source", id, separation_status="queued")
-    return jobs.submit("separate", s["project_id"], {"source_id": id, "model_id": model})
+    return jobs.submit("separate", s["project_id"], {"source_id": id, "model_id": body.model_id})
 
 
 @app.get("/api/sources/{id}/stems")
-def stems(id: str):
-    s = _get("source", id)
+def stems(id: str, user: User):
+    s = _own("source", id, user)
     return [{"id": f"{id}.{name}", "source_id": id, "stem_type": name, "model_id": s.get("stem_model"),
-             "audio_path": path, "processing_status": "done"} for name, path in (s.get("stems") or {}).items()]
+             "processing_status": "done"} for name in (s.get("stems") or {})]
 
 
 @app.get("/api/stems/{stem_id}/audio")
-def stem_audio(stem_id: str):
+def stem_audio(stem_id: str, user: User):
     sid, _, name = stem_id.rpartition(".")
-    path = (_get("source", sid).get("stems") or {}).get(name)
+    path = (_own("source", sid, user).get("stems") or {}).get(name)
     if not path:
         raise HTTPException(404, "No such stem")
     return FileResponse(path, media_type="audio/wav")
@@ -419,21 +743,21 @@ def stem_audio(stem_id: str):
 # ---------------------------------------------------------------- samples
 
 @app.get("/api/sources/{id}/samples")
-def source_samples(id: str):
-    src = _get("source", id)
+def source_samples(id: str, user: User):
+    src = _own("source", id, user)
     return sorted((_with_slices(s, src) for s in store.list_("sample", id)), key=lambda s: -(s.get("score") or 0))
 
 
 @app.get("/api/projects/{id}/samples")
-def project_samples(id: str):
-    p = _get("project", id)
+def project_samples(id: str, user: User):
+    p = _own("project", id, user)
     srcs = _sources(p)
-    return [_with_slices(s, srcs.get(s["source_id"])) for s in _samples(p)]
+    return sorted((_with_slices(s, srcs.get(s["source_id"])) for s in _samples(p)), key=lambda s: -(s.get("score") or 0))
 
 
 @app.post("/api/projects/{id}/samples", status_code=201)
-def create_sample(id: str, body: schemas.SampleCreate):
-    p = _get("project", id)
+def create_sample(id: str, body: schemas.SampleCreate, user: User):
+    p = _own("project", id, user)
     if body.source_id not in p["source_ids"]:
         raise HTTPException(400, "That source is not part of this project.")
     src = _get("source", body.source_id)
@@ -447,8 +771,8 @@ def create_sample(id: str, body: schemas.SampleCreate):
 
 
 @app.patch("/api/samples/{id}")
-def patch_sample(id: str, body: schemas.SampleUpdate):
-    s = _get("sample", id)
+def patch_sample(id: str, body: schemas.SampleUpdate, user: User):
+    s = _own("sample", id, user)
     src = _get("source", s["source_id"])
     ch = body.model_dump(exclude_none=True)
     if "start" in ch or "end" in ch:  # moving a region re-derives its length in beats
@@ -460,8 +784,8 @@ def patch_sample(id: str, body: schemas.SampleUpdate):
 
 
 @app.delete("/api/samples/{id}", status_code=204)
-def delete_sample(id: str):
-    s = _get("sample", id)
+def delete_sample(id: str, user: User):
+    s = _own("sample", id, user)
     if id in _referenced(s["project_id"]):
         raise HTTPException(409, "This sample is used by the arrangement or a generated variation.")
     store.delete("sample", id)
@@ -478,92 +802,136 @@ def _sample_file(s: dict, bpm: float | None) -> Path:
 
 
 @app.get("/api/samples/{id}/audio")
-def sample_audio(id: str, bpm: float | None = None):
+def sample_audio(id: str, user: User, bpm: float | None = None):
     if bpm is not None and not 40 <= bpm <= 220:
         raise HTTPException(400, "bpm must be 40-220")
-    return FileResponse(_sample_file(_get("sample", id), bpm), media_type="audio/wav")
-
-
-@app.post("/api/samples/{id}/preview")
-def sample_preview(id: str, body: dict | None = None):
-    bpm = (body or {}).get("bpm")
-    if bpm is not None and not 40 <= float(bpm) <= 220:
-        raise HTTPException(400, "bpm must be 40-220")
-    f = _sample_file(_get("sample", id), bpm)
-    return {"url": f"/api/samples/{id}/audio" + (f"?bpm={bpm}" if bpm else ""), "file": f.name}
+    return FileResponse(_sample_file(_own("sample", id, user), bpm), media_type="audio/wav")
 
 
 @app.post("/api/samples/{id}/transform")
-def sample_transform(id: str, body: dict):
-    upd = patch_sample(id, schemas.SampleUpdate(transform=body))
-    return {**upd, "preview": sample_preview(id)}
+def sample_transform(id: str, body: dict, user: User):
+    """Pitch / reverse / fades for a sample; returns the updated sample and where to hear it."""
+    upd = patch_sample(id, schemas.SampleUpdate(transform=body), user)
+    return {**upd, "preview": {"url": f"/api/samples/{id}/audio"}}
 
 
 # ---------------------------------------------------------------- generation
 
+_active: dict[str, set[str]] = {}  # user id -> generation jobs still running (per process)
+
+
+def _submit_generation(user: dict, job_type: str, project_id: str, params: dict) -> dict:
+    """Plan check, one generation at a time per user, and metering (counted when the job completes)."""
+    accounts.check_generation(user)
+    mine = _active.setdefault(user["id"], set())
+    mine -= {j for j in mine if (store.get("job", j) or {"status": "failed"})["status"] in jobs.TERMINAL}
+    if mine and not accounts.self_hosted():
+        raise HTTPException(409, "A beat is already being made. Wait for it to finish.")
+    job = jobs.submit(job_type, project_id, {**params, "user_id": user["id"]})
+    mine.add(job["id"])
+    return job
+
+
+@app.post("/api/beats", status_code=202)
+async def make_beat(user: AnyUser, file: UploadFile | None = File(None), settings: str = Form("{}"),
+                    name: str | None = Form(None)):
+    """The whole product in one call: upload a sample (or omit the file for the demo loop) and get a job that
+    ends with rendered variations, the best one already opened in the studio."""
+    try:
+        st = schemas.GenerateSettings.model_validate(json.loads(settings or "{}")).model_dump()
+    except json.JSONDecodeError:
+        raise HTTPException(400, "settings must be a JSON object")
+    accounts.check_generation(user)
+    title = name or re.sub(r"\.[A-Za-z0-9]{1,5}$", "", (file.filename if file else None) or "Demo loop")
+    project = _new_project(user, f"{title} flip"[:80])
+    try:
+        src = await _add_source(project, user, file)
+        store.update("project", project["id"], generator_settings=st)
+        job = _submit_generation(user, "beat", project["id"],
+                                 {"project_id": project["id"], "source_id": src["id"], "settings": st})
+    except Exception:
+        _delete_project(_get("project", project["id"]), force=True)
+        raise
+    return {"project": _pub_project(_get("project", project["id"])), "source": _pub_source(src), "job": job}
+
+
 @app.post("/api/projects/{id}/generate", status_code=202)
-def generate(id: str, body: schemas.GenerateSettings):
-    p = _get("project", id)
+def generate(id: str, body: schemas.GenerateSettings, user: User):
+    p = _own("project", id, user)
     _inputs(p)  # fail fast with a clear message
     settings = body.model_dump()
     store.update("project", id, generator_settings=settings)
-    return jobs.submit("generate", id, {"project_id": id, "settings": settings})
+    return _submit_generation(user, "generate", id, {"project_id": id, "settings": settings})
 
 
 @app.get("/api/projects/{id}/variations")
-def variations(id: str):
-    _get("project", id)
+def variations(id: str, user: User):
+    _own("project", id, user)
     vs = sorted(store.list_("variation", id), key=lambda v: (-v["batch"], v["created_at"]))
-    return [{k: v for k, v in x.items() if k != "arrangement"} | {"meta": x["arrangement"]["meta"],
-            "bpm": x["arrangement"]["bpm"], "key": x["arrangement"]["key"], "bars": x["arrangement"]["bars"],
-            "sections": x["arrangement"]["sections"]} for x in vs]
+    return [_pub_variation(v, full=False) for v in vs]
 
 
 @app.get("/api/variations/{id}")
-def get_variation(id: str):
-    return _get("variation", id)
+def get_variation(id: str, user: User):
+    return _pub_variation(_own("variation", id, user))
+
+
+def _mp3(wav: Path) -> Path:
+    """Streaming copy of a preview (a 90 s WAV is ~17 MB; the MP3 is ~2 MB). Made on first request."""
+    out = wav.with_suffix(".mp3")
+    if not out.exists():
+        audio_io.write_mp3(out, audio_io.load(wav), bitrate="192k")
+    return out
 
 
 @app.get("/api/variations/{id}/audio")
-def variation_audio(id: str):
-    return FileResponse(_get("variation", id)["preview_path"], media_type="audio/wav")
+def variation_audio(id: str, user: User, format: str = "wav"):
+    wav = Path(_own("variation", id, user)["preview_path"])
+    if format == "mp3" and audio_io.ffmpeg_exe():
+        return FileResponse(_mp3(wav), media_type="audio/mpeg")
+    return FileResponse(wav, media_type="audio/wav")
 
 
 @app.post("/api/variations/{id}/regenerate", status_code=202)
-def regenerate(id: str):
-    v = _get("variation", id)
-    return jobs.submit("regenerate", v["project_id"], {"variation_id": id})
+def regenerate(id: str, user: User):
+    v = _own("variation", id, user)
+    return _submit_generation(user, "regenerate", v["project_id"], {"variation_id": id})
 
 
 @app.delete("/api/variations/{id}", status_code=204)
-def delete_variation(id: str):
-    v = _get("variation", id)
+def delete_variation(id: str, user: User):
+    v = _own("variation", id, user)
     store.delete("variation", id)
     Path(v["preview_path"]).unlink(missing_ok=True)
 
 
 @app.post("/api/variations/{id}/open-in-studio")
-def open_in_studio(id: str):
-    v = _get("variation", id)
-    arr = schemas.arrangement(v["arrangement"])
-    return store.update("project", v["project_id"], arrangement=arr, target_bpm=arr["bpm"], musical_key=arr["key"],
-                        random_seed=arr["seed"], variation_id=id)
+def open_in_studio(id: str, user: User):
+    return _pub_project(_open(_own("variation", id, user)))
 
 
 # ---------------------------------------------------------------- arrangement
 
+def _check_assets(project_id: str, arr: dict) -> None:
+    """An arrangement may only point at audio inside its own project (never another user's files)."""
+    p = (arr.get("bass") or {}).get("sample_path")
+    if p and (DATA_DIR / "projects" / project_id / "sounds").resolve() not in resolve_data(p).resolve().parents:
+        raise ValueError("808 sample must be a file uploaded to this project")
+
+
 @app.get("/api/projects/{id}/arrangement")
-def get_arrangement(id: str):
-    a = _get("project", id).get("arrangement")
+def get_arrangement(id: str, user: User):
+    a = _own("project", id, user).get("arrangement")
     if not a:
         raise HTTPException(404, "No arrangement yet: open a variation in the studio.")
     return a
 
 
 @app.put("/api/projects/{id}/arrangement")
-def put_arrangement(id: str, body: dict):
-    p = _get("project", id)
+def put_arrangement(id: str, body: dict, user: User):
+    p = _own("project", id, user)
     arr = schemas.arrangement(body)
+    _check_assets(id, arr)
     samples = {s["id"] for s in _samples(p)}
     missing = {e["sample_id"] for pat in arr["patterns"].values() for e in pat["events"] if e["type"] == "chop"} - samples
     if missing:
@@ -573,69 +941,86 @@ def put_arrangement(id: str, body: dict):
 
 
 @app.post("/api/projects/{id}/preview")
-def preview(id: str, body: schemas.PreviewRequest):
+def preview(id: str, body: schemas.PreviewRequest, user: User):
     """Renders through the same engine as export, so what you hear is what you export."""
-    p = _get("project", id)
+    p = _own("project", id, user)
     arr = schemas.arrangement(body.arrangement or p.get("arrangement") or {})
-    res = render.render(arr, {s["id"]: s for s in _samples(p)}, _sources(p), body.scope, body.loop_start_bar, body.loop_bars)
+    _check_assets(id, arr)
+    with jobs.heavy:  # never render alongside a running job: see jobs.heavy
+        res = render.render(arr, {s["id"]: s for s in _samples(p)}, _sources(p), body.scope, body.loop_start_bar, body.loop_bars)
+    del res["stems"]
     d = _dir(id, "previews")
-    for old in d.glob("studio_*.wav"):  # keep one studio preview on disk
+    for old in d.glob("studio_*"):  # keep one studio preview on disk
         old.unlink(missing_ok=True)
     name = f"studio_{store.new_id('r')}"
     render.write_preview(d / name, res["master"])
     return {"url": f"/api/projects/{id}/preview/{name}.wav", "metrics": res["metrics"],
+            "peaks": audio_io.peaks(res["master"], 400), "duration": round(len(res["master"]) / SR, 3),
             "start_bar": body.loop_start_bar if body.scope == "loop" else 0}
 
 
 @app.get("/api/projects/{id}/preview/{name}")
-def preview_file(id: str, name: str):
+def preview_file(id: str, name: str, user: User, format: str = "wav"):
+    _own("project", id, user)
     if not re.fullmatch(r"studio_r_[0-9a-f]{12}\.wav", name):
         raise HTTPException(404)
     f = DATA_DIR / "projects" / id / "previews" / name
     if not f.exists():
         raise HTTPException(404, "Preview expired; render again.")
+    if format == "mp3" and audio_io.ffmpeg_exe():
+        return FileResponse(_mp3(f), media_type="audio/mpeg")
     return FileResponse(f, media_type="audio/wav")
 
 
 @app.post("/api/projects/{id}/bass-sample", status_code=201)
-async def bass_sample(id: str, file: UploadFile = File(...)):
+async def bass_sample(id: str, user: User, file: UploadFile = File(...)):
     """A custom 808 one-shot (tuned from its root note at render time)."""
-    _get("project", id)
+    _own("project", id, user)
     tmp = _dir(id, "sounds") / f"upload{_ext(file.filename)}"
-    await _save_upload(file, tmp)
-    y = audio_io.decode(tmp)[: SR * 4]
-    tmp.unlink()
+    await _save_upload(file, tmp, 20)
+    try:
+        y = audio_io.decode(tmp)[: SR * 4]
+    finally:
+        tmp.unlink(missing_ok=True)
     out = audio_io.write_wav(_dir(id, "sounds") / f"808_{store.new_id('s')}.wav", y)
-    return {"sample_path": str(out)}
+    return {"sample_path": str(out.relative_to(DATA_DIR))}
 
 
 # ---------------------------------------------------------------- export
 
 @app.post("/api/projects/{id}/export", status_code=202)
-def export(id: str, body: schemas.ExportRequest):
-    p = _get("project", id)
+def export(id: str, body: schemas.ExportRequest, user: User):
+    p = _own("project", id, user)
     if not p.get("arrangement"):
         raise HTTPException(409, "Open a variation in the studio before exporting.")
+    _registered(user, "Create a free account to download your beat.")
+    accounts.require(user, "formats", body.format)
+    for flag, feature in ((body.stems, "stems"), (body.midi, "midi"), (body.project_json, "project_file")):
+        if flag:
+            accounts.require(user, feature)
     eid = store.new_id("exp")
     req = body.model_dump()
     store.put("export", {"id": eid, "project_id": id, "request": req, "status": "queued"}, parent=id)
     store.update("project", id, export_settings=req)
-    return {"export_id": eid, "job": jobs.submit("export", id, {"project_id": id, "export_id": eid, "request": req})}
+    job = jobs.submit("export", id, {"project_id": id, "export_id": eid, "request": req,
+                                     "license_text": accounts.license_text(user, p["name"])})
+    return {"export_id": eid, "job": job}
 
 
 @app.get("/api/projects/{id}/exports")
-def list_exports(id: str):
-    return store.list_("export", id)
+def list_exports(id: str, user: User):
+    _own("project", id, user)
+    return [_pub_export(e) for e in store.list_("export", id)]
 
 
 @app.get("/api/exports/{id}")
-def get_export(id: str):
-    return _get("export", id)
+def get_export(id: str, user: User):
+    return _pub_export(_own("export", id, user))
 
 
 @app.get("/api/exports/{id}/download")
-def download(id: str, name: str | None = None):
-    e = _get("export", id)
+def download(id: str, user: User, name: str | None = None):
+    e = _own("export", id, user)
     files = {f["name"]: f["path"] for f in e.get("files", [])}
     if not files:
         raise HTTPException(409, "Export is not finished.")
@@ -645,75 +1030,39 @@ def download(id: str, name: str | None = None):
     return FileResponse(files[name], filename=name)
 
 
-@app.post("/api/exports/{id}/reveal")
-def reveal(id: str):
-    folder = _get("export", id).get("folder")
-    if not folder or not Path(folder).is_dir():
-        raise HTTPException(409, "Export folder not available.")
-    if sys.platform == "win32":
-        os.startfile(folder)  # noqa: S606 - server-generated path, local app
-    else:
-        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", folder])
-    return {"folder": folder}
-
-
-# ---------------------------------------------------------------- kits
-
-@app.get("/api/kits")
-def kits():
-    return {k: {i: drums.kit_path(k, i).parent.name == "custom" for i in drums.INSTRUMENTS} for k in drums.KITS}
-
-
-def _kit_inst(kit, inst):
-    if kit not in drums.KITS or inst not in drums.INSTRUMENTS:
-        raise HTTPException(404, "Unknown kit or instrument")
-
+# ---------------------------------------------------------------- kits (built-in sounds, read-only)
 
 @app.get("/api/kits/{kit}/{inst}/audio")
 def kit_audio(kit: str, inst: str):
-    _kit_inst(kit, inst)
+    if kit not in drums.KITS or inst not in drums.INSTRUMENTS:
+        raise HTTPException(404, "Unknown kit or instrument")
     drums.sound(kit, inst)  # materialize the synthesized default
     return FileResponse(drums.kit_path(kit, inst), media_type="audio/wav")
-
-
-@app.post("/api/kits/{kit}/{inst}", status_code=201)
-async def kit_upload(kit: str, inst: str, file: UploadFile = File(...)):
-    _kit_inst(kit, inst)
-    tmp = data_path("kits", "_upload" + _ext(file.filename))
-    await _save_upload(file, tmp)
-    try:
-        drums.import_sound(kit, inst, tmp)
-    finally:
-        tmp.unlink(missing_ok=True)
-    return {"kit": kit, "inst": inst, "custom": True}
-
-
-@app.delete("/api/kits/{kit}/{inst}", status_code=204)
-def kit_reset(kit: str, inst: str):
-    _kit_inst(kit, inst)
-    drums.reset_sound(kit, inst)
 
 
 # ---------------------------------------------------------------- jobs
 
 @app.get("/api/jobs/{id}")
-def get_job(id: str):
-    return _get("job", id)
+def get_job(id: str, user: User):
+    return _own("job", id, user)
 
 
 @app.get("/api/projects/{id}/jobs")
-def project_jobs(id: str):
+def project_jobs(id: str, user: User):
+    _own("project", id, user)
     return sorted(store.list_("job", id), key=lambda j: -j["created_at"])[:50]
 
 
 @app.get("/api/jobs/{id}/events")
-async def job_events(id: str, request: Request):
-    _get("job", id)
+async def job_events(id: str, request: Request, user: User):
+    _own("job", id, user)
 
     async def stream():
         last = None
         while not await request.is_disconnected():
             job = store.get("job", id)
+            if job is None:
+                return
             s = json.dumps(job)
             if s != last:
                 yield f"data: {s}\n\n"
@@ -722,20 +1071,23 @@ async def job_events(id: str, request: Request):
                 return
             await asyncio.sleep(0.3)
 
-    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/jobs/{id}/cancel")
-def cancel_job(id: str):
-    _get("job", id)
+def cancel_job(id: str, user: User):
+    _own("job", id, user)
     return jobs.cancel(id)
 
 
 @app.post("/api/jobs/{id}/retry", status_code=202)
-def retry_job(id: str):
-    j = _get("job", id)
+def retry_job(id: str, user: User):
+    j = _own("job", id, user)
     if j["status"] not in ("failed", "canceled", "interrupted"):
         raise HTTPException(409, "Only failed, canceled or interrupted jobs can be retried.")
+    if j["job_type"] in GENERATION_JOBS:
+        accounts.check_generation(user)
     return jobs.retry(id)
 
 
@@ -749,37 +1101,13 @@ def health():
 @app.get("/api/system/capabilities")
 def capabilities():
     """Also serves as UI configuration: genres, strategies, kits and default settings come from here."""
-    free = shutil.disk_usage(DATA_DIR).free
-    return {"ffmpeg": audio_io.ffmpeg_exe() is not None, "sample_rate": SR, "data_dir": str(DATA_DIR),
-            "disk_free_gb": round(free / 1e9, 1), "schema_version": SCHEMA_VERSION,
+    return {"ffmpeg": audio_io.ffmpeg_exe() is not None, "sample_rate": SR, "schema_version": SCHEMA_VERSION,
             "genres": {k: {**v, "bpm": list(v["bpm"]), "swing": list(v["swing"])} for k, v in drums.GENRES.items()},
-            "strategies": compose.STRATEGIES, "kits": list(drums.KITS), "instruments": drums.INSTRUMENTS,
-            "track_of": drums.TRACK_OF, "fx_defaults": transform.DEFAULT_FX, "transform_defaults": transform.DEFAULT_TRANSFORM,
-            "bass_defaults": bass.DEFAULT_808,
-            "generate_defaults": schemas.GenerateSettings().model_dump(), "formats": list(render.FORMATS)}
-
-
-@app.get("/api/system/models")
-def models():
-    return [a.info() for a in separation.ADAPTERS.values()]
-
-
-@app.get("/api/system/audio-devices")
-def audio_devices():
-    return {"output": "browser", "note": "Playback uses the browser's audio output; pick the device in your OS or browser."}
-
-
-@app.delete("/api/system/cache")
-def clear_cache():
-    """Drops re-creatable transform/preview caches. Separated stems are kept (slow to recreate)."""
-    freed = 0
-    for sub in ("transforms", "previews"):
-        d = DATA_DIR / "cache" / sub
-        if d.exists():
-            freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
-            shutil.rmtree(d, ignore_errors=True)
-    transform._mem.clear()
-    return {"freed_mb": round(freed / 1e6, 1)}
+            "strategies": compose.STRATEGIES, "kits": {k: v["label"] for k, v in drums.KITS.items()},
+            "instruments": drums.INSTRUMENTS, "track_of": drums.TRACK_OF, "fx_defaults": transform.DEFAULT_FX,
+            "transform_defaults": transform.DEFAULT_TRANSFORM, "bass_defaults": bass.DEFAULT_808,
+            "generate_defaults": schemas.GenerateSettings().model_dump(), "formats": list(render.FORMATS),
+            "separation_models": [a.info() for a in separation.ADAPTERS.values()]}
 
 
 # ---------------------------------------------------------------- frontend (built SPA)
@@ -791,14 +1119,16 @@ if FRONTEND.is_dir():
             raise HTTPException(404)
         f = (FRONTEND / path).resolve()
         if path and f.is_file() and FRONTEND.resolve() in f.parents:
-            return FileResponse(f)
-        return FileResponse(FRONTEND / "index.html")
+            cache = "public, max-age=31536000, immutable" if path.startswith("assets/") else "public, max-age=300"
+            return FileResponse(f, headers={"Cache-Control": cache})
+        return FileResponse(FRONTEND / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 def main():
     import uvicorn
 
-    logging_level = os.environ.get("CHOPLAB_LOG", "info")
-    port = int(os.environ.get("CHOPLAB_PORT", "8765"))
-    log.info("ChopLab data dir: %s", DATA_DIR)
-    uvicorn.run("choplab.api:app", host="127.0.0.1", port=port, log_level=logging_level)
+    host = os.environ.get("CHOPLAB_HOST", "127.0.0.1")
+    port = int(os.environ.get("CHOPLAB_PORT") or os.environ.get("PORT") or "8765")
+    log.info("ChopLab data dir: %s (self-hosted=%s, billing=%s)", DATA_DIR, accounts.self_hosted(), billing.mode())
+    uvicorn.run("choplab.api:app", host=host, port=port, log_level=os.environ.get("CHOPLAB_LOG", "info"),
+                proxy_headers=os.environ.get("CHOPLAB_TRUST_PROXY") == "1")

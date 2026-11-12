@@ -3,6 +3,7 @@ import tempfile
 
 # isolate every test run from the user's real projects (DATA_DIR is read at import time)
 os.environ["CHOPLAB_DATA"] = tempfile.mkdtemp(prefix="choplab_test_")
+os.environ["CHOPLAB_SELF_HOSTED"] = "1"  # engine tests run unlocked; test_accounts.py covers the hosted rules
 os.environ["CHOPLAB_FRONTEND"] = os.path.join(os.environ["CHOPLAB_DATA"], "no_frontend")
 
 import numpy as np  # noqa: E402

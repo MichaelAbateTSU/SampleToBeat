@@ -48,5 +48,19 @@ def make(bpm: float = BPM, bars: int = BARS) -> np.ndarray:
     return np.stack([y, y * 0.98], axis=1).astype(np.float32)
 
 
+DEMO_SAMPLE = Path(__file__).parent / "assets" / "demo_soul.mp3"  # 24 s soul instrumental generated for ChopLab
+DEMO_NAME = "Demo soul loop.mp3"
+
+
 def write(path: Path) -> Path:
+    """The synthetic song as a WAV (tests: exact tempo and key)."""
     return audio_io.write_wav(path, make(), subtype="PCM_16")
+
+
+def write_sample(folder: Path) -> Path:
+    """The sample behind "Try the demo": a realistic soul loop (Rhodes, strings, bass, no drums)."""
+    if not DEMO_SAMPLE.exists():
+        return write(folder / "original.wav")
+    out = folder / "original.mp3"
+    out.write_bytes(DEMO_SAMPLE.read_bytes())
+    return out

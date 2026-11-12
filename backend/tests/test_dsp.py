@@ -81,14 +81,33 @@ def test_808_slide_glides_to_target_without_retrigger():
 
 @pytest.mark.parametrize("genre", list(drums.GENRES))
 def test_drum_patterns_are_deterministic_and_on_grid(genre):
-    a = drums.generate(genre, 0.6, seed=7, bars=2)
-    assert a == drums.generate(genre, 0.6, seed=7, bars=2)
-    assert a != drums.generate(genre, 0.6, seed=8, bars=2)
-    assert set(a) == {"main", "alt", "sparse", "fill"}
+    a = drums.generate(genre, 0.6, seed=7)
+    assert a == drums.generate(genre, 0.6, seed=7)
+    assert a != drums.generate(genre, 0.6, seed=8)
+    assert set(a) == {"main", "alt", "sparse", "fill", "cut"}
     hits = [h for lane in a.values() for h in lane]
-    assert hits and all(0 <= h["tick"] < 2 * TICKS_PER_BAR + 40 for h in hits)
+    assert hits and all(0 <= h["tick"] < 4 * TICKS_PER_BAR + 40 for h in hits)
     assert any(h["inst"] == "kick" and h["tick"] < 20 for h in a["main"])  # kick on the one
     assert {h["inst"] for h in a["main"]} <= set(drums.INSTRUMENTS)
+
+
+@pytest.mark.parametrize("genre", list(drums.GENRES))
+@pytest.mark.parametrize("seed", range(6))
+def test_hats_stay_out_of_the_way(genre, seed):
+    """What a listener called hi-hat abuse: constant 16ths, a roll in every bar, rolls that swell."""
+    main = drums.generate(genre, 0.9, seed)["main"]
+    hats = [h for h in main if h["inst"] == "hat"]
+    steady = [h for h in hats if not h.get("roll")]
+    assert len(steady) <= 8 * 4  # never more than eighth notes as the basic pulse
+    rolls = [h for h in hats if h.get("roll")]
+    bars_with_rolls = {h["tick"] // TICKS_PER_BAR for h in rolls}
+    assert len(bars_with_rolls) <= 2 and all(h["tick"] >= TICKS_PER_BAR for h in rolls)
+    for b in bars_with_rolls:  # no roll ends louder than it starts
+        r = sorted((h for h in rolls if h["tick"] // TICKS_PER_BAR == b), key=lambda h: h["tick"])
+        assert r[-1]["vel"] <= r[0]["vel"] + 0.05
+    cut = drums.generate(genre, 0.9, seed)["cut"]
+    tail = [h for h in cut if h["tick"] >= TICKS_PER_BAR + 8 * 120]
+    assert {h["inst"] for h in tail} <= {"snare"}  # the cut really is a cut
 
 
 @pytest.mark.parametrize("kit", list(drums.KITS))

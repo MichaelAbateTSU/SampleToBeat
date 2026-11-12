@@ -1,0 +1,15 @@
+services:
+  choplab:
+    build:
+      context: .
+      args:
+        VITE_SUPPORT_EMAIL: ${SUPPORT_EMAIL:-support@example.com}
+        VITE_LEGAL_ENTITY: ${LEGAL_ENTITY:-ChopLab}
+    env_file: .env
+    ports:
+      - "8765:8765"
+    volumes:
+      - choplab-data:/data
+    restart: unless-stopped
+volumes:
+  choplab-data:

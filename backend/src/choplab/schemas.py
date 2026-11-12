@@ -2,6 +2,7 @@
 checked here before it reaches the renderer or the store."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -50,6 +51,8 @@ class ChopEvent(_M):
     reverse: bool | None = None
     gain_db: Annotated[float, Field(ge=-60, le=24)] | None = None
     pan: Annotated[float, Field(ge=-1, le=1)] | None = None
+    tape: bool | None = None  # pitch by speed, like a record
+    harmonic: bool | None = None  # play only the harmonic part of the sample (its own drums removed)
 
     @model_validator(mode="after")
     def _order(self):
@@ -98,6 +101,7 @@ class Track(_M):
     muted: bool = False
     solo: bool = False
     choke: bool = False
+    duck: Annotated[float, Field(ge=0, le=0.9)] = 0.0
     fx: dict = {}
     clips: list[Clip] = []
 
@@ -142,7 +146,8 @@ class Arrangement(BaseModel):
         if bad:
             raise ValueError(f"unknown 808 settings: {sorted(bad)}")
         p = v.get("sample_path")
-        if p and DATA_DIR.resolve() not in Path(p).resolve().parents:
+        relative_ok = bool(re.fullmatch(r"projects/\w+/sounds/[\w.\-]+", str(p or "")))
+        if p and not (relative_ok or (Path(p).is_absolute() and DATA_DIR.resolve() in Path(p).resolve().parents)):
             raise ValueError("808 sample must be a file imported into ChopLab")
         return v
 
@@ -206,7 +211,8 @@ class ExportRequest(_M):
     loop_start_bar: Annotated[int, Field(ge=0)] = 0
     loop_bars: Annotated[int, Field(ge=1, le=64)] = 4
     stems: bool = False
-    project_json: bool = True
+    midi: bool = False
+    project_json: bool = False
 
 
 class ProjectCreate(_M):
@@ -269,3 +275,26 @@ class SampleUpdate(_M):
         if v and v.get("stretch_mode", "stretch") not in ("stretch", "tape"):
             raise ValueError("stretch_mode must be 'stretch' or 'tape'")
         return v
+
+
+class Credentials(_M):
+    email: Annotated[str, Field(max_length=254)]
+    password: Annotated[str, Field(max_length=256)]
+
+
+class EmailOnly(_M):
+    email: Annotated[str, Field(max_length=254)]
+
+
+class ResetPassword(_M):
+    token: Annotated[str, Field(max_length=200)]
+    password: Annotated[str, Field(max_length=256)]
+
+
+class Checkout(_M):
+    plan: Literal["pro", "studio"]
+    interval: Literal["monthly", "yearly"] = "monthly"
+
+
+class SeparateRequest(_M):
+    model_id: Annotated[str, Field(max_length=40)] = "demucs-fast"

@@ -2,6 +2,8 @@
 serialized through their own single-worker pool so two models never run at once."""
 from __future__ import annotations
 
+import os
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -11,8 +13,11 @@ from . import store
 from .core import log
 
 TERMINAL = {"completed", "failed", "canceled", "interrupted"}
-_pools = {"default": ThreadPoolExecutor(max_workers=2, thread_name_prefix="job"),
+_pools = {"default": ThreadPoolExecutor(max_workers=int(os.environ.get("CHOPLAB_WORKERS", "2")), thread_name_prefix="job"),
           "separation": ThreadPoolExecutor(max_workers=1, thread_name_prefix="sep")}
+# Rendering a beat takes over a gigabyte for a moment. Everything that renders (jobs and the studio preview)
+# takes this lock, so two renders never overlap and push the server past its memory.
+heavy = threading.Semaphore(int(os.environ.get("CHOPLAB_WORKERS", "2")))
 _cancel: set[str] = set()
 _handlers: dict[str, Callable] = {}
 
@@ -55,7 +60,8 @@ def _run(job_id: str, fn: Callable, params: dict) -> None:
     store.update("job", job_id, status="running", started_at=store.now())
     t0 = time.perf_counter()
     try:
-        result = fn(JobContext(job_id), **params)
+        with heavy:
+            result = fn(JobContext(job_id), **params)
         store.update("job", job_id, status="completed", progress=1.0, current_stage="done", result=result,
                      completed_at=store.now(), duration_s=round(time.perf_counter() - t0, 2))
     except Canceled:

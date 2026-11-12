@@ -3,41 +3,46 @@
 -e .
 absl-py==2.5.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via ml-collections
-annotated-doc==0.0.5 ; sys_platform == 'linux' or sys_platform == 'win32'
+annotated-doc==0.0.6 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via fastapi
 annotated-types==0.8.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via pydantic
-anyio==4.15.1 ; sys_platform == 'linux' or sys_platform == 'win32'
+anyio==4.16.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
+    #   fastapi
+    #   httpx
     #   starlette
     #   watchfiles
-audio-separator==0.47.1 ; sys_platform == 'linux' or sys_platform == 'win32'
+audio-separator==0.48.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
 audioread==3.1.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
 beartype==0.18.5 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via audio-separator
-certifi==2026.10.19 ; sys_platform == 'linux' or sys_platform == 'win32'
-    # via requests
+certifi==2026.10.23 ; sys_platform == 'linux' or sys_platform == 'win32'
+    # via
+    #   httpcore
+    #   httpx
+    #   requests
 cffi==2.1.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   samplerate
     #   soundfile
 charset-normalizer==3.5.2 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via requests
-click==8.5.0 ; sys_platform == 'linux' or sys_platform == 'win32'
+click==8.5.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via uvicorn
 cloudpickle==3.1.2 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via joblib
 colorama==0.4.6 ; sys_platform == 'win32'
     # via tqdm
-cuda-bindings==13.4.4 ; sys_platform == 'linux'
+cuda-bindings==13.5.0 ; sys_platform == 'linux'
     # via torch
-cuda-pathfinder==1.8.3 ; sys_platform == 'linux'
+cuda-pathfinder==1.8.6 ; sys_platform == 'linux'
     # via cuda-bindings
-cuda-toolkit==13.0.3.0 ; sys_platform == 'linux'
+cuda-toolkit==13.2.2 ; sys_platform == 'linux'
     # via torch
-cython==3.3.0 ; sys_platform == 'linux' or sys_platform == 'win32'
+cython==3.3.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   diffq
     #   diffq-fixed
@@ -51,23 +56,30 @@ einops==0.8.2 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   audio-separator
     #   rotary-embedding-torch
-fastapi==0.157.0 ; sys_platform == 'linux' or sys_platform == 'win32'
+fastapi==0.162.5 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
-filelock==4.2.4 ; sys_platform == 'linux' or sys_platform == 'win32'
+filelock==4.2.10 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via torch
 flatbuffers==25.12.19 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via onnxruntime
 fsspec==2026.9.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via torch
 h11==0.16.0 ; sys_platform == 'linux' or sys_platform == 'win32'
-    # via uvicorn
+    # via
+    #   httpcore
+    #   uvicorn
+httpcore==1.0.9 ; sys_platform == 'linux' or sys_platform == 'win32'
+    # via httpx
 httptools==0.9.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via uvicorn
+httpx==0.28.1 ; sys_platform == 'linux' or sys_platform == 'win32'
+    # via choplab
 idna==3.20 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   anyio
+    #   httpx
     #   requests
-imageio-ffmpeg==0.6.0 ; sys_platform == 'linux' or sys_platform == 'win32'
+imageio-ffmpeg==0.8.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
 jinja2==3.1.6 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via torch
@@ -93,13 +105,13 @@ ml-dtypes==0.6.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via onnx-weekly
 mpmath==1.3.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via sympy
-msgpack==1.2.3 ; sys_platform == 'linux' or sys_platform == 'win32'
+msgpack==1.2.4 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via librosa
-narwhals==2.27.1 ; sys_platform == 'linux' or sys_platform == 'win32'
+narwhals==2.28.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via scikit-learn
 networkx==3.7 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via torch
-numba==0.68.0 ; sys_platform == 'linux' or sys_platform == 'win32'
+numba==0.68.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   librosa
     #   resampy
@@ -124,30 +136,30 @@ numpy==2.5.4 ; sys_platform == 'linux' or sys_platform == 'win32'
     #   soundfile
     #   soxr
     #   torchvision
-nvidia-cublas==13.1.1.3 ; sys_platform == 'linux'
+nvidia-cublas==13.4.1.3 ; sys_platform == 'linux'
     # via
     #   cuda-toolkit
     #   nvidia-cudnn-cu13
     #   nvidia-cusolver
-nvidia-cuda-cupti==13.0.85 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+nvidia-cuda-cccl==13.3.5.0.6 ; sys_platform == 'linux'
+    # via nvidia-nvshmem-cu13
+nvidia-cuda-cupti==13.2.86 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via cuda-toolkit
-nvidia-cuda-nvrtc==13.0.88 ; sys_platform == 'linux'
+nvidia-cuda-nvrtc==13.2.86 ; sys_platform == 'linux'
     # via
     #   cuda-toolkit
     #   nvidia-cublas
-nvidia-cuda-runtime==13.0.96 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+nvidia-cuda-runtime==13.2.86 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via cuda-toolkit
-nvidia-cudnn-cu13==9.24.0.43 ; sys_platform == 'linux'
+nvidia-cudnn-cu13==9.26.0.51 ; sys_platform == 'linux'
     # via torch
-nvidia-cufft==12.0.0.61 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+nvidia-cufft==12.2.0.57 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via cuda-toolkit
-nvidia-cufile==1.15.1.6 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+nvidia-cufile==1.17.1.22 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via cuda-toolkit
-nvidia-curand==10.4.0.35 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+nvidia-cusolver==12.2.0.11 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via cuda-toolkit
-nvidia-cusolver==12.0.4.66 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
-    # via cuda-toolkit
-nvidia-cusparse==12.6.3.3 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+nvidia-cusparse==12.7.10.12 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   cuda-toolkit
     #   nvidia-cusolver
@@ -155,17 +167,17 @@ nvidia-cusparselt-cu13==0.8.1 ; sys_platform == 'linux'
     # via torch
 nvidia-nccl-cu13==2.30.7 ; sys_platform == 'linux'
     # via torch
-nvidia-nvjitlink==13.4.92 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+nvidia-nvjitlink==13.5.37 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   cuda-toolkit
     #   nvidia-cufft
     #   nvidia-cusolver
     #   nvidia-cusparse
-nvidia-nvshmem-cu13==3.4.5 ; sys_platform == 'linux'
+nvidia-nvshmem-cu13==3.7.2 ; sys_platform == 'linux'
     # via torch
-nvidia-nvtx==13.0.85 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+nvidia-nvtx==13.2.86 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via cuda-toolkit
-onnx-weekly==1.24.0.dev20261019 ; sys_platform == 'linux' or sys_platform == 'win32'
+onnx-weekly==1.24.0.dev20261102 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   audio-separator
     #   onnx2torch-py313
@@ -173,7 +185,7 @@ onnx2torch-py313==1.6.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via audio-separator
 onnxruntime==1.31.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via audio-separator
-opentelemetry-api==1.45.1 ; sys_platform == 'linux' or sys_platform == 'win32'
+opentelemetry-api==1.45.2 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via fastapi
 packaging==26.3 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
@@ -185,7 +197,7 @@ pedalboard==0.9.26 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
 pillow==13.0.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via torchvision
-platformdirs==4.13.5 ; sys_platform == 'linux' or sys_platform == 'win32'
+platformdirs==4.14.5 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via pooch
 pooch==1.9.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via librosa
@@ -193,13 +205,13 @@ protobuf==7.36.2 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   onnx-weekly
     #   onnxruntime
-pycparser==3.11 ; (implementation_name != 'PyPy' and sys_platform == 'linux') or (implementation_name != 'PyPy' and sys_platform == 'win32')
+pycparser==3.12 ; (implementation_name != 'PyPy' and sys_platform == 'linux') or (implementation_name != 'PyPy' and sys_platform == 'win32')
     # via cffi
-pydantic==2.14.1 ; sys_platform == 'linux' or sys_platform == 'win32'
+pydantic==2.14.3 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   choplab
     #   fastapi
-pydantic-core==2.50.1 ; sys_platform == 'linux' or sys_platform == 'win32'
+pydantic-core==2.50.4 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via pydantic
 pydub==0.25.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via audio-separator
@@ -207,7 +219,7 @@ pyloudnorm==0.2.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
 python-dotenv==1.2.4 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via uvicorn
-python-multipart==0.0.32 ; sys_platform == 'linux' or sys_platform == 'win32'
+python-multipart==0.0.33 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via choplab
 pyyaml==6.0.3 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
@@ -244,13 +256,13 @@ soundfile==0.14.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     #   librosa
 soxr==1.1.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via librosa
-starlette==1.9.0 ; sys_platform == 'linux' or sys_platform == 'win32'
+starlette==1.10.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via fastapi
 sympy==1.14.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via torch
-threadpoolctl==3.7.0 ; sys_platform == 'linux' or sys_platform == 'win32'
+threadpoolctl==3.8.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via scikit-learn
-torch==2.14.1 ; sys_platform == 'linux' or sys_platform == 'win32'
+torch==2.15.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   audio-separator
     #   diffq
@@ -259,17 +271,16 @@ torch==2.14.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     #   onnx2torch-py313
     #   rotary-embedding-torch
     #   torchvision
-torchvision==0.29.1 ; sys_platform == 'linux' or sys_platform == 'win32'
+torchvision==0.29.2 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via onnx2torch-py313
 tqdm==4.70.1 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via audio-separator
-triton==3.8.0 ; sys_platform == 'linux'
+triton==3.9.0 ; sys_platform == 'linux'
     # via torch
 typing-extensions==4.16.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   anyio
     #   fastapi
-    #   onnx-weekly
     #   opentelemetry-api
     #   pydantic
     #   pydantic-core
@@ -277,7 +288,7 @@ typing-extensions==4.16.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     #   starlette
     #   torch
     #   typing-inspection
-typing-inspection==0.4.4 ; sys_platform == 'linux' or sys_platform == 'win32'
+typing-inspection==0.4.5 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via
     #   fastapi
     #   pydantic
@@ -289,5 +300,5 @@ uvloop==0.23.0 ; platform_python_implementation != 'PyPy' and sys_platform == 'l
     # via uvicorn
 watchfiles==1.3.0 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via uvicorn
-websockets==17.3 ; sys_platform == 'linux' or sys_platform == 'win32'
+websockets==17.4 ; sys_platform == 'linux' or sys_platform == 'win32'
     # via uvicorn

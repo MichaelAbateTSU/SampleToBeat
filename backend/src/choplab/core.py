@@ -26,6 +26,12 @@ def data_path(*parts: str) -> Path:
     return p
 
 
+def resolve_data(path: str) -> Path:
+    """Stored asset references are relative to DATA_DIR (older projects stored absolute paths)."""
+    p = Path(path)
+    return p if p.is_absolute() else DATA_DIR / p
+
+
 def seconds_per_beat(bpm: float) -> float:
     return 60.0 / bpm
 

@@ -54,7 +54,7 @@ def test_every_strategy_yields_a_valid_playable_arrangement(world, variations):
         assert schemas.arrangement(arr) == arr, strat  # generator output is already schema-clean
         m = res["metrics"]
         assert m["true_peak_dbfs"] <= -0.99 and m["clipped_samples"] == 0, strat
-        assert m["lufs"] == pytest.approx(-14, abs=1.5), strat
+        assert m["lufs"] == pytest.approx(arr["master"]["target_lufs"], abs=1.5), strat
         assert np.isfinite(res["master"]).all() and res["master"].shape[1] == 2
         assert len(res["master"]) == ticks_to_samples(arr["bars"] * TICKS_PER_BAR, arr["bpm"]) + int(render.TAIL_S * SR)
         assert {"kick", "snare", "bass"} <= set(res["stems"]), strat
