@@ -118,6 +118,7 @@ def main() -> None:
     grids = [abs(g[0]) for g, _, _ in summary if g is not None]
     ok = [b[0] for _, b, _ in summary if b]
     clash = [b[1] for _, b, _ in summary if b]
+    ok, clash = ok or [float("nan")], clash or [float("nan")]  # no 808 at all when every sample kept its own bass
     print(f"\nOVERALL  mean |timing offset| {np.mean(grids):.1f} ms   bass in-harmony {np.mean(ok):.1f}%   bass clashes {np.mean(clash):.1f}%   "
           f"median stretch {100 * np.median([s for _, _, s in summary]):.1f}%   flips {len(summary)}")
     t = np.array(tilt)
