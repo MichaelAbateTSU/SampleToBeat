@@ -633,8 +633,8 @@ async def _add_source(project: dict, user: dict, file: UploadFile | None) -> dic
     if file is None:
         from . import demo
 
-        dest = demo.write(_dir(pid, "sources", sid) / "original.wav")
-        filename = "ChopLab demo (synthetic soul loop).wav"
+        dest = demo.write_sample(_dir(pid, "sources", sid))
+        filename = demo.DEMO_NAME
     else:
         dest = _dir(pid, "sources", sid) / f"original{_ext(file.filename)}"
         try:

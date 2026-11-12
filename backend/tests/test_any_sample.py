@@ -34,12 +34,17 @@ def test_tight_loop_gets_exact_tempo_and_is_used_whole(tmp_path, demo_audio, bar
     assert ev["passed"], [c for c in ev["checks"] if not c["ok"]]
 
 
-def test_loosely_cut_snippet_still_tiles_on_the_grid(tmp_path, demo_audio):
-    y = demo_audio[: int(7.4 * SPB * SR)]  # not a whole number of beats
-    doc, found, arr, ev = _beat(tmp_path, y, "loose")
+def test_a_nearly_whole_bar_cut_is_used_as_a_loop_and_an_arbitrary_excerpt_is_not(tmp_path, demo_audio):
+    near = demo_audio[: int(7.85 * SPB * SR)]  # two bars cut a touch short
+    doc, found, arr, ev = _beat(tmp_path, near, "near")
     whole = found[0]
-    assert whole.get("full") and whole["beats"] == 8 and not doc["loop_locked"]
-    assert whole["source_bpm"] == pytest.approx(60 * 8 / (len(y) / SR), rel=1e-3)  # its own tempo, so 8 beats fill 2 bars
+    assert whole.get("full") and whole["beats"] == 8
+    assert whole["source_bpm"] == pytest.approx(60 * 8 / (len(near) / SR), rel=1e-3)  # its own tempo, so 8 beats fill 2 bars
+    assert ev["passed"], [c for c in ev["checks"] if not c["ok"]]
+
+    loose = demo_audio[: int(10.4 * SPB * SR)]  # 2.6 bars: not a loop, so only the loops inside it are offered
+    doc, found, arr, ev = _beat(tmp_path, loose, "loose")
+    assert not any(s.get("full") for s in found) and found[0]["kind"] == "loop"
     assert ev["passed"], [c for c in ev["checks"] if not c["ok"]]
 
 

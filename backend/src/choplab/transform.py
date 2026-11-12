@@ -15,6 +15,7 @@ from .core import SR, cache_key, data_path
 DEFAULT_TRANSFORM = {
     "pitch_semitones": 0.0, "pitch_cents": 0.0, "stretch_mode": "stretch", "preserve_formants": False,
     "reverse": False, "gain_db": 0.0, "fade_in_ms": 5.0, "fade_out_ms": 8.0,
+    "harmonic": False,  # keep only the sustained (harmonic) part: removes most of a record's own drums
 }
 DEFAULT_FX = {
     "highpass_hz": 0.0, "lowpass_hz": 0.0, "saturation": 0.0, "bitcrush_bits": 0, "reverb": 0.0,
@@ -136,6 +137,18 @@ def effects(y: np.ndarray, fx: dict, bpm: float = 90.0, seed: int = 0) -> np.nda
     return y
 
 
+def harmonic_only(y: np.ndarray) -> np.ndarray:
+    """Median-filter harmonic/percussive separation, keeping the harmonic part. Producers flip records that
+    already have drums by filtering them down; this does the same job more cleanly so the new drums do not
+    flam against the old ones."""
+    import librosa
+
+    if len(y) < 4096:
+        return y
+    out = [librosa.effects.harmonic(np.ascontiguousarray(y[:, c]), margin=1.5) for c in range(y.shape[1])]
+    return np.stack(out, axis=1).astype(np.float32)
+
+
 def tape_rate(t: dict) -> float:
     """How much faster a tape-mode transform plays the audio (1.0 in stretch mode)."""
     t = {**DEFAULT_TRANSFORM, **(t or {})}
@@ -144,6 +157,8 @@ def tape_rate(t: dict) -> float:
 
 def transform(y: np.ndarray, t: dict, speed: float = 1.0) -> np.ndarray:
     t = {**DEFAULT_TRANSFORM, **(t or {})}
+    if t["harmonic"]:
+        y = harmonic_only(y)
     y = pitch_stretch(y, t["pitch_semitones"] + t["pitch_cents"] / 100.0, speed, t["stretch_mode"],
                       t["preserve_formants"])
     if t["reverse"]:

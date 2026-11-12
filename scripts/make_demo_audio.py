@@ -1,4 +1,4 @@
-"""Renders the audio on the landing page with the real engine: the built-in synthetic loop and two flips of it.
+"""Renders the audio on the landing page with the real engine: the demo soul sample and four flips of it.
 Run from the repo root:  cd backend && uv run python ../scripts/make_demo_audio.py"""
 import json
 import os
@@ -13,16 +13,16 @@ from choplab.core import SR  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "frontend" / "public" / "demo"
 FLIPS = [  # id, title, genre, strategy, seed  (one per pad on the landing page)
-    ("boombap", "Boom bap", "boombap", "hard_chop", 21),
-    ("trap", "Dark trap", "trap", "dark", 8),
-    ("lofi", "Lo-fi", "lofi", "loop_flip", 5),
-    ("drill", "Drill", "drill", "creative", 13),
+    ("boombap", "Boom bap", "boombap", "loop_flip", 21),
+    ("trap", "Trap", "trap", "dark", 8),
+    ("lofi", "Lo-fi", "lofi", "hard_chop", 5),
+    ("drill", "Drill", "drill", "loop_flip", 13),
 ]
 
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    loop = demo.make()[: int(8 * 4 * 60 / demo.BPM * SR)]  # the 8 harmonic bars
+    loop = audio_io.decode(demo.DEMO_SAMPLE)
     wav = audio_io.write_wav(Path(os.environ["CHOPLAB_DATA"]) / "loop.wav", loop)
     src = {"id": "demo", "internal_audio_path": str(wav), "content_hash": "demo", "stems": {}}
     doc, feats = analysis.analyze(loop)
@@ -30,7 +30,7 @@ def main() -> None:
     by = {s["id"]: s for s in samples}
     audio_io.write_mp3(OUT / "sample.mp3", loop, bitrate="128k")
     out = [{"id": "demo-sample", "url": "/demo/sample.mp3", "title": "The sample", "source": True,
-            "bpm": doc["bpm"], "key": doc["key"], "peaks": audio_io.peaks(loop, 160), "duration": round(len(loop) / SR, 2)}]
+            "bpm": round(doc["bpm"]), "key": doc["key"], "peaks": audio_io.peaks(loop, 160), "duration": round(len(loop) / SR, 2)}]
     for fid, title, genre, strategy, seed in FLIPS:
         arr = compose.variation({"genre": genre, "bars": 16}, samples, {"demo": src}, {"demo": doc}, strategy, seed)
         res = render.render(arr, by, {"demo": src})
@@ -38,7 +38,7 @@ def main() -> None:
         assert ev["passed"], [c for c in ev["checks"] if not c["ok"]]
         audio_io.write_mp3(OUT / f"{fid}.mp3", res["master"], bitrate="128k")
         out.append({"id": f"demo-{fid}", "url": f"/demo/{fid}.mp3", "title": title,
-                    "bpm": arr["bpm"], "key": arr["key"], "style": compose.STRATEGIES[strategy].split(":")[0],
+                    "bpm": round(arr["bpm"]), "key": arr["key"], "style": compose.STRATEGIES[strategy].split(":")[0],
                     "peaks": audio_io.peaks(res["master"], 160), "duration": round(len(res["master"]) / SR, 2)})
         print(title, arr["meta"]["description"])
     (ROOT / "frontend" / "src" / "demos.json").write_text(json.dumps(out) + "\n")

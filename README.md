@@ -45,16 +45,21 @@ relying on it.
 
 ## How a beat is made
 
-1. **Read the sample.** Tempo, beat grid, downbeat, key, onsets and structure. A tightly cut loop gets its
-   exact tempo from its length; a single hit is recognised as a one-shot.
-2. **Find the material.** Short uploads are used whole. Longer recordings are searched for the best loops and
-   chops (harmonic stability, phrase coherence, how cleanly it loops, level, distinctiveness, bleed).
-3. **Compose four flips**, one per strategy: loop flip, hard chops, dark and pitched, creative. Each has
-   genre-specific drums with swing and fills, an 808 line that follows the chords of the flipped sample, and an
-   arrangement with intro, hooks, verses, breakdown and outro. One-shots are played as a minor-key melody.
-4. **Render and check.** Every flip is mixed, mastered to -14 LUFS with a true-peak ceiling and run through
-   technical checks (not silent, not clipped, no dead sections, distinct from its siblings). Failures are
-   regenerated with a new seed.
+1. **Read the sample.** Tempo comes from how the music repeats (note attacks and chord changes), then the grid
+   is lined up with the attacks themselves. Key, the sample's own swing, and how much of it is drums are measured
+   too. A tightly cut loop gets its exact tempo from its length; a single hit is recognised as a one-shot.
+2. **Find the material.** Longer recordings are searched for the best loops (harmonic stability, phrase
+   coherence, how cleanly it loops, level, distinctiveness). A file is used whole only if it was cut as a loop.
+3. **Compose four flips**: loop flip, chopped, slowed, sped up. The sample is fitted to the genre's tempo the way
+   a record is: change speed and pitch together, play it half or double time, and stretch by 8% at most. Chops
+   are equal slices re-ordered on the beat. Drums swing as much as the sample does, each drum keeps its own
+   constant lean against the grid, and the 808 plays the roots the sample's own bass plays.
+4. **Render and check.** The sample dips under each kick, the mix goes through gentle bus compression and is
+   mastered to -11 LUFS with a true-peak ceiling, then run through technical checks (not silent, not clipped, no
+   dead sections, distinct from its siblings). Failures are regenerated with a new seed.
+
+`scripts/diagnose.py` measures tempo, timing against the grid, bass-to-sample agreement and tonal balance on the
+recordings in `backend/tests/audio`, and writes each flip as an MP3 for listening.
 
 Everything is seeded, so a flip can be reproduced exactly.
 

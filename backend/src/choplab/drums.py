@@ -17,16 +17,19 @@ TRACK_OF = {"kick": "kick", "snare": "snare", "clap": "snare", "rim": "perc", "h
             "perc": "perc", "crash": "fx"}
 CHOKE = {"hat": "hh", "openhat": "hh"}
 
+KIT_VERSION = 2  # bump when the synthesis changes, so cached kit files are rebuilt
 KITS = {
-    "boombap": {"label": "Boom Bap Classic", "kick": (55, 170, 0.28, 0.6, 1.6), "snare": (185, 0.2, 0.9, 9000),
-                "hat": (0.05, 7000), "post": {"saturation": 0.25}},
-    "trap": {"label": "Modern Trap", "kick": (48, 200, 0.45, 0.8, 2.2), "snare": (200, 0.16, 0.8, 12000),
-             "hat": (0.035, 8500), "post": {}},
-    "drill": {"label": "Dark Drill", "kick": (50, 180, 0.35, 0.7, 2.0), "snare": (230, 0.14, 1.0, 11000),
-              "hat": (0.03, 9000), "post": {"saturation": 0.1}},
-    "lofi": {"label": "Lo-fi Warm", "kick": (58, 140, 0.25, 0.3, 1.2), "snare": (175, 0.18, 0.6, 5500),
-             "hat": (0.06, 5000), "post": {"lowpass_hz": 6500, "bitcrush_bits": 12, "saturation": 0.3}},
+    # kick: (start Hz, end Hz, sweep ms, decay s, click, drive) / snare: (tone Hz, body decay, noise decay, band lo, band hi)
+    "boombap": {"label": "Boom Bap Classic", "kick": (150, 52, 28, 0.22, 0.5, 2.0), "snare": (185, 0.11, 0.16, 600, 6500),
+                "hat": (0.035, 6500, 13000), "post": {"saturation": 0.2}},
+    "trap": {"label": "Modern Trap", "kick": (190, 58, 18, 0.16, 0.8, 2.6), "snare": (210, 0.08, 0.13, 900, 8500),
+             "hat": (0.028, 7500, 14000), "post": {}},
+    "drill": {"label": "Dark Drill", "kick": (170, 55, 20, 0.18, 0.7, 2.4), "snare": (235, 0.07, 0.11, 1000, 9000),
+              "hat": (0.025, 8000, 14000), "post": {"saturation": 0.1}},
+    "lofi": {"label": "Lo-fi Warm", "kick": (120, 60, 35, 0.20, 0.2, 1.4), "snare": (170, 0.12, 0.15, 500, 4200),
+             "hat": (0.045, 5000, 9000), "post": {"lowpass_hz": 7000, "bitcrush_bits": 12, "saturation": 0.25}},
 }
+METAL = (205.3, 304.4, 369.6, 522.7, 540.0, 800.0)  # the six square oscillators of a TR-808 cymbal
 
 
 def _filt(y, *plugins):
@@ -38,38 +41,53 @@ def _t(sec):
     return np.arange(int(sec * SR)) / SR
 
 
+def _band(noise, lo, hi):
+    """Steep band-pass (two cascaded stages each side): drum noise needs a defined colour, not white hiss."""
+    return _filt(noise.astype(np.float32), pb.HighpassFilter(lo), pb.HighpassFilter(lo), pb.LowpassFilter(hi), pb.LowpassFilter(hi))
+
+
 def synth(kit: str, inst: str) -> np.ndarray:
+    """Analogue-drum-machine recipes: every hit is layered the way the classic circuits (and producers stacking
+    samples) build them: a tuned body, a noise layer shaped into its own band, and a short transient on top."""
     k = KITS[kit]
     rng = np.random.default_rng(INSTRUMENTS.index(inst) + 7)  # deterministic kit sounds
+    white = lambda n: rng.uniform(-1, 1, n)
     if inst == "kick":
-        f0, f1, decay, click, drive = k["kick"]
-        t = _t(0.9)
-        f = f0 + (f1 - f0) * np.exp(-t / 0.025)
-        y = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t / decay)
-        n = int(0.004 * SR)
-        y[:n] += click * rng.uniform(-1, 1, n) * np.linspace(1, 0, n)
-        y = np.tanh(drive * y)
+        f0, f1, sweep, decay, click, drive = k["kick"]
+        t = _t(0.7)
+        f = f1 + (f0 - f1) * np.exp(-t / (sweep / 1000))
+        body = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t / decay)
+        punch = np.sin(2 * np.pi * np.cumsum(2.2 * f) / SR) * np.exp(-t / 0.022) * 0.35  # knock in the low mids
+        y = body + punch
+        n = int(0.005 * SR)
+        y[:n] += click * 0.5 * _band(white(n * 4), 1800, 9000)[:n] * np.linspace(1, 0, n) ** 2
+        y = np.tanh(drive * y) / np.tanh(drive)
+        y = _filt(y.astype(np.float32), pb.HighpassFilter(28), pb.LowpassFilter(10000))
     elif inst == "snare":
-        tone, decay, noise, lp = k["snare"]
-        t = _t(0.5)
-        body = np.sin(2 * np.pi * tone * t) * np.exp(-t / 0.05)
-        nz = _filt(rng.uniform(-1, 1, len(t)).astype(np.float32), pb.HighpassFilter(1200), pb.LowpassFilter(lp))
-        y = 0.6 * body + noise * nz * np.exp(-t / decay) * 1.6
-    elif inst == "clap":
+        tone, body_decay, noise_decay, lo, hi = k["snare"]
         t = _t(0.45)
-        env = sum(np.where(t >= d, np.exp(-(t - d) / 0.008), 0) for d in (0, 0.011, 0.023)) * 0.6
-        env += np.where(t >= 0.03, np.exp(-(t - 0.03) / 0.12), 0)
-        y = _filt(rng.uniform(-1, 1, len(t)).astype(np.float32), pb.HighpassFilter(900), pb.LowpassFilter(4000)) * env * 2
+        drop = 1 + 0.6 * np.exp(-t / 0.012)  # the shell pitch falls as it is struck
+        body = (np.sin(2 * np.pi * np.cumsum(tone * drop) / SR) + 0.55 * np.sin(2 * np.pi * np.cumsum(tone * 1.78 * drop) / SR)) * np.exp(-t / body_decay)
+        wires = _band(white(len(t)), lo, hi) * np.exp(-t / noise_decay)
+        snap = _band(white(len(t)), 4000, 14000) * np.exp(-t / 0.004)
+        y = np.tanh(1.6 * (0.95 * body + 0.85 * wires + 0.35 * snap))
+    elif inst == "clap":
+        t = _t(0.4)
+        env = sum(np.where(t >= d, np.exp(-(t - d) / 0.006), 0) for d in (0.0, 0.009, 0.018, 0.028)) * 0.7
+        env += np.where(t >= 0.03, np.exp(-(t - 0.03) / 0.09), 0)
+        y = np.tanh(1.5 * (_band(white(len(t)), 900, 3800) * 2.2 + 0.35 * _band(white(len(t)), 5000, 12000)) * env)
     elif inst in ("hat", "openhat", "ride", "crash"):
-        decay, hp = k["hat"]
-        decay = {"hat": decay, "openhat": decay * 6, "ride": 0.6, "crash": 1.1}[inst]
-        t = _t(min(2.0, decay * 8))
-        metal = sum(np.sign(np.sin(2 * np.pi * f * t)) for f in (205.3, 304.4, 369.6, 522.7, 540.0, 800.0)) / 6
-        y = _filt((0.6 * metal + 0.6 * rng.uniform(-1, 1, len(t))).astype(np.float32),
-                  pb.HighpassFilter({"crash": 4000, "ride": 2500}.get(inst, hp))) * np.exp(-t / decay)
+        decay, lo, hi = k["hat"]
+        decay = {"hat": decay, "openhat": decay * 8, "ride": 0.5, "crash": 1.0}[inst]
+        lo = {"crash": 3500, "ride": 4500}.get(inst, lo)
+        t = _t(min(2.2, decay * 9))
+        metal = sum(np.sign(np.sin(2 * np.pi * f * 1.48 * t)) for f in METAL) / 6
+        mix = 0.75 * metal + 0.35 * white(len(t)) if inst in ("hat", "openhat", "ride") else 0.45 * metal + 0.7 * white(len(t))
+        y = _band(mix, lo, hi) * np.exp(-t / decay)
+        y[: int(0.002 * SR)] *= np.linspace(0.3, 1, int(0.002 * SR))
     elif inst == "rim":
         t = _t(0.12)
-        y = (np.sin(2 * np.pi * 1700 * t) + 0.7 * np.sin(2 * np.pi * 820 * t)) * np.exp(-t / 0.018)
+        y = (np.sin(2 * np.pi * 1700 * t) + 0.7 * np.sin(2 * np.pi * 820 * t)) * np.exp(-t / 0.016) + 0.4 * _band(white(len(t)), 2500, 9000) * np.exp(-t / 0.004)
     else:  # perc: conga-like tom
         t = _t(0.35)
         f = 210 + 90 * np.exp(-t / 0.02)
@@ -88,7 +106,7 @@ def synth(kit: str, inst: str) -> np.ndarray:
 
 def kit_path(kit: str, inst: str) -> Path:
     custom = data_path("kits", kit, "custom", f"{inst}.wav")
-    return custom if custom.exists() else data_path("kits", kit, f"{inst}.wav")
+    return custom if custom.exists() else data_path("kits", f"v{KIT_VERSION}", kit, f"{inst}.wav")
 
 
 @lru_cache(maxsize=64)
@@ -118,10 +136,10 @@ def reset_sound(kit: str, inst: str) -> None:
 # ---------------------------------------------------------------- patterns
 
 GENRES = {
-    "boombap": {"label": "Boom bap", "bpm": (84, 96), "swing": (56, 62), "kit": "boombap"},
+    "boombap": {"label": "Boom bap", "bpm": (84, 96), "swing": (54, 62), "kit": "boombap"},
     "trap": {"label": "Trap", "bpm": (130, 150), "swing": (50, 52), "kit": "trap"},
     "drill": {"label": "Drill", "bpm": (138, 146), "swing": (50, 51), "kit": "drill"},
-    "lofi": {"label": "Lo-fi hip-hop", "bpm": (72, 88), "swing": (58, 64), "kit": "lofi"},
+    "lofi": {"label": "Lo-fi hip-hop", "bpm": (72, 88), "swing": (56, 64), "kit": "lofi"},
 }
 KICK_PROB = {
     "boombap": {0: 1, 10: .75, 7: .35, 3: .25, 8: .2, 14: .2, 15: .15, 11: .2},
@@ -129,7 +147,11 @@ KICK_PROB = {
     "drill": {0: 1, 3: .2, 5: .3, 6: .25, 10: .45, 11: .4, 14: .3},
     "lofi": {0: 1, 7: .4, 10: .6, 8: .15, 2: .15},
 }
-HUMANIZE = {"boombap": 6, "lofi": 9, "trap": 2, "drill": 2}
+HUMANIZE = {"boombap": 3, "lofi": 4, "trap": 0, "drill": 0}  # random timing, in ticks (1 tick ~ 1.4 ms at 90 BPM)
+# The feel is programmed, not random: each drum sits a constant distance from the grid for the whole beat (the kick
+# a touch early, the snare late and lazy in boom bap / lo-fi), while trap and drill stay machine tight.
+LAY = {"boombap": {"kick": -4, "snare": 9, "hat": 0}, "lofi": {"kick": -5, "snare": 16, "hat": 4, "perc": 6},
+       "trap": {}, "drill": {}}
 
 
 def _hit(tick, inst, vel, **kw):
@@ -149,7 +171,7 @@ def _bar(genre, rng, complexity, bar, kicks=True):
     h = _kicks(genre, rng, complexity, bar) if kicks else []
     if genre in ("boombap", "lofi"):
         for s in (4, 12):
-            h.append(_hit(b0 + s * STEP_TICKS + (10 if genre == "lofi" else 0), "snare", .95 if genre == "boombap" else .75))
+            h.append(_hit(b0 + s * STEP_TICKS, "snare", .95 if genre == "boombap" else .75))
         for s in (7, 9, 15, 13):
             if rng.random() < .22 * complexity:
                 h.append(_hit(b0 + s * STEP_TICKS, "snare", rng.uniform(.22, .34)))  # ghost note
@@ -189,12 +211,13 @@ def _bar(genre, rng, complexity, bar, kicks=True):
 
 
 def _humanize(hits, genre, rng):
-    amt = HUMANIZE[genre]
+    amt, lay = HUMANIZE[genre], LAY[genre]
     for x in hits:
-        if x.get("roll") or x["tick"] % TICKS_PER_BAR == 0:
-            continue  # protect the downbeat anchor and rolls
-        x["tick"] = int(max(0, x["tick"] + rng.integers(-amt, amt + 1)))
-        x["vel"] = round(float(np.clip(x["vel"] + rng.uniform(-.06, .06), .05, 1)), 3)
+        if x.get("roll"):
+            continue
+        if x["tick"] % TICKS_PER_BAR:  # the downbeat stays put: it is the anchor everything else leans on
+            x["tick"] = int(max(0, x["tick"] + lay.get(x["inst"], 0) + (rng.integers(-amt, amt + 1) if amt else 0)))
+        x["vel"] = round(float(np.clip(x["vel"] + rng.uniform(-.05, .05), .05, 1)), 3)
     return sorted(hits, key=lambda x: (x["tick"], x["inst"]))
 
 

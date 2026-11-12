@@ -17,6 +17,7 @@ from .core import PPQ, SR, TICKS_PER_BAR, db_to_gain, swing_offset_ticks, ticks_
 
 TAIL_S = 2.0  # reverb/808 ring-out after the last bar (full renders); wrapped to the start for loops
 CEILING_DB = -1.0  # true-peak ceiling
+LEAD = int(0.03 * SR)
 
 
 class MissingAsset(ValueError):
@@ -47,10 +48,17 @@ def _place(out: np.ndarray, y: np.ndarray, pos: int) -> None:
         out[pos:pos + n] += y[:n]
 
 
-def sample_buffer(s: dict, src: dict, bpm: float, ratio: float, pitch: float) -> tuple[np.ndarray, float]:
-    """The sample region stretched to the project tempo (ratio = project beats per source beat) and pitched."""
+def sample_buffer(s: dict, src: dict, bpm: float, ratio: float, pitch: float, tape: bool = False,
+                  harmonic: bool = False) -> tuple[np.ndarray, float]:
+    """The sample region fitted to the project tempo (ratio = project beats per source beat) and pitched.
+    tape=True pitches by changing speed, like a record or tape (no time-stretch artefacts): only the part of
+    the tempo change the pitch does not already account for is time-stretched."""
     paths, hashes = sampling.resolve(src, s["stems"])
     t = {**transform.DEFAULT_TRANSFORM, **(s.get("transform") or {}), "fade_in_ms": 0.0, "fade_out_ms": 0.0}
+    if tape:
+        t["stretch_mode"] = "tape"
+    if harmonic:
+        t["harmonic"] = True
     t["pitch_semitones"] = float(t["pitch_semitones"]) + float(pitch)
     speed = bpm / (s["source_bpm"] * ratio)
     # grid-locked: a tape-mode pitch already speeds the audio up, so stretch only the remainder
@@ -65,11 +73,14 @@ def _sample_track(tl, samples, sources, bpm, n, swing, a, choke=True) -> np.ndar
         s = samples.get(e["sample_id"])
         if s is None or s["source_id"] not in sources:
             raise MissingAsset(f"Sample {e['sample_id']} referenced by the arrangement no longer exists.")
-        buf, speed = sample_buffer(s, sources[s["source_id"]], bpm, e.get("ratio", 1.0), e.get("pitch", 0.0))
+        buf, speed = sample_buffer(s, sources[s["source_id"]], bpm, e.get("ratio", 1.0), e.get("pitch", 0.0),
+                                   bool(e.get("tape")), bool(e.get("harmonic")))
         tf = {**transform.DEFAULT_TRANSFORM, **(s.get("transform") or {})}
         base = int(round(s.get("pickup", 0.0) / speed * SR))  # buffer index of source beat 0
         off = base + int(round(e["s0"] * e.get("ratio", 1.0) * spb * SR))
-        pre = base if e["s0"] < 1e-6 else 0  # chops from beat 1 keep the lead-in, placed just before the tick
+        # chops from beat 1 keep the phrase's lead-in; later chops start LEAD early so the cut lands just before
+        # the note's attack instead of through it (beats sit on attack peaks, see analysis._phase_shift)
+        pre = base if e["s0"] < 1e-6 else min(off, LEAD)
         length = min(ticks_to_samples(min(e["dur"], c1 - t), bpm),
                      int(round((e["s1"] - e["s0"]) * e.get("ratio", 1.0) * spb * SR)))
         if choke and i + 1 < len(tl):  # mono choke: the next chop cuts this one
@@ -141,6 +152,8 @@ def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_st
             continue
         if tr["kind"] == "sample":
             y = _sample_track(tl, samples, sources, bpm, n, swing, a, tr.get("choke", True))
+            if tr.get("duck"):  # the record breathes around the kick instead of fighting it
+                y = bass.duck(y, kick_ticks, bpm, amount=float(tr["duck"]), attack_ms=8, release_ms=220)
         elif tr["kind"] == "drums":
             y = _drum_track(tl, arr.get("kit", "boombap"), bpm, n, swing, a)
         else:
@@ -186,7 +199,17 @@ def limit(y: np.ndarray, ceiling: float, window_ms: float = 10.0) -> np.ndarray:
     return (y * g[:, None]).astype(np.float32)
 
 
+def _glue(mix: np.ndarray) -> np.ndarray:
+    """Gentle bus compression: a couple of dB off the loudest hits so drums, bass and sample move as one record
+    instead of sitting on top of each other."""
+    import pedalboard as pb
+
+    board = pb.Pedalboard([pb.Compressor(threshold_db=-16, ratio=2.0, attack_ms=25, release_ms=180)])
+    return board(np.ascontiguousarray(mix.T, dtype=np.float32), SR).T.astype(np.float32)
+
+
 def _master(mix: np.ndarray, bufs: dict, target_lufs: float) -> dict:
+    mix = _glue(mix)
     lufs_in = loudness(mix)
     # conservative gain toward the target; never boost near-silence by more than 12 dB
     g_db = float(np.clip(target_lufs - lufs_in, -24, 12)) if lufs_in is not None else 0.0

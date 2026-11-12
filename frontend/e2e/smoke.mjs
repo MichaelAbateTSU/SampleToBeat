@@ -42,7 +42,7 @@ try {
   // guest -> demo loop -> create
   await page.getByRole("button", { name: /Try the demo loop/ }).click();
   await page.waitForURL(/\/app\/new/);
-  await page.getByText("Demo loop:").waitFor();
+  await page.getByText("Demo sample:").waitFor();
   await page.getByRole("button", { name: /Trap/ }).click();
   await shot("02-create");
   await page.getByRole("button", { name: /Make my beat/ }).click();

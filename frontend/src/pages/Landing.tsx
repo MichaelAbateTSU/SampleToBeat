@@ -16,8 +16,8 @@ const STEPS = [
 ];
 
 const FEATURES = [
-  { icon: "music", title: "Any sample, not only loops", text: "Tight loops lock to their exact tempo. Loose snippets are re-timed to the grid. One-shots are played as a melody in key." },
-  { icon: "layers", title: "Four flips, four ideas", text: "A straight loop flip, hard chops, a dark pitched-down take and a creative one with reverses and stutters. Reroll any of them." },
+  { icon: "music", title: "Any sample, not only loops", text: "It reads the tempo from how the music repeats, so drumless keys, strings and guitar work too. Tight loops are used whole, longer recordings are searched for the best bars, and one-shots are played as a melody in key." },
+  { icon: "layers", title: "Four flips, four ideas", text: "A straight loop flip, a chopped re-sequence, a slowed-down take and a sped-up one, the way producers have always worked records. Reroll any of them." },
   { icon: "sliders", title: "A studio, not a slot machine", text: "Change the tempo, swing, drum kit and mix. Mute parts. Rebuild from a different chop. What you hear is what you export." },
   { icon: "download", title: "Files a producer can use", text: "A mastered WAV, separate track stems, and MIDI for the drums, 808 and chop triggers, ready for your DAW." },
   { icon: "shield", title: "Your sample stays yours", text: "Nothing is trained on your uploads. The engine is signal processing and music theory, so every sound traces back to your sample or our drum kits." },
@@ -45,7 +45,7 @@ function Machine({ onFile, onDemo }: { onFile: (f: File) => void; onDemo: () => 
   return (
     <div className="machine">
       <div className="lcd machine-lcd" aria-live="polite">
-        <span className="line-1">{current ? (current.source ? "The sample: 8 bars of keys" : `${current.title} flip`) : "Press a pad"}</span>
+        <span className="line-1">{current ? (current.source ? "The sample: a soul loop" : `${current.title} flip`) : "Press a pad"}</span>
         <span className="line-2 lcd-dim">{current ? `${current.bpm} BPM  ${current.key}${current.style ? `  ${current.style}` : ""}` : "One loop in, four beats out"}</span>
         <span className="time"><LcdText>{clock(current ? player.time : 0)}</LcdText></span>
       </div>

@@ -4,7 +4,7 @@ import { useSession } from "../session";
 import { Slider } from "./Slider";
 
 const PATTERN_NAME: Record<string, string> = {
-  s_main: "Main flip", s_var: "Variation", s_sparse: "Sparse", s2: "Second sample",
+  s_main: "Hook", s_var: "Verse flip", s_filt: "Filtered",
   b_main: "808 main", b_var: "808 variation", fx_crash: "Crash", fx_riser: "Riser",
 };
 

@@ -51,6 +51,8 @@ class ChopEvent(_M):
     reverse: bool | None = None
     gain_db: Annotated[float, Field(ge=-60, le=24)] | None = None
     pan: Annotated[float, Field(ge=-1, le=1)] | None = None
+    tape: bool | None = None  # pitch by speed, like a record
+    harmonic: bool | None = None  # play only the harmonic part of the sample (its own drums removed)
 
     @model_validator(mode="after")
     def _order(self):
@@ -99,6 +101,7 @@ class Track(_M):
     muted: bool = False
     solo: bool = False
     choke: bool = False
+    duck: Annotated[float, Field(ge=0, le=0.9)] = 0.0
     fx: dict = {}
     clips: list[Clip] = []
 

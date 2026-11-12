@@ -119,10 +119,15 @@ def _whole(analysis: dict, onsets_t: np.ndarray, period: float) -> dict | None:
     beats = duration / period
     if beats > FULL_MAX_BEATS or beats < 1.5:
         return None
-    q = min((2, 4, 8, 16, 32), key=lambda k: abs(np.log2(beats / k)))
-    if abs(beats - q) / q > 0.15:
-        return {"kind": "loop", "start": 0.0, "bars": int(beats // 4), "beats": round(beats, 3), "source_bpm": analysis["bpm"]}
-    return {"kind": "loop", "start": 0.0, "bars": max(1, q // 4), "beats": float(q), "source_bpm": round(60.0 * q / duration, 3)}
+    if analysis.get("weak_grid"):  # no pulse to respect (a pad, a drone): any whole number of bars loops fine
+        q = min((4, 8, 16, 32), key=lambda k: abs(np.log2(beats / k)))
+        return {"kind": "loop", "start": 0.0, "bars": q // 4, "beats": float(q), "source_bpm": round(60.0 * q / duration, 3)}
+    q = int(round(beats / 4)) * 4
+    # a third of a beat of slack in total: over a long file a looser rule would retune the tempo and drift off the beat
+    if q >= 4 and (analysis.get("loop_locked") or (q in (4, 8, 16, 32) and abs(beats - q) < 0.35)):
+        # the file is (very nearly) 1, 2, 4 or 8 bars: it was cut as a loop, so use it as one
+        return {"kind": "loop", "start": 0.0, "bars": q // 4, "beats": float(q), "source_bpm": round(60.0 * q / duration, 3)}
+    return None  # an arbitrary excerpt: the loops found inside it are on the beat, the whole file is not
 
 
 def discover(source: dict, analysis: dict, f: dict, count: int = 16, diversity: float = 0.5,

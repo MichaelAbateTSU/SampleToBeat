@@ -109,7 +109,7 @@ def duck(bass: np.ndarray, kick_ticks: list[int], bpm: float, amount: float = 0.
         if s < len(g):
             seg = shape[: len(g) - s]
             g[s:s + len(seg)] = np.minimum(g[s:s + len(seg)], seg)
-    return bass * g
+    return bass * (g[:, None] if bass.ndim == 2 else g)
 
 
 # ---------------------------------------------------------------- bassline generation
@@ -142,51 +142,95 @@ def bar_roots(bar_chroma: list[list[float]], key: tuple[int, str] | None, key_co
                 s += 0.15  # gentle tonic preference when ambiguous
             if s > best_s:
                 best, best_s = r, s
+        if key and c[best] < 0.45 and c[key[0]] >= c[best]:
+            best = key[0]  # the "best" chord's own root is barely played: stay on the tonic
+        if roots and best != roots[-1] and best_s < 1.08 * (1.2 * c[roots[-1]] + 0.9 * c[(roots[-1] + 7) % 12] + 0.8 * max(c[(roots[-1] + 3) % 12], c[(roots[-1] + 4) % 12])):
+            best = roots[-1]  # not clearly a new chord: hold the previous root rather than jump
         roots.append(int(best))
+    return roots
+
+
+def roots_from_audio(y: np.ndarray, bpm: float, n_half_bars: int, key: tuple[int, str] | None, key_conf: float) -> list[int]:
+    """One root per half bar. If the sample has a bass line of its own, follow it: the lowest strong pitch is
+    what a producer matches the 808 to by ear, and it is right even when the chord above is ambiguous. Without
+    one, fall back to matching triads against the full harmony. A change of root has to be clearly heard;
+    otherwise the previous root is held."""
+    import librosa
+
+    sr = 22050
+    m = librosa.resample(y.astype(np.float32), orig_sr=SR, target_sr=sr)
+    half = int(round(2 * 60.0 / bpm * sr))
+    if len(m) < half or np.abs(m).max() < 1e-4:
+        return [key[0] if key else 0] * n_half_bars
+    hop = 512
+    low = np.abs(librosa.cqt(m, sr=sr, hop_length=hop, fmin=librosa.note_to_hz("C1"), n_bins=36, bins_per_octave=12)) ** 2  # C1..B3
+    full = librosa.feature.chroma_cqt(y=m, sr=sr, hop_length=hop)
+    scale = [(key[0] + d) % 12 for d in SCALES.get(key[1], SCALES["minor"])] if key and key_conf >= 0.35 else None
+    total_low = low.sum()
+    has_bass = total_low > 0.08 * (np.abs(librosa.stft(m, hop_length=hop)) ** 2).sum()
+    roots: list[int] = []
+    for i in range(n_half_bars):
+        a, b = int(i * half / hop), max(int(i * half / hop) + 2, int((i + 1) * half / hop))
+        lo_pc = low[:, a:b].sum(axis=1).reshape(3, 12).sum(axis=0)
+        c = full[:, a:b].mean(axis=1) if a < full.shape[1] else np.zeros(12)
+        prev = roots[-1] if roots else None
+        if c.sum() < 1e-6:
+            roots.append(prev if prev is not None else (key[0] if key else 0))
+            continue
+        c = c / (c.max() + 1e-9)
+        cand = None
+        if has_bass and lo_pc.sum() > 0.25 * total_low / n_half_bars:
+            order = np.argsort(lo_pc)[::-1]
+            if lo_pc[order[0]] > 1.6 * lo_pc[order[1]] or (scale and order[0] in scale and order[1] not in scale):
+                cand = int(order[0])
+        if cand is None:  # triad matching on the full harmony
+            best_s = -1e9
+            for r in scale or range(12):
+                third = max(c[(r + 3) % 12], c[(r + 4) % 12])
+                sc = 1.2 * c[r] + 0.8 * third + 0.9 * c[(r + 7) % 12] + (0.15 if key and r == key[0] else 0.0)
+                if sc > best_s:
+                    cand, best_s = int(r), sc
+        if scale and cand not in scale:
+            cand = prev if prev is not None else key[0]
+        # the root has to be present, and must not sit a semitone under/over something louder
+        clash = max(c[(cand + 1) % 12], c[(cand - 1) % 12]) > 1.2 * c[cand]
+        if c[cand] < 0.35 or clash:
+            cand = prev if prev is not None and not max(c[(prev + 1) % 12], c[(prev - 1) % 12]) > 1.2 * c[prev] else (key[0] if key else cand)
+        roots.append(int(cand))
     return roots
 
 
 def generate(roots: list[int], kicks: list[dict], genre: str, seed: int, key: tuple[int, str] | None,
              complexity: float = 0.5) -> list[dict]:
-    """Bass notes over len(roots) bars, placed on the kick pattern (bass and kick lock together)."""
+    """Bass notes; `roots` has one entry per half bar. The line plays the root of each bar and nothing else: a wrong fifth or
+    octave against a sample is far more audible than a plain line is dull. It locks to the kick: boom bap and
+    lo-fi take the main kicks with short notes, trap and drill hold long 808s and slide into the next root."""
     rng = np.random.default_rng(seed + 808)
-    bars = len(roots)
-    scale = [(key[0] + d) % 12 for d in SCALES.get(key[1], SCALES["minor"])] if key else None
-    ks = sorted({k["tick"] - k["tick"] % (STEP_TICKS // 2) for k in kicks if k["inst"] == "kick"})
+    bars = len(roots) // 2
+    end = bars * TICKS_PER_BAR
+    ks = sorted({k["tick"] - k["tick"] % STEP_TICKS for k in kicks if k["inst"] == "kick" and k["tick"] < end})
+    long_808 = genre in ("trap", "drill")
+    if long_808:  # fewer, longer notes: the downbeat plus up to two more kicks per bar
+        keep = []
+        for b in range(bars):
+            bar = [t for t in ks if t // TICKS_PER_BAR == b]
+            first = [t for t in bar if t % TICKS_PER_BAR == 0] or [b * TICKS_PER_BAR]
+            rest = [t for t in bar if t % TICKS_PER_BAR >= 6 * STEP_TICKS]
+            n_extra = int(round(2 * complexity)) if rest else 0
+            keep += first + sorted(rng.choice(rest, size=min(n_extra, len(rest)), replace=False).tolist() if n_extra else [])
+        ks = sorted(set(int(t) for t in keep))
     if not ks:
         ks = [b * TICKS_PER_BAR for b in range(bars)]
     notes: list[dict] = []
-    end = bars * TICKS_PER_BAR
     for i, t in enumerate(ks):
-        if t >= end:
-            break
         bar = t // TICKS_PER_BAR
-        root = _register(roots[bar])
         nxt = ks[i + 1] if i + 1 < len(ks) else end
-        midi, slide = root, False
-        off = t % TICKS_PER_BAR
-        if off and genre in ("trap", "drill") and rng.random() < 0.25 + 0.35 * complexity:
-            midi = root + 12 if root + 12 <= HIGH + 12 and rng.random() < 0.5 else root + 7
-            slide = rng.random() < 0.6
-        elif off and genre in ("boombap", "lofi") and rng.random() < 0.3 * complexity:
-            midi = root + 7 if rng.random() < 0.6 else root + 12
-        if scale and midi % 12 not in scale:
-            midi = root  # never a chromatic surprise by default
-        if genre in ("boombap", "lofi"):
-            dur = min(nxt - t, TICKS_PER_BAR // 2)
-        else:
-            dur = nxt - t if rng.random() < 0.8 else max(STEP_TICKS * 2, (nxt - t) // 2)
+        midi = _register(roots[min(len(roots) - 1, t // (TICKS_PER_BAR // 2))])
+        dur = nxt - t if long_808 else min(nxt - t, 6 * STEP_TICKS)
+        slide = bool(long_808 and notes and notes[-1]["midi"] != midi and t % TICKS_PER_BAR == 0 and rng.random() < 0.5)
         notes.append({"type": "note", "tick": int(t), "dur": int(max(STEP_TICKS, dur)), "midi": int(midi),
-                      "vel": round(float(0.95 if off == 0 else rng.uniform(0.75, 0.9)), 3), "slide": bool(slide)})
-    # trap/drill: a sliding passing note into the next bar's root
-    if genre in ("trap", "drill") and bars > 1:
-        for b in range(bars - 1):
-            if roots[b] != roots[b + 1] and rng.random() < 0.5 * complexity + 0.2:
-                t = b * TICKS_PER_BAR + 14 * STEP_TICKS
-                if not any(abs(n["tick"] - t) < STEP_TICKS for n in notes):
-                    notes.append({"type": "note", "tick": t, "dur": STEP_TICKS * 2, "midi": _register(roots[b + 1]),
-                                  "vel": 0.8, "slide": True})
-    return sorted(notes, key=lambda n: n["tick"])
+                      "vel": round(float(0.95 if t % TICKS_PER_BAR == 0 else rng.uniform(0.78, 0.9)), 3), "slide": slide})
+    return notes
 
 
 def note_name(midi: int) -> str:

@@ -5,10 +5,11 @@
 For every sample and genre it generates the four flips and reports:
   tempo     detected BPM (the file name may end in _<bpm> as the expected value) and beat confidence
   stretch   how far the sample is time-stretched (percent) and pitched (semitones)
-  grid      share of the sample track's note onsets within 35 ms of a 16th-note line (random would be ~56%)
+  grid      timing offset of the sample track against the eighth-note grid (ms; 0 = on the beat) and how
+            focused its rhythm is on that grid (1.0 = unrelated)
   bass      share of 808 notes whose pitch is one of the three strongest pitch classes the sample plays under
             them, and the share that sit a semitone away from a stronger pitch (an audible clash)
-  balance   level of sub / low / low-mid / mid / high bands of the master, and each stem's RMS
+  balance   level of sub / low / low-mid / mid / high bands of the master, and each stem's RMS/peak in dB
 With --out it also writes each flip as an MP3 for listening."""
 import argparse
 import os
@@ -36,18 +37,22 @@ def band_levels(y: np.ndarray) -> dict[str, float]:
     return {n: round(10 * np.log10(spec[(f >= lo) & (f < hi)].sum() / tot + 1e-12), 1) for n, lo, hi in BANDS}
 
 
-def grid_alignment(stem: np.ndarray, bpm: float, swing: float) -> float | None:
-    m = librosa.resample(stem.mean(axis=1), orig_sr=SR, target_sr=22050)
-    on = librosa.onset.onset_detect(y=m, sr=22050, hop_length=256, units="time", backtrack=True)
-    if len(on) < 8:
+def grid_alignment(stem: np.ndarray, bpm: float, swing: float) -> tuple[float, float] | None:
+    """(timing offset in ms, focus). Slides an eighth-note comb over the sample track's onset envelope: offset is
+    where it fits best (0 = on the beat), focus is how much better that fit is than the average position
+    (1.0 = no rhythm relation to the grid at all)."""
+    sr, hop = 22050, 64
+    m = librosa.resample(stem.mean(axis=1), orig_sr=SR, target_sr=sr)
+    env = librosa.onset.onset_strength(y=m, sr=sr, hop_length=hop)
+    if env.max() <= 0:
         return None
-    step = ticks_to_seconds(STEP_TICKS, bpm)
-    hits = 0
-    for t in on:
-        k = int(round(t / step))
-        line = k * step + ticks_to_seconds(swing_offset_ticks(k * STEP_TICKS, swing), bpm)
-        hits += abs(t - line) < 0.035
-    return round(100 * hits / len(on), 1)
+    fps = sr / hop
+    eighth = 30.0 / bpm * fps
+    lags = np.arange(-int(eighth / 2), int(eighth / 2) + 1)
+    pos = np.arange(0, len(env) - eighth, eighth)
+    score = np.array([env[np.clip(np.round(pos + lag).astype(int), 0, len(env) - 1)].mean() for lag in lags])
+    best = int(np.argmax(score))
+    return round(float(lags[best] / fps * 1000), 1), round(float(score[best] / (score.mean() + 1e-9)), 2)
 
 
 def bass_agreement(arr: dict, sample_stem: np.ndarray) -> tuple[float, float] | None:
@@ -94,22 +99,22 @@ def main() -> None:
                 arr = compose.variation({"genre": genre, "bars": a.bars}, samples, {src["id"]: src}, {src["id"]: doc}, strat, 100 + i)
                 res = render.render(arr, by, {src["id"]: src})
                 main_s = by[arr["meta"]["main_sample"]]
-                speed = arr["bpm"] / (main_s["source_bpm"] * arr["meta"]["ratio"])
+                speed = 1 + arr["meta"].get("stretch", 0.0)
                 grid = grid_alignment(res["stems"]["sample"], arr["bpm"], arr["swing"]) if "sample" in res["stems"] else None
                 bass = bass_agreement(arr, res["stems"]["sample"]) if "sample" in res["stems"] else None
-                stems = {k: round(float(20 * np.log10(np.sqrt(np.mean(v ** 2)) + 1e-9)), 1) for k, v in res["stems"].items()}
-                bands = band_levels(res["master"])
+                stems = {k: f"{20 * np.log10(np.sqrt(np.mean(v ** 2)) + 1e-9):.0f}/{20 * np.log10(np.abs(v).max() + 1e-9):.0f}" for k, v in res["stems"].items()}
+                bands = {k: float(v) for k, v in band_levels(res["master"]).items()}
                 print(f"  {genre:8s}{strat:10s} {arr['bpm']:6.1f} BPM  stretch {100 * (speed - 1):+6.1f}%  pitch {arr['meta']['pitch']:+d}  "
-                      f"grid {grid}%  bass ok/clash {bass}  | {main_s['name'][:28]}")
+                      f"offset/focus {grid}  bass ok/clash {bass}  | {arr['meta'].get('orders')} {main_s['name'][:24]}")
                 print(f"           bands {bands}  stems {stems}")
                 summary.append((grid, bass, abs(speed - 1)))
                 if a.out:
                     Path(a.out).mkdir(parents=True, exist_ok=True)
                     audio_io.write_mp3(Path(a.out) / f"{path.stem}__{genre}_{strat}.mp3", res["master"], bitrate="192k")
-    grids = [g for g, _, _ in summary if g is not None]
+    grids = [abs(g[0]) for g, _, _ in summary if g is not None]
     ok = [b[0] for _, b, _ in summary if b]
     clash = [b[1] for _, b, _ in summary if b]
-    print(f"\nOVERALL  grid {np.mean(grids):.1f}%   bass in-harmony {np.mean(ok):.1f}%   bass clashes {np.mean(clash):.1f}%   "
+    print(f"\nOVERALL  mean |timing offset| {np.mean(grids):.1f} ms   bass in-harmony {np.mean(ok):.1f}%   bass clashes {np.mean(clash):.1f}%   "
           f"median stretch {100 * np.median([s for _, _, s in summary]):.1f}%   flips {len(summary)}")
 
 

@@ -13,6 +13,7 @@ ASR = 22050  # analysis rate
 HOP = 512
 MIN_SECONDS = 0.1
 THOP = 256  # hop for tempo estimation
+FLUX_LAG = 0.018
 MIN_TEMPO_CONFIDENCE = 0.06  # below this the material has no usable pulse (pads, drones): use a plain grid
 ONE_SHOT_BPM = 90.0  # nominal time base for material without a tempo
 BHOP = 128  # finer hop for beat tracking: librosa's tracker uses an integer-frame period
@@ -85,6 +86,38 @@ def tempo_candidates(mono: np.ndarray) -> tuple[list[dict], float]:
             "score": round(float(rank[i]), 3)} for i in peaks[:6]]
     out[0]["bpm"] = round(float(fine[int(np.argmax(sharp))]), 2)
     return out, round(confidence, 3)
+
+
+def _phase_shift(oenv: np.ndarray, beat_times: np.ndarray, period: float) -> float:
+    """Seconds to slide the whole grid so beats and off-beats sit on the *peaks* of the onset envelope. A note's
+    perceived moment is where its energy rises fastest, not where it starts: with soft attacks (bass, guitar,
+    brushes) those are 40-50 ms apart, enough to make new drums flam against the sample."""
+    fps = ASR / BHOP
+    pos = np.concatenate([beat_times, beat_times + period / 2]) * fps
+    lags = np.arange(-int(0.07 * fps), int(0.07 * fps) + 1)
+    score = [oenv[np.clip(np.round(pos + lag).astype(int), 0, len(oenv) - 1)].mean() for lag in lags]
+    # the flux peak of an instantaneous attack reads ~18 ms late (analysis window); take that back out
+    return float(lags[int(np.argmax(score))] / fps) - FLUX_LAG
+
+
+def _swing(oenv: np.ndarray, beat_times: np.ndarray, period: float) -> float:
+    """How far the sample's own off-beat 16ths are delayed, MPC style (50 = straight, 66 = triplet). Drums programmed
+    with a different swing than the record flam against it, so the drums take theirs from here."""
+    fps = ASR / BHOP
+    step = period / 4
+    odd = np.concatenate([beat_times + step, beat_times + 3 * step])
+
+    def at(pct: float) -> float:
+        idx = np.round((odd + (2 * pct / 100 - 1) * step + FLUX_LAG) * fps).astype(int)
+        return float(oenv[idx[(idx >= 0) & (idx < len(oenv))]].mean()) if len(idx) else 0.0
+
+    grid = np.arange(50, 68, 2.0)
+    score = np.array([at(g) for g in grid])
+    best = int(np.argmax(score))
+    # needs real evidence: off-beat 16ths that exist at all, and clearly sit later than straight
+    if score[best] < 0.6 * float(oenv.mean()) or score[best] < 1.2 * score[0]:
+        return 50.0
+    return float(grid[best])
 
 
 def _rigid_grid(oenv: np.ndarray, bpm: float, duration: float) -> np.ndarray:
@@ -215,6 +248,9 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         # the beat tracker wandered away from the tempo the music repeats at: trust the repetition
         beat_times = _rigid_grid(oenv_f, base_tempo, duration)
         period = 60.0 / base_tempo
+    if not weak_grid:
+        beat_times = beat_times + _phase_shift(oenv_f, beat_times, period)
+    swing = 50.0 if weak_grid else _swing(oenv_f, beat_times, period)
     bpm = round(60.0 / period, 2)
     # extend the grid over quiet intro/outro parts the tracker skipped
     pre = beat_times[0] - period * np.arange(int(beat_times[0] / period), 0, -1)
@@ -295,7 +331,8 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         "duration": round(duration, 3), "sample_rate": SR,
         "bpm_candidates": cands, "detected_bpm": bpm, "bpm": bpm, "tempo_stability": round(stability, 3),
         "beat_confidence": 0.0 if weak_grid else round(stability, 3), "weak_grid": weak_grid,
-        "tempo_confidence": tempo_conf,
+        "tempo_confidence": tempo_conf, "swing": swing,
+        "percussive_ratio": round(float(rms_p.mean() / (rms.mean() + 1e-9)), 3),
         "one_shot": bool(one_shot), "loop_locked": bool(loop_bpm),
         "beats": [round(float(t), 4) for t in beat_times],
         "downbeat_phase": phase, "downbeat_confidence": downbeat_conf,

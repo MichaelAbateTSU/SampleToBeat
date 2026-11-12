@@ -13,9 +13,9 @@ export const GENRE_BLURB: Record<string, string> = {
 
 export const STRATEGY_NAME: Record<string, string> = {
   loop_flip: "Loop flip",
-  hard_chop: "Hard chops",
-  dark: "Dark & pitched",
-  creative: "Creative flip",
+  hard_chop: "Chopped",
+  dark: "Slowed",
+  creative: "Sped up",
 };
 
 export const FORMAT_LABEL: Record<string, { name: string; note: string }> = {

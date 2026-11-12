@@ -102,8 +102,8 @@ export function Create() {
         {demo ? (
           <div className="dropzone has-file">
             <div className="dropzone-icon"><Icon name="music" size={24} /></div>
-            <div className="dropzone-title">Demo loop: 16 bars of keys, pad and bass at 92 BPM</div>
-            <div className="dropzone-sub">Synthesised for ChopLab and free to use. <button type="button" className="link" onClick={() => setDemo(false)}>Use my own sample</button></div>
+            <div className="dropzone-title">Demo sample: a soul loop with Rhodes, strings and bass</div>
+            <div className="dropzone-sub">Generated for ChopLab and free to use. <button type="button" className="link" onClick={() => setDemo(false)}>Use my own sample</button></div>
           </div>
         ) : (
           <Dropzone file={file} onFile={setFile} onDemo={() => setDemo(true)} />
