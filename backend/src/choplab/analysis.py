@@ -12,6 +12,8 @@ from .core import NOTE_NAMES, SR, parse_key
 ASR = 22050  # analysis rate
 HOP = 512
 MIN_SECONDS = 0.1
+THOP = 256  # hop for tempo estimation
+MIN_TEMPO_CONFIDENCE = 0.06  # below this the material has no usable pulse (pads, drones): use a plain grid
 ONE_SHOT_BPM = 90.0  # nominal time base for material without a tempo
 BHOP = 128  # finer hop for beat tracking: librosa's tracker uses an integer-frame period
 
@@ -32,46 +34,84 @@ def estimate_key(chroma_sum: np.ndarray) -> list[dict]:
     return cands
 
 
-def _alternation(low: np.ndarray, high: np.ndarray, frames: np.ndarray) -> float:
-    """Backbeat cue: at the true beat level kick (low) and snare (high) alternate beat to beat."""
-    if len(frames) < 8:
-        return 0.0
-    lo, hi = low[frames], high[frames]
-    d = lo / (lo.mean() + 1e-9) - hi / (hi.mean() + 1e-9)
-    sign = np.where(np.arange(len(d)) % 2 == 0, 1.0, -1.0)
-    return abs(float(np.mean(d * sign)))
+def _acf(x: np.ndarray) -> np.ndarray:
+    n = len(x)
+    f = np.fft.rfft(x - x.mean(), 2 * n)
+    ac = np.fft.irfft(f * np.conj(f))[:n]
+    return ac / (ac[0] + 1e-12)
 
 
-def _pick_tempo(oenv, low, high, base: float) -> tuple[float, np.ndarray, list[dict]]:
-    cands = []
-    for mult, label in ((0.5, "half-time"), (2 / 3, "two-thirds"), (1.0, "detected"), (1.5, "three-halves"),
-                        (2.0, "double-time")):
-        bpm = base * mult
-        if not 50 <= bpm <= 200:
-            continue
-        _, bt = librosa.beat.beat_track(onset_envelope=oenv, sr=ASR, hop_length=BHOP, bpm=bpm, units="frames", trim=False)
-        alt = _alternation(low, high, np.clip(bt, 0, len(low) - 1))
-        prior = float(np.exp(-np.log2(bpm / 95) ** 2 / (2 * 0.45 ** 2)))  # hip-hop tempo prior
-        if mult in (2 / 3, 1.5):
-            prior *= 0.6  # 3:2 readings need real backbeat evidence to win
-        cands.append({"bpm": round(bpm, 2), "interpretation": label, "backbeat": round(alt, 3),
-                      "prior": round(prior, 3), "score": round(2 * alt + 0.5 * prior, 3), "_frames": bt})
-    best = max(cands, key=lambda c: c["score"])
-    frames = best["_frames"]
-    if len(frames) > 4:  # tracker locked onto the off-beats? compare with the half-period-shifted grid
+RELATED = (1.0, 2.0, 0.5, 3.0, 1 / 3, 1.5, 2 / 3, 4.0, 0.25)
+
+
+def tempo_candidates(mono: np.ndarray) -> tuple[list[dict], float]:
+    """Tempo from how the music repeats, not from drum hits: the autocorrelation of note onsets *plus chord
+    changes*, read with a comb at the beat, two beats, the bar and two bars. Samples people flip are often
+    drumless (keys, strings, guitar), where a drum-oriented beat tracker guesses wrong; harmony changing every
+    bar or two is the most reliable pulse they have. Returns candidates (best first) and a 0..1 confidence."""
+    fps = ASR / THOP
+    onset = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=THOP, aggregate=np.median)
+    chroma = librosa.feature.chroma_stft(y=mono, sr=ASR, hop_length=THOP * 2, n_fft=4096)
+    chroma = chroma / (np.linalg.norm(chroma, axis=0, keepdims=True) + 1e-9)
+    change = np.concatenate([[0.0], np.maximum(0.0, np.diff(chroma, axis=1)).sum(axis=0)])
+    change = np.repeat(change, 2)[: len(onset)]
+    change = np.pad(change, (0, len(onset) - len(change)))
+    z = lambda x: (x - x.mean()) / (x.std() + 1e-9)
+    ac = _acf(z(onset) + z(change))
+
+    def at(lag: float) -> float:
+        i = int(lag)
+        return float(ac[i] * (1 - (lag - i)) + ac[i + 1] * (lag - i)) if i + 1 < len(ac) else 0.0
+
+    bpms = np.arange(50.0, 200.0, 0.25)
+    comb = np.array([sum(w * at(60.0 / b * fps * k) for k, w in ((1, 1.0), (2, 0.8), (4, 0.8), (8, 0.5), (0.5, 0.3))) for b in bpms])
+    prior = np.exp(-np.log2(bpms / 92.0) ** 2 / (2 * 0.42 ** 2))  # tempos of records people sample
+    peaks = [i for i in range(1, len(comb) - 1) if comb[i] > comb[i - 1] and comb[i] >= comb[i + 1] and comb[i] > 0.4 * comb.max()]
+    if not peaks:
+        return [], 0.0
+    # a peak at 3:2 or 4:3 of a much stronger one is the triplet/dotted echo of that tempo, not a tempo itself
+    echo = lambda i: any(comb[j] > 1.3 * comb[i] and any(abs(bpms[i] / bpms[j] / r - 1) < 0.04 for r in (1.5, 2 / 3, 4 / 3, 0.75))
+                         for j in peaks)
+    rank = {i: comb[i] * prior[i] * (0.5 if echo(i) else 1.0) for i in peaks}
+    peaks.sort(key=lambda i: -rank[i])
+    best = peaks[0]
+    related = lambda i: any(abs(bpms[i] / bpms[best] / r - 1) < 0.04 for r in RELATED)
+    rival = max((comb[i] for i in peaks if not related(i)), default=0.0)
+    confidence = float(np.clip((comb[best] - rival) / (abs(comb[best]) + 1e-9), 0.0, 1.0)) if comb[best] > 0.12 else 0.0
+    # refine the winner to a hundredth of a BPM using longer lags (a 4-bar loop cut 1% off is ~100 ms out at its end)
+    fine = np.arange(bpms[best] - 0.6, bpms[best] + 0.6, 0.02)
+    sharp = [sum(w * at(60.0 / b * fps * k) for k, w in ((1, 1.0), (2, 1.0), (4, 1.0), (8, 1.0), (16, 0.7))) for b in fine]
+    out = [{"bpm": round(float(bpms[i]), 2), "evidence": round(float(comb[i]), 3), "prior": round(float(prior[i]), 3),
+            "score": round(float(rank[i]), 3)} for i in peaks[:6]]
+    out[0]["bpm"] = round(float(fine[int(np.argmax(sharp))]), 2)
+    return out, round(confidence, 3)
+
+
+def _rigid_grid(oenv: np.ndarray, bpm: float, duration: float) -> np.ndarray:
+    """A metronomic grid at `bpm`, phased where the onsets are strongest."""
+    period = 60.0 / bpm
+    fps = ASR / BHOP
+    t = np.arange(len(oenv)) / fps
+    offs = np.arange(0.0, period, 0.004)
+    score = [np.interp(np.arange(o, duration, period), t, oenv).mean() for o in offs]
+    return np.arange(offs[int(np.argmax(score))], duration, period)
+
+
+def _beats_at(oenv: np.ndarray, bpm: float) -> np.ndarray:
+    """Beat frames at a given tempo; if the tracker locked onto the off-beats, shift by half a beat."""
+    _, frames = librosa.beat.beat_track(onset_envelope=oenv, sr=ASR, hop_length=BHOP, bpm=bpm, units="frames", trim=False)
+    if len(frames) > 4:
         half = int(round(np.median(np.diff(frames)) / 2))
         shifted = frames + half
         shifted = shifted[shifted < len(oenv)]
         if oenv[shifted].mean() > 1.15 * oenv[frames].mean():
             frames = shifted
-    for c in cands:
-        c.pop("_frames")
-    return best["bpm"], frames, sorted(cands, key=lambda c: -c["score"])
+    return frames
 
 
 def _loop_tempo(duration: float, tracked: float, lead_in: float) -> float | None:
     """Tempo implied by the file length if it is a whole number of bars (2..64 beats) and agrees with the
-    beat tracker to within 2.5% (octave errors allowed). Far more exact than tracking a 2-bar loop."""
+    tempo estimate to within 0.8% (octave errors allowed). Far more exact than tracking a 2-bar loop."""
     if duration > 45 or lead_in > 0.05:  # a loop starts on its first hit, not after silence
         return None
     best = None
@@ -80,7 +120,7 @@ def _loop_tempo(duration: float, tracked: float, lead_in: float) -> float | None
         if not 60 <= bpm <= 180:
             continue
         err = min(abs(np.log2(bpm / (tracked * m))) for m in (0.5, 1.0, 2.0))
-        if err < 0.035 and (best is None or err < best[0]):
+        if err < 0.012 and (best is None or err < best[0]):  # within 0.8%: the estimate is precise enough to demand it
             best = (err, bpm)
     return round(best[1], 3) if best else None
 
@@ -136,16 +176,13 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     # a single hit / held note has no tempo of its own: the composer plays it chromatically instead of looping it
     one_shot = duration < 1.5 or (duration < 8.0 and len(onsets) <= 1)
     if one_shot:
-        base_tempo, cands, beat_times = ONE_SHOT_BPM, [], np.zeros(0)
+        base_tempo, cands, beat_times, tempo_conf = ONE_SHOT_BPM, [], np.zeros(0), 0.0
     else:
         oenv_f = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP)
         low = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmax=200, n_mels=32)[: len(oenv_f)]
-        high = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmin=1500, n_mels=32)[: len(oenv_f)]
-        # The coarse tempo guess comes from the standard-hop envelope: librosa's tempogram at the fine hop needs
-        # gigabytes on a song-length file. The fine envelope is still used below to place the beats precisely.
-        base_tempo, _ = librosa.beat.beat_track(onset_envelope=oenv, sr=ASR, hop_length=HOP)
-        base_tempo = float(np.atleast_1d(base_tempo)[0]) or 90.0
-        base_tempo, frames, cands = _pick_tempo(oenv_f, low, high, base_tempo)
+        cands, tempo_conf = tempo_candidates(mono)
+        base_tempo = cands[0]["bpm"] if cands else 90.0
+        frames = _beats_at(oenv_f, base_tempo) if tempo_conf >= MIN_TEMPO_CONFIDENCE else np.zeros(0, int)
         beat_times = librosa.frames_to_time(frames, sr=ASR, hop_length=BHOP)
     weak_grid = len(beat_times) < 8
     if weak_grid:  # irregular / beatless material: fall back to a synthetic grid the user can correct
@@ -174,6 +211,10 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         period = float(coef[0])
         if np.median(np.abs(beat_times - np.polyval(coef, n_idx))) < 0.012:  # metronomic (programmed/quantized)
             beat_times = np.unique(np.polyval(coef, n_idx))
+    if not weak_grid and abs(60.0 / period / base_tempo - 1) > 0.012:
+        # the beat tracker wandered away from the tempo the music repeats at: trust the repetition
+        beat_times = _rigid_grid(oenv_f, base_tempo, duration)
+        period = 60.0 / base_tempo
     bpm = round(60.0 / period, 2)
     # extend the grid over quiet intro/outro parts the tracker skipped
     pre = beat_times[0] - period * np.arange(int(beat_times[0] / period), 0, -1)
@@ -254,6 +295,7 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         "duration": round(duration, 3), "sample_rate": SR,
         "bpm_candidates": cands, "detected_bpm": bpm, "bpm": bpm, "tempo_stability": round(stability, 3),
         "beat_confidence": 0.0 if weak_grid else round(stability, 3), "weak_grid": weak_grid,
+        "tempo_confidence": tempo_conf,
         "one_shot": bool(one_shot), "loop_locked": bool(loop_bpm),
         "beats": [round(float(t), 4) for t in beat_times],
         "downbeat_phase": phase, "downbeat_confidence": downbeat_conf,
