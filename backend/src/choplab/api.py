@@ -481,8 +481,8 @@ def _adopt(guest: dict | None, user: dict) -> None:
 def register(body: schemas.Credentials, request: Request, response: Response, current: Viewer):
     _limit(request, "register", 10, 60)
     user = accounts.register(current, body.email, body.password)
-    if current is None or current["id"] != user["id"]:
-        _set_session(response, user["id"])
+    accounts.end_session(request.cookies.get(accounts.SESSION_COOKIE))  # new privilege level, new session token
+    _set_session(response, user["id"])
     return _me(user)
 
 

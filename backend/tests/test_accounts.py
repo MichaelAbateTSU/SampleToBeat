@@ -52,7 +52,9 @@ def test_guest_makes_a_beat_then_needs_an_account_to_download():
     r = c.post(f"/api/projects/{pid}/export", json={"format": "mp3"})
     assert r.status_code == 401 and r.json()["code"] == "signup_required"
 
+    guest_token = c.cookies.get(accounts.SESSION_COOKIE)
     me = register(c, "guest-upgrade@example.com")
+    assert c.cookies.get(accounts.SESSION_COOKIE) != guest_token and accounts.session_user(guest_token) is None
     assert me["user"]["email"] == "guest-upgrade@example.com" and not me["user"]["guest"]
     assert [x["id"] for x in c.get("/api/projects").json()] == [pid]  # the guest's beat came along
 
