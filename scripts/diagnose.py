@@ -83,7 +83,7 @@ def main() -> None:
     ap.add_argument("--out")
     ap.add_argument("--bars", type=int, default=16)
     a = ap.parse_args()
-    summary = []
+    summary, tilt = [], []
     for path in map(Path, a.files):
         y = audio_io.decode(path)
         wav = audio_io.write_wav(Path(os.environ["CHOPLAB_DATA"]) / f"{path.stem}.wav", y)
@@ -103,11 +103,15 @@ def main() -> None:
                 grid = grid_alignment(res["stems"]["sample"], arr["bpm"], arr["swing"]) if "sample" in res["stems"] else None
                 bass = bass_agreement(arr, res["stems"]["sample"]) if "sample" in res["stems"] else None
                 stems = {k: f"{20 * np.log10(np.sqrt(np.mean(v ** 2)) + 1e-9):.0f}/{20 * np.log10(np.abs(v).max() + 1e-9):.0f}" for k, v in res["stems"].items()}
-                bands = {k: float(v) for k, v in band_levels(res["master"]).items()}
+                hook = next((sc for sc in arr["sections"] if compose.ROLE[sc["name"]] == "main"), arr["sections"][0])
+                spb = 4 * 60.0 / arr["bpm"] * SR  # tone is judged on the hook: intros and breakdowns are filtered on purpose
+                bands = {k: float(v) for k, v in band_levels(res["master"][int(hook["start_bar"] * spb):int((hook["start_bar"] + hook["bars"]) * spb)]).items()}
                 print(f"  {genre:8s}{strat:10s} {arr['bpm']:6.1f} BPM  stretch {100 * (speed - 1):+6.1f}%  pitch {arr['meta']['pitch']:+d}  "
                       f"offset/focus {grid}  bass ok/clash {bass}  | {arr['meta'].get('orders')} {main_s['name'][:24]}")
                 print(f"           bands {bands}  stems {stems}")
                 summary.append((grid, bass, abs(speed - 1)))
+                tilt.append([bands[k] - bands["low"] for k in ("sub", "lowmid", "mid", "high")])
+                print(f"           balance {arr['meta'].get('balance')}  kit {arr['kit']}")
                 if a.out:
                     Path(a.out).mkdir(parents=True, exist_ok=True)
                     audio_io.write_mp3(Path(a.out) / f"{path.stem}__{genre}_{strat}.mp3", res["master"], bitrate="192k")
@@ -116,6 +120,10 @@ def main() -> None:
     clash = [b[1] for _, b, _ in summary if b]
     print(f"\nOVERALL  mean |timing offset| {np.mean(grids):.1f} ms   bass in-harmony {np.mean(ok):.1f}%   bass clashes {np.mean(clash):.1f}%   "
           f"median stretch {100 * np.median([s for _, _, s in summary]):.1f}%   flips {len(summary)}")
+    t = np.array(tilt)
+    # a commercial master falls about 5 dB per octave above 100 Hz, which in these bands is roughly -4 / -6 / -10
+    print("TONE relative to the 60-200 Hz band (sub, low-mid, mid, high): mean " + " ".join(f"{v:+.1f}" for v in t.mean(axis=0))
+          + "   worst-case mid " + f"{t[:, 2].min():+.1f}" + "   reference about -2 -4 -6 -10")
 
 
 if __name__ == "__main__":

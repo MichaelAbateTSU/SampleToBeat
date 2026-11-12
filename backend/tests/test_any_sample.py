@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from choplab import analysis, audio_io, compose, render, sampling, store
+from choplab import analysis, audio_io, compose, drums, render, sampling, store
 from choplab.core import PPQ, SR
 
 SPB = 60 / 92
@@ -84,3 +84,27 @@ def test_midi_export_matches_the_arrangement(tmp_path, demo_audio):
     kick = next(t for t in arr["tracks"] if t["id"] == "kick")
     hits = len(render.timeline(arr, kick))
     assert data.count(bytes([0x99, 36])) == hits  # one note-on per kick, GM note 36 on channel 10
+
+
+def test_a_sample_with_its_own_bass_line_gets_no_second_bass_in_boom_bap(tmp_path):
+    from pathlib import Path
+
+    y = audio_io.decode(Path(__file__).parent / "audio" / "funk_band_94.mp3")
+    src = _source(tmp_path, y, "funk")
+    doc, feats = analysis.analyze(y)
+    found = sampling.discover(src, doc, feats)
+    clips = lambda arr: next(t for t in arr["tracks"] if t["id"] == "bass")["clips"]
+    bb = compose.variation({"genre": "boombap", "bars": 16}, found, {src["id"]: src}, {src["id"]: doc}, "loop_flip", seed=3)
+    assert bb["meta"]["bass_from_sample"] and not clips(bb)
+    assert next(t for t in bb["tracks"] if t["id"] == "sample")["fx"]["highpass_hz"] <= 45  # its low end is kept
+    trap = compose.variation({"genre": "trap", "bars": 16}, found, {src["id"]: src}, {src["id"]: doc}, "loop_flip", seed=3)
+    assert not trap["meta"]["bass_from_sample"] and clips(trap)  # trap is defined by its 808
+
+
+def test_no_riser_and_the_crash_only_marks_the_first_drop(tmp_path, demo_audio):
+    _, _, arr, _ = _beat(tmp_path, demo_audio[: int(8 * SPB * SR)], "trans", "trap")
+    assert "fx_riser" not in arr["patterns"]
+    assert not any(e.get("reverse") for p in arr["patterns"].values() for e in p["events"])
+    fx = next(t for t in arr["tracks"] if t["id"] == "fx")["clips"]
+    assert len(fx) <= 1
+    assert arr["kit"] in drums.SAMPLED and drums.SAMPLED[arr["kit"]]["genre"] == "trap"  # recorded drums, not synthesized

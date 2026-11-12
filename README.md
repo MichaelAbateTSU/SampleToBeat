@@ -52,11 +52,15 @@ relying on it.
    coherence, how cleanly it loops, level, distinctiveness). A file is used whole only if it was cut as a loop.
 3. **Compose four flips**: loop flip, chopped, slowed, sped up. The sample is fitted to the genre's tempo the way
    a record is: change speed and pitch together, play it half or double time, and stretch by 8% at most. Chops
-   are equal slices re-ordered on the beat. Drums swing as much as the sample does, each drum keeps its own
-   constant lean against the grid, and the 808 plays the roots the sample's own bass plays.
-4. **Render and check.** The sample dips under each kick, the mix goes through gentle bus compression and is
-   mastered to -11 LUFS with a true-peak ceiling, then run through technical checks (not silent, not clipped, no
-   dead sections, distinct from its siblings). Failures are regenerated with a new seed.
+   are equal slices re-ordered on the beat. Drums are recorded one-shots (three public-domain kits per style) in
+   patterns producers actually program; they swing as much as the sample does. The 808 plays the roots the
+   sample's own bass plays. Sections change with a cut or a fill, never a riser.
+4. **Render and check.** Track levels are set from a test render of the hook, the sample dips under each kick,
+   the mix goes through gentle bus compression and is mastered to -11 LUFS with a true-peak ceiling, then run
+   through technical checks (not silent, not clipped, no dead sections, distinct from its siblings). Failures
+   are regenerated with a new seed.
+
+The rules and where each comes from are in [`docs/ENGINE.md`](docs/ENGINE.md).
 
 `scripts/diagnose.py` measures tempo, timing against the grid, bass-to-sample agreement and tonal balance on the
 recordings in `backend/tests/audio`, and writes each flip as an MP3 for listening.

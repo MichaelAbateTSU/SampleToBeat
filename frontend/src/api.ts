@@ -34,7 +34,7 @@ export interface Plans {
   billing: Me["billing"];
 }
 
-export interface Genre { label: string; bpm: [number, number]; swing: [number, number]; kit: string }
+export interface Genre { label: string; bpm: [number, number]; swing: [number, number]; kit: string; half_time?: boolean }
 
 export interface Capabilities {
   genres: Record<string, Genre>;

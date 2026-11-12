@@ -76,14 +76,15 @@ def sections(template: str, bars: int) -> list[dict]:
     t = TEMPLATES[template]
     tot = sum(b for _, b in t)
     want = [b * bars / tot for _, b in t]
-    sizes = [max(2, int(round(w / 2)) * 2) for w in want]
+    q = 4 if bars >= 24 and bars % 4 == 0 else 2  # whole four-bar phrases whenever the length allows
+    sizes = [max(q, int(round(w / q)) * q) for w in want]
     while (d := bars - sum(sizes)) != 0:  # hand the rounding error to whichever section is furthest from its share
         if d > 0:
             i = max(range(len(sizes)), key=lambda i: want[i] - sizes[i])
-            sizes[i] += min(2, d)
+            sizes[i] += min(q, d)
         else:
-            i = min((i for i in range(len(sizes)) if sizes[i] > 2), key=lambda i: want[i] - sizes[i])
-            sizes[i] -= min(2, -d)
+            i = min((i for i in range(len(sizes)) if sizes[i] > q), key=lambda i: want[i] - sizes[i])
+            sizes[i] -= min(q, -d)
     out, s = [], 0
     for (name, _), b in zip(t, sizes):
         out.append({"name": name, "start_bar": s, "bars": b})
@@ -290,16 +291,66 @@ def choose_samples(samples: list[dict], strategy: str, settings: dict, rng, rank
     return main, max(pool, key=lambda s: _compat(main, s) + 0.3 * score(s) + rng.uniform(0, 0.05))
 
 
-def _roots(arr, pid, nbars, samples, sources, key, key_conf) -> list[int]:
-    """Bass root for every half bar, heard from the *rendered* sample pattern (so pitch changes and chop order
-    are accounted for). See bass.roots_from_audio."""
+def _pattern_audio(arr, pid, nbars, samples, sources) -> np.ndarray:
+    """A sample pattern rendered on its own (mono, no track effects): what the bass has to agree with."""
     tmp = {**arr, "bars": nbars, "tracks": [{"id": "x", "kind": "sample", "clips": [
         {"id": "c", "pattern_id": pid, "start_bar": 0, "bars": nbars}]}]}
-    y = render.render(tmp, samples, sources, master=False)["master"]
-    return bass.roots_from_audio(y.mean(axis=1), float(arr["bpm"]), nbars * 2, key, key_conf)
+    return render.render(tmp, samples, sources, master=False)["master"].mean(axis=1)
 
 
 # ---------------------------------------------------------------- variation
+
+# Loudness of each track in the hook relative to the kick (LU). Fixed fader values cannot be right for every upload:
+# samples arrive anywhere between whisper-quiet and brick-walled, and a mix where the 808 is 10 dB over the sample
+# is the first thing a listener hears as "bad".
+BALANCE = {
+    "boombap": {"snare": 0.0, "hats": -8.0, "perc": -11.0, "bass": 2.0, "sample": 10.0},
+    "lofi": {"snare": -2.0, "hats": -10.0, "perc": -12.0, "bass": 2.0, "sample": 12.0},
+    "trap": {"snare": 0.0, "hats": -7.0, "perc": -10.0, "bass": 3.0, "sample": 8.0},
+    "drill": {"snare": 0.0, "hats": -7.0, "perc": -9.0, "bass": 3.0, "sample": 8.0},
+}
+PRESENCE = {"boombap": -9.0, "lofi": -14.0, "trap": -9.0, "drill": -10.0}  # least 2-8 kHz energy relative to 200 Hz-2 kHz (dB)
+
+
+def _band_db(y: np.ndarray, lo: float, hi: float) -> float:
+    m = y.mean(axis=1)
+    spec = np.abs(np.fft.rfft(m * np.hanning(len(m)))) ** 2
+    f = np.fft.rfftfreq(len(m), 1 / SR)
+    return float(10 * np.log10(spec[(f >= lo) & (f < hi)].sum() + 1e-12))
+
+
+def balance(arr: dict, samples: dict, sources: dict) -> dict:
+    """Sets track levels (and how bright the sample is) from a test render of the hook. Returns what it measured."""
+    hook = next((sc for sc in arr["sections"] if ROLE.get(sc["name"]) == "main"), arr["sections"][0])
+    bars = min(4, hook["bars"])
+    tracks = {t["id"]: t for t in arr["tracks"]}
+    res = render.render(arr, samples, sources, scope="loop", loop_start_bar=hook["start_bar"], loop_bars=bars, master=False)
+    stems = res["stems"]
+    report: dict = {}
+    smp = stems.get("sample")
+    if smp is not None and arr["strategy"] != "dark":  # a dull sample is lifted towards the brightness of a record
+        want = PRESENCE[arr["genre"]]
+        have = _band_db(smp, 2000, 8000) - _band_db(smp, 200, 2000)
+        boost = round(float(np.clip(0.6 * (want - have), 0.0, 5.0)), 1)
+        if boost >= 1.0:
+            for tid in ("sample", "sample2"):
+                tracks[tid]["fx"] = {**tracks[tid]["fx"], "presence_db": boost}
+            report["presence_db"] = boost
+            res = render.render(arr, samples, sources, scope="loop", loop_start_bar=hook["start_bar"], loop_bars=bars, master=False)
+            stems = res["stems"]
+    loud = {tid: render.loudness(y) for tid, y in stems.items()}
+    ref = loud.get("kick")
+    if ref is None:
+        return report
+    for tid, target in BALANCE[arr["genre"]].items():
+        if loud.get(tid) is None:
+            continue
+        shift = float(np.clip(ref + target - loud[tid], -14.0, 8.0 if tid == "perc" else 14.0))
+        tracks[tid]["volume_db"] = round(float(np.clip(tracks[tid]["volume_db"] + shift, -40.0, 9.0)), 1)
+        report[tid] = round(shift, 1)
+    tracks["sample2"]["volume_db"] = tracks["sample"]["volume_db"]
+    return report
+
 
 def variation(settings: dict, samples: list[dict], sources: dict, analyses: dict, strategy: str, seed: int,
               rank: int = 0) -> dict:
@@ -335,7 +386,9 @@ def variation(settings: dict, samples: list[dict], sources: dict, analyses: dict
         swing = float(np.clip(an.get("swing") or lo, lo, max(hi, 66 if genre in ("boombap", "lofi") else hi)))
     template = st["structure"] if st["structure"] != "auto" else {
         "loop_flip": "loop", "hard_chop": "standard", "dark": "standard", "creative": "verse_hook"}[strategy]
-    secs = sections(template, int(st["bars"]))
+    # trap and drill are counted half-time (the clap is on beat 3), so the same length of music takes twice the bars
+    n_bars = int(st["bars"]) * (2 if drums.GENRES[genre].get("half_time") else 1)
+    secs = sections(template, n_bars)
     energy, ci = float(st["energy"]), float(st["chop_intensity"])
     complexity = float(np.clip(st["drum_complexity"] + {"creative": 0.15, "dark": -0.05}.get(strategy, 0) + 0.2 * (energy - 0.5), 0, 1))
     fx_name, fx = SAMPLE_FX[genre]
@@ -370,28 +423,38 @@ def variation(settings: dict, samples: list[dict], sources: dict, analyses: dict
         orders = (hook, verse)
     sec = None  # a second sample layered on top clashes more often than it helps
 
-    dv = drums.generate(genre, complexity, seed, bars=2)
+    dv = drums.generate(genre, complexity, seed, bars=4)
     for name, evs in dv.items():
-        for lane in LANES + ["fx"]:
+        length = 2 if name in ("fill", "cut") else 4
+        for lane in LANES:
             e = [x for x in evs if drums.TRACK_OF[x["inst"]] == lane]
             if e:
-                P[f"d_{name}_{lane}"] = {"kind": "drums", "length_ticks": 2 * TICKS_PER_BAR, "events": e}
+                P[f"d_{name}_{lane}"] = {"kind": "drums", "length_ticks": length * TICKS_PER_BAR, "events": e}
     P["fx_crash"] = {"kind": "drums", "length_ticks": TICKS_PER_BAR, "events": [
-        {"type": "drum", "tick": 0, "inst": "crash", "vel": 0.7}]}
-    P["fx_riser"] = {"kind": "drums", "length_ticks": TICKS_PER_BAR, "events": [
-        {"type": "drum", "tick": TICKS_PER_BAR - 2 * PPQ, "inst": "crash", "vel": 0.6, "reverse": True, "dur": 2 * PPQ}]}
+        {"type": "drum", "tick": 0, "inst": "crash", "vel": 0.55}]}
+    # one bar of drums alone to lead into the first drop: the last two beats of the fill
+    pickup = [{**x, "tick": x["tick"] - TICKS_PER_BAR} for x in dv["fill"] if x["tick"] >= TICKS_PER_BAR + 2 * PPQ]
+    for lane in LANES:
+        e = [x for x in pickup if drums.TRACK_OF[x["inst"]] == lane]
+        if e:
+            P[f"d_pickup_{lane}"] = {"kind": "drums", "length_ticks": TICKS_PER_BAR, "events": e}
 
     arr = {"schema_version": 1, "bpm": bpm, "time_signature": "4/4", "key": f"{NOTE_NAMES[key[0]]} {key[1]}" if key else None,
-           "genre": genre, "kit": drums.GENRES[genre]["kit"], "swing": swing, "bars": int(st["bars"]), "seed": int(seed),
+           "genre": genre, "kit": st.get("kit") or drums.kit_for(genre, seed), "swing": swing, "bars": n_bars, "seed": int(seed),
            "strategy": strategy, "sections": secs, "patterns": P, "bass": params, "master": {"target_lufs": -11.0}, "tracks": []}
     for pid, p in P.items():
         p["id"] = pid
     # 808: roots from the rendered sample pattern, locked to the matching kick pattern
     smp = {s["id"]: s for s in [main] + ([sec] if sec else [])}
+    keep_bass = False  # the sample brings a bass line of its own: keep it and add no 808 (boom bap and lo-fi only)
     for bname, spid, dname in (("b_main", "s_main", "main"), ("b_var", "s_var", "alt")):
-        nb = lcm(max(1, P[spid]["length_ticks"] // TICKS_PER_BAR), 2)
-        roots = _roots(arr, spid, nb, smp, sources, key, key_conf)
-        kicks = _tile([x for x in dv[dname] if x["inst"] == "kick"], 2 * TICKS_PER_BAR, nb * TICKS_PER_BAR)
+        nb = lcm(max(1, P[spid]["length_ticks"] // TICKS_PER_BAR), 4)
+        heard = _pattern_audio(arr, spid, nb, smp, sources)
+        # bass root for every half bar, from the rendered pattern so pitch changes and chop order are accounted for
+        roots = bass.roots_from_audio(heard, float(bpm), nb * 2, key, key_conf)
+        if bname == "b_main" and genre in ("boombap", "lofi") and not oneshot:
+            keep_bass = bass.own_bass_line(heard, float(bpm))
+        kicks = _tile([x for x in dv[dname] if x["inst"] == "kick"], 4 * TICKS_PER_BAR, nb * TICKS_PER_BAR)
         notes = bass.generate(roots, kicks, genre, seed, key, float(st["bass_intensity"]))
         P[bname] = {"id": bname, "kind": "bass", "length_ticks": nb * TICKS_PER_BAR, "events": notes,
                     "roots": [NOTE_NAMES[r] for r in roots[::2]], "half_bar_roots": [NOTE_NAMES[r] for r in roots]}
@@ -403,45 +466,73 @@ def variation(settings: dict, samples: list[dict], sources: dict, analyses: dict
         if pid in P and bars > 0:
             clips[track].append({"id": f"clip{next(counter)}", "pattern_id": pid, "start_bar": int(start), "bars": int(bars)})
 
-    def drum_section(variant, s, b, fill=True):
-        body, tail = (b - 2, 2) if fill and b >= 4 else (b, 0)
-        for lane in LANES:
-            add(lane, f"d_{variant}_{lane}", s, body)
-            if tail:  # fills only at phrase boundaries
-                add(lane, f"d_fill_{lane}", s + body, tail)
+    def bass_section(bname, s, b, ending):
+        """The 808 for a section. On a cut it stops with the drums, half way through the last bar."""
+        if keep_bass:
+            return
+        if ending != "cut" or b < 2 or bname not in P:
+            return add("bass", bname, s, b)
+        add("bass", bname, s, b - 1)
+        src, half = P[bname], TICKS_PER_BAR // 2
+        t0 = ((b - 1) * TICKS_PER_BAR) % src["length_ticks"]
+        evs = [{**e, "tick": e["tick"] - t0, "dur": min(e["dur"], half - (e["tick"] - t0)), "slide": False}
+               for e in src["events"] if t0 <= e["tick"] < t0 + half]
+        pid = f"{bname}_cut{(b - 1) % (src['length_ticks'] // TICKS_PER_BAR)}"
+        P[pid] = {"id": pid, "kind": "bass", "length_ticks": TICKS_PER_BAR, "events": evs}
+        add("bass", pid, s + b - 1, 1)
 
-    for sc in secs:
+    def drum_section(variant, s, b, ending=None, lanes=LANES):
+        """Drums for a section; `ending` ("fill" or "cut") replaces its last two bars."""
+        body, tail = (b - 2, 2) if ending and b >= 4 else (b, 0)
+        for lane in lanes:
+            add(lane, f"d_{variant}_{lane}", s, body)
+            if tail:
+                add(lane, f"d_{ending}_{lane}", s + body, tail)
+
+    # Transitions are made by taking things away (a cut) or by the drummer (a fill), alternating so no two section
+    # changes in a row sound alike. The crash marks only the first time the full beat comes in.
+    endings = ["cut", "fill"] if rng.random() < 0.5 else ["fill", "cut"]
+    n_change, crashed = 0, False
+    for i, sc in enumerate(secs):
         s, b = sc["start_bar"], sc["bars"]
         role = ROLE[sc["name"]]
-        if role == "intro":  # the sample alone, muffled, then opening up into the drop
+        nxt = ROLE[secs[i + 1]["name"]] if i + 1 < len(secs) else None
+        ending = None
+        if nxt in ("main", "verse"):
+            ending = endings[n_change % 2]
+            n_change += 1
+        if role == "intro":  # the sample alone, muffled, then opening up; drums pick up into the drop
             h = b // 2 if b >= 4 else b
             add("sample2", "s_filt", s, h)
             add("sample", "s_main", s + h, b - h)
-            if energy > 0.5 and b >= 4:
-                add("hats", "d_sparse_hats", s + h, b - h)
-            add("fx", "fx_riser", s + b - 1, 1)
+            if b >= 2 and ending == "fill":
+                for lane in LANES:
+                    add(lane, f"d_pickup_{lane}", s + b - 1, 1)
         elif role == "main":
             add("sample", "s_main", s, b)
-            drum_section("main", s, b)
-            add("bass", "b_main", s, b)
-            add("fx", "fx_crash", s, 1)
-        elif role == "verse":
+            drum_section("main", s, b, ending)
+            bass_section("b_main", s, b, ending)
+            if not crashed:
+                add("fx", "fx_crash", s, 1)
+                crashed = True
+        elif role == "verse":  # stripped back for the vocal: another kick pattern, no percussion
             add("sample", "s_var", s, b)
-            drum_section("alt", s, b)
-            add("bass", "b_var", s, b)
-        elif role == "breakdown":  # drums drop out, the muffled sample carries it
+            drum_section("alt", s, b, ending, lanes=["kick", "snare", "hats"])
+            bass_section("b_var", s, b, ending)
+        elif role == "breakdown":  # drums and bass drop out, the muffled sample carries it
             add("sample2", "s_filt", s, b)
-            if energy >= 0.5:
-                add("hats", "d_sparse_hats", s, b)
-            add("fx", "fx_riser", s + b - 1, 1)
-        else:  # outro: drums leave, then the sample goes back under the filter
+            if b >= 2 and ending == "fill":
+                for lane in LANES:
+                    add(lane, f"d_pickup_{lane}", s + b - 1, 1)
+        else:  # outro: the beat thins out, then the sample goes back under the filter
             h = max(1, b // 2)
             add("sample", "s_main", s, h)
             add("sample2", "s_filt", s + h, b - h)
-            drum_section("sparse", s, h, fill=False)
-            add("fx", "fx_crash", s, 1)
+            drum_section("sparse", s, h)
     # quiet sources (and one-shots, which are mostly decay) are lifted so the sample still leads the mix
     lift = float(np.clip(-20.0 - float(main.get("rms_db") or -20.0), 0.0, 12.0)) + (5.0 if oneshot else 0.0)
+    if keep_bass:
+        fx["highpass_hz"] = 40.0
     for tid, name, kind, color, vol, pan in TRACKS:
         vol = min(6.0, vol + lift) if tid == "sample" else vol
         arr["tracks"].append({"id": tid, "name": name, "kind": kind, "color": color, "volume_db": vol, "pan": pan,
@@ -458,10 +549,11 @@ def variation(settings: dict, samples: list[dict], sources: dict, analyses: dict
         "secondary_sample": sec["id"] if sec else None, "sample_names": names, "ratio": ratio, "pitch": pitch,
         "pitch_treatments": treatments, "template": template, "orders": list(orders),
         "stretch": 0.0 if oneshot else round(bpm / (main["source_bpm"] * 2 ** (pitch / 12) * ratio) - 1, 4),
-        "own_drums_removed": bool(flags.get("harmonic")), "drum_complexity": round(complexity, 3),
+        "own_drums_removed": bool(flags.get("harmonic")), "bass_from_sample": bool(keep_bass), "drum_complexity": round(complexity, 3),
         "conservative_bass": key_conf < 0.35, "rank": rank,
     }
     arr["meta"]["signature"] = signature(arr)
+    arr["meta"]["balance"] = balance(arr, {x["id"]: x for x in samples}, sources)
     return arr
 
 
@@ -519,8 +611,18 @@ def evaluate(arr: dict, samples: dict, sources: dict, res: dict | None = None) -
         bars = [int(round(i * spb * SR)) for i in range(1, arr["bars"])]
         tonal = [v for k, v in res["stems"].items() if next(t["kind"] for t in arr["tracks"] if t["id"] == k) != "drums"]
         # drum transients are intentional steps; clicks only matter on sustained sample/808 material
-        jumps = [float(np.abs(v[b] - v[b - 1]).max()) for v in tonal for b in bars if b < len(v)]
-        check("smooth_boundaries", max(jumps, default=0) < 0.1, f"max sample/808 bar-line step {max(jumps, default=0):.4f}")
+        # a click is a step bigger than anything the material does away from the bar lines (a sample with its own
+        # drums has steep attacks everywhere, and one landing on a bar line is not a fault)
+        worst = 0.0
+        for v in tonal:
+            d = np.abs(np.diff(v, axis=0)).max(axis=1)
+            at = [b - 1 for b in bars if 0 < b <= len(d)]
+            if not at:
+                continue
+            jump = float(d[at].max())
+            d[at] = 0.0
+            worst = max(worst, jump / max(0.1, 1.5 * float(d.max())))
+        check("smooth_boundaries", worst < 1.0, f"largest sample/808 bar-line step is {worst:.2f}x the click threshold")
         onset = librosa.onset.onset_strength(y=librosa.resample(y.mean(axis=1), orig_sr=SR, target_sr=22050), sr=22050)
         musical = {"lufs": m["lufs"], "onset_density": round(float((onset > onset.mean() + onset.std()).mean() * 43), 2),
                    "stem_rms_db": {k: round(float(20 * np.log10(np.sqrt(np.mean(v ** 2)) + 1e-9)), 1) for k, v in res["stems"].items()}}

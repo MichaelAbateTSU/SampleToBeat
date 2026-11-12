@@ -16,7 +16,7 @@ export function StyleControls({ value, onChange, showLength = true }: { value: P
   const genre = value.genre ?? "boombap";
   const g = genres[genre];
   const bpm = value.bpm ?? (g ? Math.round((g.bpm[0] + g.bpm[1]) / 2) : 90);
-  const seconds = (bars: number) => Math.round((bars * 240) / bpm);
+  const seconds = (bars: number) => Math.round((bars * (g?.half_time ? 2 : 1) * 240) / bpm);
   const set = (patch: Partial<GenerateSettings>) => onChange({ ...value, ...patch });
   return (
     <div className="style-controls">

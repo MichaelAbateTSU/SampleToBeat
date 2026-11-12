@@ -150,6 +150,34 @@ def bar_roots(bar_chroma: list[list[float]], key: tuple[int, str] | None, key_co
     return roots
 
 
+def own_bass_line(y: np.ndarray, bpm: float) -> bool:
+    """True if the sample carries a bass line that moves faster than an 808 can follow (a bass guitar playing a
+    riff, not a held root). Such a sample already has its low end; a second bass under it can only clash."""
+    import librosa
+
+    sr = 22050
+    m = librosa.resample(y.astype(np.float32), orig_sr=SR, target_sr=sr)
+    beat = int(round(60.0 / bpm * sr))
+    if len(m) < 4 * beat or np.abs(m).max() < 1e-4:
+        return False
+    hop = 512
+    spec = np.abs(librosa.stft(m, n_fft=4096, hop_length=hop)) ** 2
+    f = librosa.fft_frequencies(sr=sr, n_fft=4096)
+    if spec[(f >= 40) & (f < 130)].sum() < 0.12 * spec[f >= 130].sum():
+        return False  # no real bass register to protect
+    low = np.abs(librosa.cqt(m, sr=sr, hop_length=hop, fmin=librosa.note_to_hz("E1"), n_bins=24, bins_per_octave=12)) ** 2  # E1..D#3
+    notes = []
+    for i in range(len(m) // (beat // 2)):  # the strongest bass note in every eighth
+        a, b = int(i * beat / 2 / hop), max(int(i * beat / 2 / hop) + 1, int((i + 1) * beat / 2 / hop))
+        e = low[:, a:b].sum(axis=1)
+        notes.append(int(np.argmax(e)) % 12 if e.sum() > 0.25 * low.sum() / max(1, len(m) // (beat // 2)) else None)
+    heard = [n for n in notes if n is not None]
+    if len(heard) < 8:
+        return False
+    moves = sum(1 for a, b in zip(heard, heard[1:]) if a != b) / (len(heard) - 1)
+    return moves > 0.4  # changes on more than two eighths in five: a line, not a pedal
+
+
 def roots_from_audio(y: np.ndarray, bpm: float, n_half_bars: int, key: tuple[int, str] | None, key_conf: float) -> list[int]:
     """One root per half bar. If the sample has a bass line of its own, follow it: the lowest strong pitch is
     what a producer matches the 808 to by ear, and it is right even when the chord above is ambiguous. Without

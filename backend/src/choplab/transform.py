@@ -20,7 +20,7 @@ DEFAULT_TRANSFORM = {
 DEFAULT_FX = {
     "highpass_hz": 0.0, "lowpass_hz": 0.0, "saturation": 0.0, "bitcrush_bits": 0, "reverb": 0.0,
     "delay": 0.0, "delay_beats": 0.75, "width": 1.0, "compress": False, "wobble": 0.0, "vinyl": 0.0,
-    "eq_low_db": 0.0, "eq_mid_db": 0.0, "eq_high_db": 0.0,
+    "eq_low_db": 0.0, "eq_mid_db": 0.0, "eq_high_db": 0.0, "presence_db": 0.0,
 }
 
 
@@ -102,9 +102,10 @@ def effects(y: np.ndarray, fx: dict, bpm: float = 90.0, seed: int = 0) -> np.nda
         chain.append(pb.LowpassFilter(cutoff_frequency_hz=float(fx["lowpass_hz"])))
     if fx["bitcrush_bits"]:
         chain.append(pb.Bitcrush(bit_depth=float(fx["bitcrush_bits"])))
-    for key, f in (("eq_low_db", pb.LowShelfFilter), ("eq_mid_db", pb.PeakFilter), ("eq_high_db", pb.HighShelfFilter)):
+    for key, f in (("eq_low_db", pb.LowShelfFilter), ("eq_mid_db", pb.PeakFilter), ("eq_high_db", pb.HighShelfFilter),
+                   ("presence_db", pb.HighShelfFilter)):
         if fx[key]:
-            hz = {"eq_low_db": 120.0, "eq_mid_db": 1000.0, "eq_high_db": 6000.0}[key]
+            hz = {"eq_low_db": 120.0, "eq_mid_db": 1000.0, "eq_high_db": 6000.0, "presence_db": 2200.0}[key]
             chain.append(f(cutoff_frequency_hz=hz, gain_db=float(fx[key])))
     if fx["compress"]:
         chain.append(pb.Compressor(threshold_db=-18, ratio=3, attack_ms=10, release_ms=120))

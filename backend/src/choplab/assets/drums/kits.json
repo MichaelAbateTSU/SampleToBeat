@@ -1,0 +1,182 @@
+{
+ "bb_crate": {
+  "label": "Crate acoustic",
+  "genre": "boombap",
+  "sounds": {
+   "kick": "bb_crate/kick.wav",
+   "snare": "bb_crate/snare.wav",
+   "hat": "bb_crate/hat.wav",
+   "openhat": "bb_crate/openhat.wav",
+   "rim": "bb_crate/rim.wav",
+   "clap": "bb_crate/clap.wav",
+   "perc": "bb_crate/perc.wav",
+   "ride": "bb_crate/ride.wav",
+   "crash": "bb_crate/crash.wav"
+  }
+ },
+ "bb_break": {
+  "label": "Break kit",
+  "genre": "boombap",
+  "sounds": {
+   "kick": "bb_break/kick.wav",
+   "snare": "bb_break/snare.wav",
+   "hat": "bb_break/hat.wav",
+   "openhat": "bb_break/openhat.wav",
+   "rim": "bb_break/rim.wav",
+   "clap": "bb_break/clap.wav",
+   "perc": "bb_break/perc.wav",
+   "ride": "bb_break/ride.wav",
+   "crash": "bb_break/crash.wav"
+  }
+ },
+ "bb_tape": {
+  "label": "Tape kit",
+  "genre": "boombap",
+  "sounds": {
+   "kick": "bb_tape/kick.wav",
+   "snare": "bb_tape/snare.wav",
+   "hat": "bb_tape/hat.wav",
+   "openhat": "bb_tape/openhat.wav",
+   "rim": "bb_tape/rim.wav",
+   "clap": "bb_tape/clap.wav",
+   "perc": "bb_tape/perc.wav",
+   "ride": "bb_tape/ride.wav",
+   "crash": "bb_tape/crash.wav"
+  }
+ },
+ "lofi_soft": {
+  "label": "Soft and dusty",
+  "genre": "lofi",
+  "sounds": {
+   "kick": "lofi_soft/kick.wav",
+   "snare": "lofi_soft/snare.wav",
+   "hat": "lofi_soft/hat.wav",
+   "openhat": "lofi_soft/openhat.wav",
+   "rim": "lofi_soft/rim.wav",
+   "clap": "lofi_soft/clap.wav",
+   "perc": "lofi_soft/perc.wav",
+   "ride": "lofi_soft/ride.wav",
+   "crash": "lofi_soft/crash.wav"
+  }
+ },
+ "lofi_tape": {
+  "label": "Tape saturated",
+  "genre": "lofi",
+  "sounds": {
+   "kick": "lofi_tape/kick.wav",
+   "snare": "lofi_tape/snare.wav",
+   "hat": "lofi_tape/hat.wav",
+   "openhat": "lofi_tape/openhat.wav",
+   "rim": "lofi_tape/rim.wav",
+   "clap": "lofi_tape/clap.wav",
+   "perc": "lofi_tape/perc.wav",
+   "ride": "lofi_tape/ride.wav",
+   "crash": "lofi_tape/crash.wav"
+  }
+ },
+ "lofi_room": {
+  "label": "Bedroom kit",
+  "genre": "lofi",
+  "sounds": {
+   "kick": "lofi_room/kick.wav",
+   "snare": "lofi_room/snare.wav",
+   "hat": "lofi_room/hat.wav",
+   "openhat": "lofi_room/openhat.wav",
+   "rim": "lofi_room/rim.wav",
+   "clap": "lofi_room/clap.wav",
+   "perc": "lofi_room/perc.wav",
+   "ride": "lofi_room/ride.wav",
+   "crash": "lofi_room/crash.wav"
+  }
+ },
+ "trap_808": {
+  "label": "Classic 808",
+  "genre": "trap",
+  "sounds": {
+   "kick": "trap_808/kick.wav",
+   "snare": "trap_808/snare.wav",
+   "clap": "trap_808/clap.wav",
+   "hat": "trap_808/hat.wav",
+   "openhat": "trap_808/openhat.wav",
+   "rim": "trap_808/rim.wav",
+   "perc": "trap_808/perc.wav",
+   "ride": "trap_808/ride.wav",
+   "crash": "trap_808/crash.wav"
+  }
+ },
+ "trap_clean": {
+  "label": "Clean and tight",
+  "genre": "trap",
+  "sounds": {
+   "kick": "trap_clean/kick.wav",
+   "snare": "trap_clean/snare.wav",
+   "clap": "trap_clean/clap.wav",
+   "hat": "trap_clean/hat.wav",
+   "openhat": "trap_clean/openhat.wav",
+   "rim": "trap_clean/rim.wav",
+   "perc": "trap_clean/perc.wav",
+   "ride": "trap_clean/ride.wav",
+   "crash": "trap_clean/crash.wav"
+  }
+ },
+ "trap_hard": {
+  "label": "Hard hitting",
+  "genre": "trap",
+  "sounds": {
+   "kick": "trap_hard/kick.wav",
+   "snare": "trap_hard/snare.wav",
+   "clap": "trap_hard/clap.wav",
+   "hat": "trap_hard/hat.wav",
+   "openhat": "trap_hard/openhat.wav",
+   "rim": "trap_hard/rim.wav",
+   "perc": "trap_hard/perc.wav",
+   "ride": "trap_hard/ride.wav",
+   "crash": "trap_hard/crash.wav"
+  }
+ },
+ "drill_dark": {
+  "label": "Dark and tight",
+  "genre": "drill",
+  "sounds": {
+   "kick": "drill_dark/kick.wav",
+   "snare": "drill_dark/snare.wav",
+   "clap": "drill_dark/clap.wav",
+   "hat": "drill_dark/hat.wav",
+   "openhat": "drill_dark/openhat.wav",
+   "rim": "drill_dark/rim.wav",
+   "perc": "drill_dark/perc.wav",
+   "ride": "drill_dark/ride.wav",
+   "crash": "drill_dark/crash.wav"
+  }
+ },
+ "drill_uk": {
+  "label": "Cold steel",
+  "genre": "drill",
+  "sounds": {
+   "kick": "drill_uk/kick.wav",
+   "snare": "drill_uk/snare.wav",
+   "clap": "drill_uk/clap.wav",
+   "hat": "drill_uk/hat.wav",
+   "openhat": "drill_uk/openhat.wav",
+   "rim": "drill_uk/rim.wav",
+   "perc": "drill_uk/perc.wav",
+   "ride": "drill_uk/ride.wav",
+   "crash": "drill_uk/crash.wav"
+  }
+ },
+ "drill_ny": {
+  "label": "Street kit",
+  "genre": "drill",
+  "sounds": {
+   "kick": "drill_ny/kick.wav",
+   "snare": "drill_ny/snare.wav",
+   "clap": "drill_ny/clap.wav",
+   "hat": "drill_ny/hat.wav",
+   "openhat": "drill_ny/openhat.wav",
+   "rim": "drill_ny/rim.wav",
+   "perc": "drill_ny/perc.wav",
+   "ride": "drill_ny/ride.wav",
+   "crash": "drill_ny/crash.wav"
+  }
+ }
+}
