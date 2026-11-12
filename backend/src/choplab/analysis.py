@@ -141,7 +141,9 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         oenv_f = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP)
         low = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmax=200, n_mels=32)[: len(oenv_f)]
         high = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmin=1500, n_mels=32)[: len(oenv_f)]
-        base_tempo, _ = librosa.beat.beat_track(onset_envelope=oenv_f, sr=ASR, hop_length=BHOP)
+        # The coarse tempo guess comes from the standard-hop envelope: librosa's tempogram at the fine hop needs
+        # gigabytes on a song-length file. The fine envelope is still used below to place the beats precisely.
+        base_tempo, _ = librosa.beat.beat_track(onset_envelope=oenv, sr=ASR, hop_length=HOP)
         base_tempo = float(np.atleast_1d(base_tempo)[0]) or 90.0
         base_tempo, frames, cands = _pick_tempo(oenv_f, low, high, base_tempo)
         beat_times = librosa.frames_to_time(frames, sr=ASR, hop_length=BHOP)

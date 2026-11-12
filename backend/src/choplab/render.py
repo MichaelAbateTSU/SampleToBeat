@@ -162,7 +162,11 @@ def render(arr: dict, samples: dict, sources: dict, scope: str = "full", loop_st
 
 def true_peak(y: np.ndarray) -> float:
     """4x-oversampled peak estimate (ITU-style approximation)."""
-    return float(np.abs(resample_poly(y, 4, 1, axis=0)).max()) if len(y) else 0.0
+    block, pad, peak = 10 * SR, 64, 0.0  # in blocks: oversampling a whole song at once costs hundreds of MB
+    for a in range(0, len(y), block):
+        seg = y[max(0, a - pad): a + block + pad]
+        peak = max(peak, float(np.abs(resample_poly(seg, 4, 1, axis=0)).max()))
+    return peak
 
 
 def loudness(y: np.ndarray) -> float | None:
@@ -193,10 +197,12 @@ def _master(mix: np.ndarray, bufs: dict, target_lufs: float) -> dict:
     if tp > db_to_gain(CEILING_DB):
         out *= np.float32(db_to_gain(CEILING_DB) / tp)
         tp = true_peak(out)
-    stems = {k: v * np.float32(db_to_gain(g_db)) for k, v in bufs.items()}
-    sp = max((float(np.abs(v).max()) for v in stems.values()), default=0.0)
+    # stems are scaled in place (render() owns these buffers): two extra copies of every track is ~0.5 GB on a long beat
+    sp = max((float(np.abs(v).max()) for v in bufs.values()), default=0.0) * db_to_gain(g_db)
     stem_trim = min(1.0, 0.98 / sp) if sp > 0 else 1.0  # stems are unlimited: one common trim keeps balance
-    stems = {k: v * np.float32(stem_trim) for k, v in stems.items()}
+    stems = bufs
+    for v in stems.values():
+        v *= np.float32(db_to_gain(g_db) * stem_trim)
     peak = float(np.abs(out).max()) if len(out) else 0.0
     metrics = {"duration_s": round(len(out) / SR, 3), "lufs_in": None if lufs_in is None else round(lufs_in, 2),
                "lufs": None if loudness(out) is None else round(loudness(out), 2), "master_gain_db": round(g_db, 2),

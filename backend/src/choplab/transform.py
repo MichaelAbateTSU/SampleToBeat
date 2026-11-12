@@ -170,3 +170,17 @@ def cached_transform(paths: tuple[str, ...], hashes: tuple[str, ...], start: flo
         _mem.clear()
     _mem[key] = y
     return y
+
+
+def release_memory() -> None:
+    """Drops in-memory copies of transformed audio (they stay cached on disk) and hands freed pages back to the
+    OS. Called between variations so a long generation does not accumulate every buffer it ever touched."""
+    import ctypes
+    import gc
+
+    _mem.clear()
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):  # not glibc (macOS, Windows, musl): nothing to trim
+        pass

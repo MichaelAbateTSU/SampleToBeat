@@ -5,7 +5,8 @@ your accounts or your money, in this order. Expect about an hour.
 
 ## 1. Host it on Render (about $26 a month)
 
-The engine needs roughly 1 GB of memory while rendering and a disk that survives restarts. Render's free plan
+The engine peaks at 1.1 to 1.4 GB of memory while rendering (measured; it grows with upload length, which is
+why uploads are capped at 5 minutes on this server) and needs a disk that survives restarts. Render's free plan
 has 512 MB, a tenth of a CPU and no disk, so it cannot run the product; earlier measurements on this repo's
 hosting branch showed it running out of memory. `render.yaml` therefore asks for the Standard plan
 (2 GB, 1 CPU, $25) plus a 10 GB disk (about $1).

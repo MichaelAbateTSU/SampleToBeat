@@ -1,7 +1,7 @@
 # Render Blueprint: one web service (API + web app in one container) with a persistent disk.
 # In Render: New > Blueprint > pick this repository and branch. You are asked for the secret values below.
 #
-# Plan: "standard" (2 GB RAM, 1 CPU). The audio engine needs about 1 GB while rendering and a persistent disk,
+# Plan: "standard" (2 GB RAM, 1 CPU). The audio engine peaks at 1.1 to 1.4 GB while rendering and needs a persistent disk,
 # and Render only attaches disks to paid instances. The free plan (512 MB, 0.1 CPU, no disk) cannot run it.
 services:
   - type: web

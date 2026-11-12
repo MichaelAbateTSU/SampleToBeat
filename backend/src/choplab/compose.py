@@ -514,11 +514,14 @@ def generate(settings: dict, samples: list[dict], sources: dict, analyses: dict,
                                  "detail": f"max spectral similarity {sim:.3f}"})
             ev["passed"] = ev["passed"] and not dup
             ev["attempts"] = attempt + 1
+            # keep only what gets stored: per-track stems of every variation would add up to gigabytes
+            res = {"master": res["master"], "metrics": res["metrics"]}
             cand = {"arrangement": arr, "evaluation": ev, "render": res, "fingerprint": fp}
             if best is None or (ev["passed"] and not best["evaluation"]["passed"]):
                 best = cand
             if ev["passed"]:
                 break
+        transform.release_memory()  # stretched-sample buffers of this variation are on disk if needed again
         sigs.add(best["arrangement"]["meta"]["signature"])
         fps.append(best.pop("fingerprint"))
         out.append(best)

@@ -68,7 +68,7 @@ Defined in `backend/src/choplab/accounts.py` and enforced by the API; the UI rea
 | Export | MP3 | WAV 16/24-bit, MP3 | + WAV 32-bit float |
 | Stems, MIDI, project file | no | yes | yes |
 | License for generated material | personal | commercial | commercial |
-| Upload limit | 50 MB / 6 min | 200 MB / 12 min | 1 GB / 20 min |
+| Upload limit | 50 MB / 3 min | 200 MB / 5 min | 200 MB / 5 min |
 
 Guests can make 3 beats before creating an account. Downloading needs an account.
 

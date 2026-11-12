@@ -26,23 +26,25 @@ EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$")
 PLANS = {
     "free": {
         "label": "Free", "tagline": "Hear what your sample can become", "price_monthly": 0, "price_yearly": 0,
-        "generations_per_month": 15, "projects": 5, "max_upload_mb": 50, "max_source_minutes": 6,
+        "generations_per_month": 15, "projects": 5, "max_upload_mb": 50, "max_source_minutes": 3,
         "formats": ["mp3"], "stems": False, "midi": False, "project_file": False, "separation": False,
         "commercial_license": False,
     },
     "pro": {
         "label": "Pro", "tagline": "Release-ready beats", "price_monthly": 9.99, "price_yearly": 95.88,
-        "generations_per_month": 300, "projects": 200, "max_upload_mb": 200, "max_source_minutes": 12,
+        "generations_per_month": 300, "projects": 200, "max_upload_mb": 200, "max_source_minutes": 5,
         "formats": ["mp3", "wav16", "wav24"], "stems": True, "midi": True, "project_file": True, "separation": True,
         "commercial_license": True,
     },
     "studio": {
         "label": "Studio", "tagline": "For producers who ship every week", "price_monthly": 24.99, "price_yearly": 239.88,
-        "generations_per_month": 2000, "projects": 2000, "max_upload_mb": 1024, "max_source_minutes": 20,
+        "generations_per_month": 2000, "projects": 2000, "max_upload_mb": 200, "max_source_minutes": 5,
         "formats": ["mp3", "wav16", "wav24", "wav32f"], "stems": True, "midi": True, "project_file": True,
         "separation": True, "commercial_license": True,
     },
 }
+# Upload length is capped by server memory, measured on a full four-flip run: about 1.1 GB up to 3 minutes,
+# 1.4 GB at 6, 2.6 GB at 12. The launch server has 2 GB, so 5 minutes is the ceiling until it is upsized.
 GUEST_GENERATIONS = 3  # lifetime, before an account is required
 PLAN_ORDER = ["free", "pro", "studio"]
 

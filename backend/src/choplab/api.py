@@ -946,7 +946,9 @@ def preview(id: str, body: schemas.PreviewRequest, user: User):
     p = _own("project", id, user)
     arr = schemas.arrangement(body.arrangement or p.get("arrangement") or {})
     _check_assets(id, arr)
-    res = render.render(arr, {s["id"]: s for s in _samples(p)}, _sources(p), body.scope, body.loop_start_bar, body.loop_bars)
+    with jobs.heavy:  # never render alongside a running job: see jobs.heavy
+        res = render.render(arr, {s["id"]: s for s in _samples(p)}, _sources(p), body.scope, body.loop_start_bar, body.loop_bars)
+    del res["stems"]
     d = _dir(id, "previews")
     for old in d.glob("studio_*"):  # keep one studio preview on disk
         old.unlink(missing_ok=True)
