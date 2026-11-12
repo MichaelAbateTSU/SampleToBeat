@@ -1,9 +1,9 @@
 # Launch posts
 
-Replace `{{URL}}` with the live address before posting. Attach `trailer/trailer.mp4` (16:9) or
+The live address is filled in below; change it if you move to a custom domain. Attach `trailer/trailer.mp4` (16:9) or
 `launch/trailer_vertical.mp4` (9:16). Thumbnail: `trailer/trailer_poster.jpg`.
 
-Every claim below is true of the product as shipped: four flips per sample, about half a minute, free to
+Every claim below is true of the product as shipped: four flips per sample, about a minute, free to
 try without an account, WAV/stems/MIDI on paid plans. Keep it that way if you edit.
 
 ## YouTube
@@ -16,7 +16,7 @@ around it: chopped, arranged, with drums and 808s in key. Then it gives you the 
 
 The beat in this trailer was made by ChopLab from the sample you see uploaded.
 
-Try it free, no account needed: {{URL}}
+Try it free, no account needed: https://choplab-mhgx.onrender.com
 
 It is not a text-to-song generator. It works on your sample with signal processing and music theory, so you
 can edit every part and nothing is trained on your uploads. You are responsible for the rights to samples
@@ -27,7 +27,7 @@ you upload.
 ## TikTok / Instagram Reels / YouTube Shorts (vertical cut)
 
 **Caption:** Every sample has a beat in it. Drop one in, get four finished flips with drums and 808s in key.
-Free to try: {{URL}}
+Free to try: https://choplab-mhgx.onrender.com
 
 **Hashtags:** #beatmaker #sampling #producer #boombap #trapbeats #musicproduction #flipthis
 
@@ -38,7 +38,7 @@ and 808s in key. Then export WAV, stems and MIDI.
 
 No prompt box. It works on *your* sample.
 
-Free to try, no account needed: {{URL}}
+Free to try, no account needed: https://choplab-mhgx.onrender.com
 
 ## Reddit (r/makinghiphop, r/WeAreTheMusicMakers — read each sub's self-promotion rules first)
 
@@ -50,7 +50,7 @@ drums and an 808 line that follows the sample's chords. You can change tempo, sw
 export WAV, stems and MIDI.
 
 It's deliberately not a text-to-music generator: no model, nothing trained on uploads, every sound comes from
-your sample or the built-in kits. Free to try without an account: {{URL}}
+your sample or the built-in kits. Free to try without an account: https://choplab-mhgx.onrender.com
 
 What I'd most like to know: where do the chops or the 808 go wrong on your samples?
 

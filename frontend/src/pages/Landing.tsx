@@ -91,7 +91,7 @@ export function Landing() {
             <p className="lead">ChopLab turns any piece of audio into four finished instrumentals: chopped, arranged, with drums and 808s in key. Then it hands you the WAV, the stems and the MIDI.</p>
             <ul className="hero-points">
               <li><Icon name="check" size={18} /> Free to try, no account needed{plans ? ` for your first ${plans.guest_generations} beats` : ""}</li>
-              <li><Icon name="check" size={18} /> About 30 seconds from upload to four flips</li>
+              <li><Icon name="check" size={18} /> About a minute from upload to four flips</li>
               <li><Icon name="check" size={18} /> Boom bap, trap, drill and lo-fi</li>
             </ul>
           </div>

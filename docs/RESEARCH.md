@@ -49,7 +49,7 @@ strong (ChartMogul, First Page Sage; B2B-heavy samples). The funnel is built to 
 from your own sample before any sign-up, create an account to download, pay for release-quality files and a
 commercial license.
 
-Compute per generation is roughly 30 CPU-seconds on a 4-core machine for four 36-bar flips, so a generous
+Compute per generation is roughly 30 seconds on a 4-core machine and about a minute on the 1-CPU launch server for four 36-bar flips, so a generous
 free tier is affordable and the paid gate is on file quality and rights rather than on listening.
 
 ## Rights position

@@ -31,7 +31,7 @@ export function Library() {
     return (
       <div className="empty">
         <h1>No beats yet</h1>
-        <p className="muted">Drop in a sample and you have four flips to pick from in about half a minute.</p>
+        <p className="muted">Drop in a sample and you have four flips to pick from in about a minute.</p>
         <button className="btn btn-primary btn-lg" onClick={() => nav("/app/new")}>Make your first beat</button>
       </div>
     );
