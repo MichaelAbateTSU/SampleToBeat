@@ -2,6 +2,7 @@
 serialized through their own single-worker pool so two models never run at once."""
 from __future__ import annotations
 
+import os
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -11,7 +12,7 @@ from . import store
 from .core import log
 
 TERMINAL = {"completed", "failed", "canceled", "interrupted"}
-_pools = {"default": ThreadPoolExecutor(max_workers=2, thread_name_prefix="job"),
+_pools = {"default": ThreadPoolExecutor(max_workers=int(os.environ.get("CHOPLAB_WORKERS", "2")), thread_name_prefix="job"),
           "separation": ThreadPoolExecutor(max_workers=1, thread_name_prefix="sep")}
 _cancel: set[str] = set()
 _handlers: dict[str, Callable] = {}

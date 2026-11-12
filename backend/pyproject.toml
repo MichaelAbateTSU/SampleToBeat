@@ -1,10 +1,11 @@
 [project]
 name = "choplab"
-version = "0.1.0"
-description = "ChopLab AI - local sample-based hip-hop beat generator"
+version = "1.0.0"
+description = "ChopLab - turn any sample into a full instrumental beat"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.157.0",
+    "httpx>=0.28.1",
     "imageio-ffmpeg>=0.6.0",
     "librosa>=1.0.0",
     "numpy>=2.5.4",
@@ -33,7 +34,6 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "pytest>=9.1.1",
 ]
 

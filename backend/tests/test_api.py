@@ -93,11 +93,11 @@ def test_full_workflow(c):
     assert c.delete(f"/api/samples/{used}").status_code == 409
 
     # export with stems
-    r = c.post(f"/api/projects/{pid}/export", json={"format": "wav24", "stems": True, "filename": "con"}).json()
+    r = c.post(f"/api/projects/{pid}/export", json={"format": "wav24", "stems": True, "midi": True, "project_json": True, "filename": "con"}).json()
     done(c, r["job"])
     e = c.get(f"/api/exports/{r['export_id']}").json()
     kinds = {f["kind"] for f in e["files"]}
-    assert e["status"] == "done" and {"mix", "stem", "zip", "project"} <= kinds
+    assert e["status"] == "done" and {"mix", "stem", "zip", "project", "midi", "license"} <= kinds
     assert not next(f for f in e["files"] if f["kind"] == "mix")["check"]["silent"]
     master = next(f["name"] for f in e["files"] if f["kind"] == "mix")
     y = wav(c, f"/api/exports/{r['export_id']}/download?name={master}")

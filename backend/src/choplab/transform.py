@@ -38,7 +38,9 @@ def source_audio(paths: tuple[str, ...]) -> np.ndarray:
 def region(paths: tuple[str, ...], start: float, end: float) -> np.ndarray:
     y = source_audio(paths)
     a, b = int(round(start * SR)), int(round(end * SR))
-    if not (0 <= a < b <= len(y) + 1):
+    if b <= len(y) + SR // 100:  # bounds are stored rounded: forgive a few ms past the end
+        b = min(b, len(y))
+    if not (0 <= a < b <= len(y)):
         raise ValueError(f"Invalid sample bounds {start:.3f}-{end:.3f}s for audio of {len(y) / SR:.3f}s")
     return y[a:b].copy()
 

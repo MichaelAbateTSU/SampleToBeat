@@ -66,8 +66,15 @@ def sections(template: str, bars: int) -> list[dict]:
         return [{"name": "Main", "start_bar": 0, "bars": bars}]
     t = TEMPLATES[template]
     tot = sum(b for _, b in t)
-    sizes = [max(2, int(round(b * bars / tot / 2)) * 2) for _, b in t]
-    sizes[int(np.argmax(sizes))] += bars - sum(sizes)
+    want = [b * bars / tot for _, b in t]
+    sizes = [max(2, int(round(w / 2)) * 2) for w in want]
+    while (d := bars - sum(sizes)) != 0:  # hand the rounding error to whichever section is furthest from its share
+        if d > 0:
+            i = max(range(len(sizes)), key=lambda i: want[i] - sizes[i])
+            sizes[i] += min(2, d)
+        else:
+            i = min((i for i in range(len(sizes)) if sizes[i] > 2), key=lambda i: want[i] - sizes[i])
+            sizes[i] -= min(2, -d)
     out, s = [], 0
     for (name, _), b in zip(t, sizes):
         out.append({"name": name, "start_bar": s, "bars": b})
@@ -155,6 +162,39 @@ def chop_sequence(sl, s, ratio, pitch, genre, intensity, rng, bars=2, anchors_on
     return {"kind": "sample", "length_ticks": L, "events": ev}
 
 
+MELODY_PROGRESSIONS = [[0, 0, 5, 6], [0, 5, 6, 0], [0, 2, 6, 5], [0, 5, 2, 6], [0, 3, 5, 4]]  # scale degrees
+MINOR = [0, 2, 3, 5, 7, 8, 10]
+
+
+def _degree(d: int) -> int:
+    semis = MINOR[d % 7] + 12 * (d // 7)
+    return semis - 12 if semis > 7 else semis  # keep roots close to the one-shot's own pitch
+
+
+def oneshot_melody(s: dict, bpm: float, pitch: float, genre: str, intensity: float, rng, progression: list[int],
+                   anchors_only: bool = False, octave_p: float = 0.0, reverse_p: float = 0.0) -> dict:
+    """A one-shot has no rhythm or harmony of its own, so it is played like a sampler instrument: a 4-bar
+    minor-key motif (root on beat 1, chord tones on the genre's chop positions) at the sample's own speed."""
+    ratio = bpm / s["source_bpm"]  # speed 1.0: only the pitch changes
+    w = CHOP_STEPS[genre]
+    ev = []
+    L = len(progression) * TICKS_PER_BAR
+    motif = [0] if anchors_only else sorted(st for st, p in w.items() if st in (0, 8) or rng.random() < p * (0.35 + intensity))
+    for bar, deg in enumerate(progression):
+        steps = motif if bar % 2 == 0 or anchors_only else sorted(set(motif) | ({int(rng.choice(list(w)))} if intensity > 0.3 else set()))
+        for j, st in enumerate(steps):
+            tone = 0 if st == 0 else int(rng.choice([0, 2, 4, 4, 7]))  # root, third, fifth, octave (in degrees)
+            semis = _degree(deg) + (MINOR[(deg + tone) % 7] - MINOR[deg % 7]) % 12 if tone not in (0, 7) else _degree(deg) + (12 if tone else 0)
+            if octave_p and st and rng.random() < octave_p:
+                semis += int(rng.choice([12, -12]))
+            t = bar * TICKS_PER_BAR + st * STEP_TICKS
+            nxt = bar * TICKS_PER_BAR + (steps[j + 1] * STEP_TICKS if j + 1 < len(steps) else TICKS_PER_BAR)
+            kw = {"reverse": True} if reverse_p and st and rng.random() < reverse_p else {}
+            ev.append(_chop(t, nxt - t, s, 0, s["beats"], ratio, float(np.clip(pitch + semis, -24, 24)),
+                            0.92 if st % 8 == 0 else rng.uniform(0.7, 0.86), **kw))
+    return {"kind": "sample", "length_ticks": L, "events": ev}
+
+
 def _tile(events, length, total):
     return [{**e, "tick": e["tick"] + r} for r in range(0, total, length) for e in events if e["tick"] + r < total]
 
@@ -219,7 +259,11 @@ def variation(settings: dict, samples: list[dict], sources: dict, analyses: dict
     main, sec = choose_samples(samples, strategy, st, rng, rank)
     by_id = {s["id"]: s for s in samples}
     an = analyses[main["source_id"]]
-    bpm, ratio = target_tempo(main["source_bpm"], genre, st["bpm"])
+    oneshot = main["kind"] == "oneshot"
+    if oneshot:  # no tempo of its own: sit in the middle of the genre's range
+        bpm, ratio = float(st["bpm"] or round(float(np.mean(drums.GENRES[genre]["bpm"])))), 1.0
+    else:
+        bpm, ratio = target_tempo(main["source_bpm"], genre, st["bpm"])
     src = sources[main["source_id"]]
     y_main = render.sample_buffer(main, src, main["source_bpm"], 1.0, 0)[0]
     treatments = []
@@ -233,6 +277,8 @@ def variation(settings: dict, samples: list[dict], sources: dict, analyses: dict
     k = parse_key(an.get("key"))
     key = (int((k[0] + pitch) % 12), k[1]) if k else None
     key_conf = float(an.get("key_confidence") or 0.0)
+    if oneshot:  # the motif is written in minor around the one-shot's own strongest pitch
+        key, key_conf = (int((int(np.argmax(main.get("chroma") or [1])) + pitch) % 12), "minor"), 0.6
     swing = float(st["swing"] if st["swing"] is not None else np.mean(drums.GENRES[genre]["swing"]))
     template = st["structure"] if st["structure"] != "auto" else {
         "loop_flip": "loop", "hard_chop": "standard", "dark": "standard", "creative": "verse_hook"}[strategy]
@@ -250,7 +296,14 @@ def variation(settings: dict, samples: list[dict], sources: dict, analyses: dict
     onsets = an.get("onsets", [])
     sl = slices(main, onsets, 2 if ci > 0.5 or strategy in ("hard_chop", "creative") else 1)
     P: dict[str, dict] = {}
-    if strategy == "loop_flip":
+    if oneshot:
+        prog = MELODY_PROGRESSIONS[(ORDER.index(strategy) + rank + int(rng.integers(2))) % len(MELODY_PROGRESSIONS)]
+        creative = strategy == "creative"
+        P["s_main"] = oneshot_melody(main, bpm, pitch, genre, ci, rng, prog, octave_p=0.2 if creative else 0.05)
+        P["s_var"] = oneshot_melody(main, bpm, pitch, genre, min(1.0, ci + 0.25), rng, prog, octave_p=0.25,
+                                    reverse_p=0.2 if creative else 0.0)
+        P["s_sparse"] = oneshot_melody(main, bpm, pitch, genre, 0, rng, prog, anchors_only=True)
+    elif strategy == "loop_flip":
         P["s_main"] = loop_pattern(main, ratio, pitch)
         P["s_var"] = chop_sequence(sl, main, ratio, pitch, genre, ci * 0.6, rng)
     elif strategy == "creative":
@@ -259,8 +312,9 @@ def variation(settings: dict, samples: list[dict], sources: dict, analyses: dict
     else:
         P["s_main"] = chop_sequence(sl, main, ratio, pitch, genre, ci if strategy == "hard_chop" else ci * 0.7, rng)
         P["s_var"] = chop_sequence(sl, main, ratio, pitch, genre, ci, rng, stutter=ci > 0.6)
-    P["s_sparse"] = chop_sequence(sl, main, ratio, pitch, genre, 0, rng, anchors_only=True,
-                                  reverse_p=0.5 if strategy == "creative" else 0.0)
+    if not oneshot:
+        P["s_sparse"] = chop_sequence(sl, main, ratio, pitch, genre, 0, rng, anchors_only=True,
+                                      reverse_p=0.5 if strategy == "creative" else 0.0)
     if sec:
         sec_an = analyses.get(sec["source_id"], an)
         sl2 = slices(sec, sec_an.get("onsets", []), 1)
@@ -338,7 +392,10 @@ def variation(settings: dict, samples: list[dict], sources: dict, analyses: dict
             add("sample", "s_sparse", s + h, b - h)
             drum_section("sparse", s, h, fill=False)
             add("fx", "fx_crash", s, 1)
+    # quiet sources (and one-shots, which are mostly decay) are lifted so the sample still leads the mix
+    lift = float(np.clip(-20.0 - float(main.get("rms_db") or -20.0), 0.0, 12.0)) + (5.0 if oneshot else 0.0)
     for tid, name, kind, color, vol, pan in TRACKS:
+        vol = min(6.0, vol + lift) if tid == "sample" else vol
         arr["tracks"].append({"id": tid, "name": name, "kind": kind, "color": color, "volume_db": vol, "pan": pan,
                               "muted": False, "solo": False, "choke": kind == "sample",
                               "fx": dict(fx) if kind == "sample" else ({"highpass_hz": 250, "reverb": 0.2} if tid == "fx" else {}),
@@ -362,7 +419,7 @@ def signature(arr: dict) -> str:
     """What makes two variations audibly different: samples, pitch, chop order, kick pattern, 808 line."""
     P = arr["patterns"]
     sig = [arr["meta"]["main_sample"], arr["meta"]["pitch"], arr["strategy"],
-           [(e["tick"], e["s0"]) for e in P["s_main"]["events"]],
+           [(e["tick"], e["s0"], e["pitch"]) for e in P["s_main"]["events"]],
            [e["tick"] for e in P.get("d_main_kick", {"events": []})["events"]],
            [(e["tick"], e["midi"]) for e in P["b_main"]["events"]]]
     return hashlib.sha1(json.dumps(sig).encode()).hexdigest()[:12]

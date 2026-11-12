@@ -79,11 +79,10 @@ def render(notes: list[dict], bpm: float, total: int, p: dict | None = None) -> 
 
 
 def _render_sample(notes, bpm, total, p):
-    from pathlib import Path
-
     from . import audio_io
+    from .core import resolve_data
 
-    src = audio_io.load(Path(p["sample_path"])).mean(axis=1)
+    src = audio_io.load(resolve_data(p["sample_path"])).mean(axis=1)
     out = np.zeros(total, np.float32)
     # shortcut: sample mode retriggers every note (no glide); use synth mode for slides.
     for chain in _chains(notes, bpm, total):

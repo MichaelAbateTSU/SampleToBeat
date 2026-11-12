@@ -11,6 +11,8 @@ from .core import NOTE_NAMES, SR, parse_key
 
 ASR = 22050  # analysis rate
 HOP = 512
+MIN_SECONDS = 0.1
+ONE_SHOT_BPM = 90.0  # nominal time base for material without a tempo
 BHOP = 128  # finer hop for beat tracking: librosa's tracker uses an integer-frame period
 
 # Krumhansl-Kessler key profiles
@@ -67,6 +69,22 @@ def _pick_tempo(oenv, low, high, base: float) -> tuple[float, np.ndarray, list[d
     return best["bpm"], frames, sorted(cands, key=lambda c: -c["score"])
 
 
+def _loop_tempo(duration: float, tracked: float, lead_in: float) -> float | None:
+    """Tempo implied by the file length if it is a whole number of bars (2..64 beats) and agrees with the
+    beat tracker to within 2.5% (octave errors allowed). Far more exact than tracking a 2-bar loop."""
+    if duration > 45 or lead_in > 0.05:  # a loop starts on its first hit, not after silence
+        return None
+    best = None
+    for n in (2, 4, 8, 16, 32, 64):
+        bpm = 60.0 * n / duration
+        if not 60 <= bpm <= 180:
+            continue
+        err = min(abs(np.log2(bpm / (tracked * m))) for m in (0.5, 1.0, 2.0))
+        if err < 0.035 and (best is None or err < best[0]):
+            best = (err, bpm)
+    return round(best[1], 3) if best else None
+
+
 def _segments(feats: np.ndarray, beat_times: np.ndarray, duration: float, downbeats: np.ndarray) -> list[dict]:
     n = feats.shape[1]
     k = int(np.clip(round(duration / 15), 2, 10))
@@ -109,20 +127,32 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     if np.sqrt(np.mean(mono ** 2)) < 1e-4:
         raise AudioError("The recording is silent; nothing to analyze.")
 
+    if duration < MIN_SECONDS:
+        raise AudioError(f"The sample is too short ({duration:.2f}s); use at least {MIN_SECONDS}s of audio.")
+
     progress("tempo", 0.1)
     oenv = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=HOP)
-    oenv_f = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP)
-    low = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmax=200, n_mels=32)[: len(oenv_f)]
-    high = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmin=1500, n_mels=32)[: len(oenv_f)]
-    base_tempo, _ = librosa.beat.beat_track(onset_envelope=oenv_f, sr=ASR, hop_length=BHOP)
-    base_tempo = float(np.atleast_1d(base_tempo)[0]) or 90.0
-    base_tempo, frames, cands = _pick_tempo(oenv_f, low, high, base_tempo)
-    beat_times = librosa.frames_to_time(frames, sr=ASR, hop_length=BHOP)
+    onsets = librosa.onset.onset_detect(onset_envelope=oenv, sr=ASR, hop_length=HOP, units="time", backtrack=True)
+    # a single hit / held note has no tempo of its own: the composer plays it chromatically instead of looping it
+    one_shot = duration < 1.5 or (duration < 8.0 and len(onsets) <= 1)
+    if one_shot:
+        base_tempo, cands, beat_times = ONE_SHOT_BPM, [], np.zeros(0)
+    else:
+        oenv_f = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP)
+        low = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmax=200, n_mels=32)[: len(oenv_f)]
+        high = librosa.onset.onset_strength(y=mono, sr=ASR, hop_length=BHOP, fmin=1500, n_mels=32)[: len(oenv_f)]
+        base_tempo, _ = librosa.beat.beat_track(onset_envelope=oenv_f, sr=ASR, hop_length=BHOP)
+        base_tempo = float(np.atleast_1d(base_tempo)[0]) or 90.0
+        base_tempo, frames, cands = _pick_tempo(oenv_f, low, high, base_tempo)
+        beat_times = librosa.frames_to_time(frames, sr=ASR, hop_length=BHOP)
     weak_grid = len(beat_times) < 8
     if weak_grid:  # irregular / beatless material: fall back to a synthetic grid the user can correct
         beat_times = np.arange(0, duration, 60.0 / base_tempo)
+    loop_bpm = None if one_shot or override else _loop_tempo(duration, base_tempo, float(np.argmax(np.abs(mono) > 0.1 * np.abs(mono).max())) / ASR)
+    if loop_bpm:  # a tightly cut loop: its length gives the tempo exactly, and beat 1 is the first sample
+        override = {"bpm": loop_bpm, "grid_offset": 0.0, "_auto": True}
     ibi = np.diff(beat_times)
-    period = float(np.median(ibi))
+    period = float(np.median(ibi)) if len(ibi) else 60.0 / base_tempo
     stability = float(1.0 - min(1.0, np.std(ibi) / (np.mean(ibi) + 1e-9))) if len(ibi) > 2 else 0.0
     # least-squares fit over all beats: sub-frame tempo precision (frame-quantized IBIs are ~2% off at 140)
     n_idx = np.round((beat_times - beat_times[0]) / period)
@@ -170,7 +200,10 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
 
     progress("downbeats", 0.45)
     # downbeats: strong low-frequency onsets + harmonic changes (chords tend to change on beat 1)
-    low_b = low[np.clip(librosa.time_to_frames(beat_times, sr=ASR, hop_length=BHOP), 0, len(low) - 1)]
+    if one_shot:
+        low_b = np.ones(len(beat_times))
+    else:
+        low_b = low[np.clip(librosa.time_to_frames(beat_times, sr=ASR, hop_length=BHOP), 0, len(low) - 1)]
     cn = chroma_b / (np.linalg.norm(chroma_b, axis=0, keepdims=True) + 1e-9)
     nov = np.concatenate([[0.0], 1 - np.sum(cn[:, 1:] * cn[:, :-1], axis=0)])
     z = lambda x: x / (x.mean() + 1e-9)
@@ -186,7 +219,6 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
     downbeats = beat_times[phase::4]
 
     progress("onsets", 0.55)
-    onsets = librosa.onset.onset_detect(onset_envelope=oenv, sr=ASR, hop_length=HOP, units="time", backtrack=True)
 
     progress("structure", 0.7)
     mfcc = librosa.feature.mfcc(y=mono, sr=ASR, hop_length=HOP, n_mfcc=13)[:, :n_frames]
@@ -220,6 +252,7 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         "duration": round(duration, 3), "sample_rate": SR,
         "bpm_candidates": cands, "detected_bpm": bpm, "bpm": bpm, "tempo_stability": round(stability, 3),
         "beat_confidence": 0.0 if weak_grid else round(stability, 3), "weak_grid": weak_grid,
+        "one_shot": bool(one_shot), "loop_locked": bool(loop_bpm),
         "beats": [round(float(t), 4) for t in beat_times],
         "downbeat_phase": phase, "downbeat_confidence": downbeat_conf,
         "downbeats": [round(float(t), 4) for t in downbeats], "grid_offset": round(float(downbeats[0]) if len(downbeats) else 0.0, 4),
@@ -234,6 +267,6 @@ def analyze(y48: np.ndarray, progress=lambda s, f=None: None, override: dict | N
         if parse_key(override["key"]) is None:
             raise ValueError(f"Unknown key {override['key']!r}; use e.g. 'A minor'.")
         doc.update(key=override["key"], key_confidence=1.0)
-    doc["override"] = {k: v for k, v in (override or {}).items() if v is not None}
+    doc["override"] = {} if (override or {}).get("_auto") else {k: v for k, v in (override or {}).items() if v is not None}
     features = {"beat_times": bt, "chroma": chroma_b, "mfcc": mfcc_b, "rms": rms_b, "rms_perc": rmsp_b, "onset": oenv_b}
     return doc, features
