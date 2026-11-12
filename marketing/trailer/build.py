@@ -15,7 +15,8 @@ import subprocess
 from pathlib import Path
 
 FPS = 24
-GLOW = "split[a][b];[b]gblur=sigma=26[g];[a][g]blend=all_mode=screen:all_opacity=0.5"
+# blend in RGB: screen-blending YUV chroma planes tints everything magenta
+GLOW = "format=gbrp,split[a][b];[b]gblur=sigma=26[g];[a][g]blend=all_mode=screen:all_opacity=0.5,format=yuv420p"
 
 
 def run(*args: str) -> None:
@@ -83,7 +84,8 @@ def main() -> None:
         if fit == "speed":
             v = f"setpts=PTS*{secs / duration(src):.6f},fps={FPS}"
         elif fit == "hold":  # play once, then freeze on the last frame while the end card comes up
-            v = f"fps={FPS},tpad=stop_mode=clone:stop_duration={secs:.3f}"
+            # the stage is black, so the mark can slide left to make room for the wordmark beside it
+            v = f"fps={FPS},tpad=stop_mode=clone:stop_duration={secs:.3f},crop=1450:1080:470:0,pad=1920:1080:0:0:black"
         else:
             v = f"fps={FPS}"
         v += ",scale=1920:1080:flags=lanczos,setsar=1"
