@@ -239,3 +239,20 @@ def test_billing_off_and_mock(monkeypatch):
     url = c.post("/api/billing/checkout", json={"plan": "pro"}).json()["url"]
     assert c.get(url.replace(accounts.base_url(), ""), follow_redirects=False).status_code == 303
     assert c.get("/api/me").json()["user"]["plan"] == "pro"
+
+
+def test_expired_guests_are_purged_with_their_uploads():
+    from choplab import api
+
+    c, keep = client(), client()
+    pid = c.post("/api/projects", json={"name": "abandoned"}).json()["id"]
+    kept = keep.post("/api/projects", json={"name": "active guest"}).json()["id"]
+    reg = client()
+    register(reg, "stays@example.com")
+    uid = store.get("project", pid)["user_id"]
+    for s in store.list_("session", uid):
+        store.update("session", s["id"], expires=time.time() - 1)
+    assert api.purge_expired() >= 1
+    assert store.get("project", pid) is None and store.get("user", uid) is None
+    assert store.get("project", kept) is not None and accounts.by_email("stays@example.com")
+    assert c.get("/api/me").json()["user"] is None

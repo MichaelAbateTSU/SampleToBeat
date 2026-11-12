@@ -29,10 +29,40 @@ CSP = ("default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; 
        "font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 
 
+def purge_expired() -> int:
+    """Deletes expired sessions and reset tokens, and guests nobody can log back into (with their uploads)."""
+    now = store.now()
+    for kind in ("session", "reset"):
+        for d in store.list_(kind):
+            if d["expires"] < now:
+                store.delete(kind, d["id"])
+    removed = 0
+    for u in store.list_("user"):
+        if u.get("guest") and not store.list_("session", u["id"]):
+            for p in store.list_("project", u["id"]):
+                _delete_project(p, force=True)
+            store.delete("user", u["id"])
+            removed += 1
+    return removed
+
+
+async def _housekeeping():
+    while True:
+        try:
+            n = await asyncio.to_thread(purge_expired)
+            if n:
+                log.info("removed %d expired guest accounts", n)
+        except Exception:  # never let cleanup take the server down
+            log.exception("housekeeping failed")
+        await asyncio.sleep(6 * 3600)
+
+
 @asynccontextmanager
 async def lifespan(app):
     jobs.recover_interrupted()
+    task = asyncio.create_task(_housekeeping())
     yield
+    task.cancel()
 
 
 _docs = os.environ.get("CHOPLAB_DOCS") == "1"
@@ -337,6 +367,7 @@ def _store_variation(project_id, v, settings, batch):
         "id": vid, "project_id": project_id, "batch": batch, "seed": arr["seed"], "genre": arr["genre"],
         "strategy": arr["strategy"], "source_samples": [x for x in (arr["meta"]["main_sample"], arr["meta"]["secondary_sample"]) if x],
         "generation_parameters": settings, "arrangement": arr, "preview_path": str(path), "render_status": "done",
+        "peaks": audio_io.peaks(v["render"]["master"], 400), "duration": round(len(v["render"]["master"]) / SR, 3),
         "metrics": v["render"]["metrics"], "evaluation": v["evaluation"]}, parent=project_id)
 
 
@@ -845,9 +876,20 @@ def get_variation(id: str, user: User):
     return _pub_variation(_own("variation", id, user))
 
 
+def _mp3(wav: Path) -> Path:
+    """Streaming copy of a preview (a 90 s WAV is ~17 MB; the MP3 is ~2 MB). Made on first request."""
+    out = wav.with_suffix(".mp3")
+    if not out.exists():
+        audio_io.write_mp3(out, audio_io.load(wav), bitrate="192k")
+    return out
+
+
 @app.get("/api/variations/{id}/audio")
-def variation_audio(id: str, user: User):
-    return FileResponse(_own("variation", id, user)["preview_path"], media_type="audio/wav")
+def variation_audio(id: str, user: User, format: str = "wav"):
+    wav = Path(_own("variation", id, user)["preview_path"])
+    if format == "mp3" and audio_io.ffmpeg_exe():
+        return FileResponse(_mp3(wav), media_type="audio/mpeg")
+    return FileResponse(wav, media_type="audio/wav")
 
 
 @app.post("/api/variations/{id}/regenerate", status_code=202)
@@ -906,22 +948,25 @@ def preview(id: str, body: schemas.PreviewRequest, user: User):
     _check_assets(id, arr)
     res = render.render(arr, {s["id"]: s for s in _samples(p)}, _sources(p), body.scope, body.loop_start_bar, body.loop_bars)
     d = _dir(id, "previews")
-    for old in d.glob("studio_*.wav"):  # keep one studio preview on disk
+    for old in d.glob("studio_*"):  # keep one studio preview on disk
         old.unlink(missing_ok=True)
     name = f"studio_{store.new_id('r')}"
     render.write_preview(d / name, res["master"])
     return {"url": f"/api/projects/{id}/preview/{name}.wav", "metrics": res["metrics"],
+            "peaks": audio_io.peaks(res["master"], 400), "duration": round(len(res["master"]) / SR, 3),
             "start_bar": body.loop_start_bar if body.scope == "loop" else 0}
 
 
 @app.get("/api/projects/{id}/preview/{name}")
-def preview_file(id: str, name: str, user: User):
+def preview_file(id: str, name: str, user: User, format: str = "wav"):
     _own("project", id, user)
     if not re.fullmatch(r"studio_r_[0-9a-f]{12}\.wav", name):
         raise HTTPException(404)
     f = DATA_DIR / "projects" / id / "previews" / name
     if not f.exists():
         raise HTTPException(404, "Preview expired; render again.")
+    if format == "mp3" and audio_io.ffmpeg_exe():
+        return FileResponse(_mp3(f), media_type="audio/mpeg")
     return FileResponse(f, media_type="audio/wav")
 
 
