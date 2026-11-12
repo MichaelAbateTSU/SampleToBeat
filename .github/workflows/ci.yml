@@ -48,3 +48,23 @@ jobs:
           cd backend && CHOPLAB_BILLING=mock CHOPLAB_DATA=$RUNNER_TEMP/data uv run choplab &
           for i in $(seq 1 60); do curl -sf localhost:8765/api/health && break; sleep 1; done
           cd frontend && node e2e/smoke.mjs
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the production image
+        run: docker build -t choplab .
+      - name: Start it the way a host would and make a beat through HTTP
+        run: |
+          docker run -d --name choplab -p 8765:10000 -e PORT=10000 choplab
+          for i in $(seq 1 60); do curl -sf localhost:8765/api/health && break; sleep 2; done
+          curl -sf localhost:8765/ | grep -q "<title>ChopLab"
+          job=$(curl -sf -c jar -X POST -F 'settings={"variations":1,"bars":12}' localhost:8765/api/beats | python3 -c "import sys,json;print(json.load(sys.stdin)['job']['id'])")
+          for i in $(seq 1 90); do
+            status=$(curl -sf -b jar localhost:8765/api/jobs/$job | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
+            [ "$status" = completed ] && exit 0
+            [ "$status" = failed ] && { docker logs choplab | tail -50; exit 1; }
+            sleep 2
+          done
+          docker logs choplab | tail -50; exit 1

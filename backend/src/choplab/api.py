@@ -1126,7 +1126,7 @@ def main():
     import uvicorn
 
     host = os.environ.get("CHOPLAB_HOST", "127.0.0.1")
-    port = int(os.environ.get("CHOPLAB_PORT", os.environ.get("PORT", "8765")))
+    port = int(os.environ.get("CHOPLAB_PORT") or os.environ.get("PORT") or "8765")
     log.info("ChopLab data dir: %s (self-hosted=%s, billing=%s)", DATA_DIR, accounts.self_hosted(), billing.mode())
     uvicorn.run("choplab.api:app", host=host, port=port, log_level=os.environ.get("CHOPLAB_LOG", "info"),
                 proxy_headers=os.environ.get("CHOPLAB_TRUST_PROXY") == "1")

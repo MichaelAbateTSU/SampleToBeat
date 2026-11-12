@@ -258,3 +258,50 @@ def test_expired_guests_are_purged_with_their_uploads():
     assert store.get("project", pid) is None and store.get("user", uid) is None
     assert store.get("project", kept) is not None and accounts.by_email("stays@example.com")
     assert c.get("/api/me").json()["user"] is None
+
+
+def test_stripe_setup_script_creates_prices_and_webhook_once():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("stripe_setup", Path(__file__).resolve().parents[2] / "scripts" / "stripe_setup.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class FakeStripe:
+        def __init__(self):
+            self.prices, self.products, self.hooks, self.calls = [], [], [], []
+
+        def request(self, method, url, data=None, params=None, auth=None, timeout=None):
+            path = url.split("/v1")[1]
+            self.calls.append((method, path))
+            assert auth == ("sk_test_abc", "")
+            if (method, path) == ("GET", "/prices"):
+                out = {"data": [p for p in self.prices if p["lookup_key"] == params["lookup_keys[]"]]}
+            elif (method, path) == ("GET", "/products/search"):
+                out = {"data": [p for p in self.products if f"'{p['plan']}'" in params["query"]]}
+            elif (method, path) == ("POST", "/products"):
+                out = {"id": f"prod_{len(self.products)}", "plan": data["metadata[choplab_plan]"]}
+                self.products.append(out)
+            elif (method, path) == ("POST", "/prices"):
+                out = {"id": f"price_{data['lookup_key']}", "lookup_key": data["lookup_key"], "unit_amount": int(data["unit_amount"]),
+                       "interval": data["recurring[interval]"]}
+                self.prices.append(out)
+            elif (method, path) == ("GET", "/webhook_endpoints"):
+                out = {"data": self.hooks}
+            else:
+                assert (method, path) == ("POST", "/webhook_endpoints") and data["enabled_events[3]"] == "customer.subscription.deleted"
+                self.hooks.append({"url": data["url"], "status": "enabled"})
+                out = {"secret": "whsec_new"}
+            return type("R", (), {"status_code": 200, "json": staticmethod(lambda: out)})()
+
+    stripe = FakeStripe()
+    env = mod.setup("sk_test_abc", "https://beats.example/", client=stripe)
+    assert env["STRIPE_PRICE_PRO_MONTHLY"] == "price_choplab_pro_monthly" and env["STRIPE_WEBHOOK_SECRET"] == "whsec_new"
+    assert {(p["lookup_key"], p["unit_amount"], p["interval"]) for p in stripe.prices} == {
+        ("choplab_pro_monthly", 999, "month"), ("choplab_pro_yearly", 9588, "year"),
+        ("choplab_studio_monthly", 2499, "month"), ("choplab_studio_yearly", 23988, "year")}
+    assert len(stripe.products) == 2 and stripe.hooks[0]["url"] == "https://beats.example/api/billing/webhook"
+    again = mod.setup("sk_test_abc", "https://beats.example", client=stripe)  # second run reuses everything
+    assert len(stripe.prices) == 4 and len(stripe.products) == 2 and len(stripe.hooks) == 1
+    assert again["STRIPE_PRICE_STUDIO_YEARLY"] == env["STRIPE_PRICE_STUDIO_YEARLY"]

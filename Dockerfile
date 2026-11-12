@@ -21,11 +21,11 @@ RUN useradd --create-home choplab && mkdir /data && chown choplab /data
 USER choplab
 ENV PATH=/opt/venv/bin:$PATH \
     CHOPLAB_HOST=0.0.0.0 \
-    CHOPLAB_PORT=8765 \
     CHOPLAB_DATA=/data \
     CHOPLAB_FRONTEND=/app/frontend/dist \
     NUMBA_CACHE_DIR=/tmp/numba
 VOLUME /data
 EXPOSE 8765
-HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request,os;urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"CHOPLAB_PORT\",\"8765\")}/api/health')"
+# listens on $CHOPLAB_PORT, else the host's $PORT (Render, Fly, Railway), else 8765
+HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request,os;e=os.environ;urllib.request.urlopen('http://127.0.0.1:%s/api/health' % (e.get('CHOPLAB_PORT') or e.get('PORT') or '8765'))"
 CMD ["choplab"]

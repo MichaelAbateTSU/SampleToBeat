@@ -75,7 +75,8 @@ def default_plan() -> str:
 
 
 def base_url() -> str:
-    return os.environ.get("CHOPLAB_BASE_URL", "http://localhost:8765").rstrip("/")
+    """Public URL of the site. Falls back to the URL Render assigns, then to local development."""
+    return (os.environ.get("CHOPLAB_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "http://localhost:8765").rstrip("/")
 
 
 def cookie_secure() -> bool:
