@@ -27,6 +27,7 @@ try {
   // landing
   await page.goto(BASE);
   await page.getByRole("heading", { name: /Drop a sample/ }).waitFor();
+  await page.locator(".plan").first().waitFor();  // pricing renders once /api/plans has answered
   expect(await page.locator(".plan").count() === 3, "three plans on the landing page");
   expect(await page.locator(".pad-btn").count() === 5, "four flip pads and the source sample");
   await page.locator(".pad-btn").first().click();
