@@ -26,9 +26,9 @@ services:
       # Set this once you attach a custom domain; until then the app uses Render's own https URL.
       - key: CHOPLAB_BASE_URL
         sync: false
-      # Stripe: values printed by scripts/stripe_setup.py
-      - key: STRIPE_SECRET_KEY
-        sync: false
+      # STRIPE_SECRET_KEY is not declared here on purpose: it comes from an environment group linked to the
+      # service in the Render dashboard, and a service-level value (even an empty one) would override it.
+      # The rest are printed by scripts/stripe_setup.py.
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
       - key: STRIPE_PRICE_PRO_MONTHLY
