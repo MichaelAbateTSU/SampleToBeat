@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { LcdText } from "./Lcd";
 
 interface Props {
   label: string;
@@ -19,7 +20,7 @@ export function Slider({ label, value, onChange, min = 0, max = 1, step = 0.01, 
     <div className="slider">
       <div className="slider-head">
         <label htmlFor={id}>{label}</label>
-        {format && <span className="mono slider-value">{format(value)}</span>}
+        {format && <span className="slider-value"><LcdText>{format(value)}</LcdText></span>}
       </div>
       <input id={id} type="range" min={min} max={max} step={step} value={value} style={{ "--pct": `${pct}%` } as React.CSSProperties} onChange={(e) => onChange(Number(e.target.value))} />
       {(low || high) && (

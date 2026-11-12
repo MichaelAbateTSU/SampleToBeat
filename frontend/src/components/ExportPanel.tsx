@@ -62,7 +62,7 @@ export function ExportPanel({ project, beforeExport }: { project: Project; befor
         </fieldset>
         <fieldset>
           <legend>Extras</legend>
-          {([["stems", "Track stems", "Sample, kick, snare, hats, 808… as separate WAVs", stems, setStems], ["midi", "MIDI", "Drums, 808 line and chop triggers at 480 PPQ", midi, setMidi]] as const).map(([key, title, note, on, set]) => {
+          {([["stems", "Track stems", "Sample, kick, snare, hats and 808 as separate WAVs", stems, setStems], ["midi", "MIDI", "Drums, 808 line and chop triggers at 480 PPQ", midi, setMidi]] as const).map(([key, title, note, on, set]) => {
             const lock = locked(key);
             return (
               <label key={key} className={`toggle-row${lock ? " locked" : ""}`} onClick={(e) => { if (lock) { e.preventDefault(); upsell(key); } }}>
@@ -84,7 +84,7 @@ export function ExportPanel({ project, beforeExport }: { project: Project; befor
           </div>
         </div>
         <button className="btn btn-primary btn-lg btn-block" disabled={!!busy} onClick={run}>
-          {busy ?? <><Icon name="download" /> Export beat</>}
+          {busy ?? "Export beat"}
         </button>
         {result?.status === "failed" && <div className="form-error">{result.error}</div>}
         {result && result.status !== "failed" && (
@@ -93,7 +93,7 @@ export function ExportPanel({ project, beforeExport }: { project: Project; befor
               <li key={f.name}>
                 <a className="file" href={exportFileUrl(result.id, f.name)} download={f.name}>
                   <Icon name={f.kind === "license" ? "shield" : f.kind === "zip" ? "layers" : "download"} />
-                  <span><strong>{KIND_LABEL[f.kind] ?? f.kind}</strong><span className="mono">{f.name}</span></span>
+                  <span><strong>{KIND_LABEL[f.kind] ?? f.kind}</strong><small>{f.name}</small></span>
                 </a>
               </li>
             ))}

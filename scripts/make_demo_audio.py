@@ -12,9 +12,11 @@ from choplab.core import SR  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "frontend" / "public" / "demo"
-FLIPS = [  # id, title, genre, strategy, seed
-    ("boombap", "Boom bap flip", "boombap", "hard_chop", 21),
-    ("trap", "Dark trap flip", "trap", "dark", 8),
+FLIPS = [  # id, title, genre, strategy, seed  (one per pad on the landing page)
+    ("boombap", "Boom bap", "boombap", "hard_chop", 21),
+    ("trap", "Dark trap", "trap", "dark", 8),
+    ("lofi", "Lo-fi", "lofi", "loop_flip", 5),
+    ("drill", "Drill", "drill", "creative", 13),
 ]
 
 
@@ -27,8 +29,8 @@ def main() -> None:
     samples = sampling.discover(src, doc, feats)
     by = {s["id"]: s for s in samples}
     audio_io.write_mp3(OUT / "sample.mp3", loop, bitrate="128k")
-    out = [{"id": "demo-sample", "url": "/demo/sample.mp3", "title": "8-bar keys loop", "source": True,
-            "note": f"{doc['bpm']:g} BPM · {doc['key']}", "peaks": audio_io.peaks(loop, 160), "duration": round(len(loop) / SR, 2)}]
+    out = [{"id": "demo-sample", "url": "/demo/sample.mp3", "title": "The sample", "source": True,
+            "bpm": doc["bpm"], "key": doc["key"], "peaks": audio_io.peaks(loop, 160), "duration": round(len(loop) / SR, 2)}]
     for fid, title, genre, strategy, seed in FLIPS:
         arr = compose.variation({"genre": genre, "bars": 16}, samples, {"demo": src}, {"demo": doc}, strategy, seed)
         res = render.render(arr, by, {"demo": src})
@@ -36,7 +38,7 @@ def main() -> None:
         assert ev["passed"], [c for c in ev["checks"] if not c["ok"]]
         audio_io.write_mp3(OUT / f"{fid}.mp3", res["master"], bitrate="128k")
         out.append({"id": f"demo-{fid}", "url": f"/demo/{fid}.mp3", "title": title,
-                    "note": f"{arr['bpm']:g} BPM · {arr['key']} · {arr['bars']} bars",
+                    "bpm": arr["bpm"], "key": arr["key"], "style": compose.STRATEGIES[strategy].split(":")[0],
                     "peaks": audio_io.peaks(res["master"], 160), "duration": round(len(res["master"]) / SR, 2)})
         print(title, arr["meta"]["description"])
     (ROOT / "frontend" / "src" / "demos.json").write_text(json.dumps(out) + "\n")

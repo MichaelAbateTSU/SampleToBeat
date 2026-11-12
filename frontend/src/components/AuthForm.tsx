@@ -44,15 +44,15 @@ export function AuthForm({ initialMode = "signup", onDone }: { initialMode?: "si
     <form className="auth-form" onSubmit={submit}>
       <label>
         Email
-        <input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
+        <input type="email" name="email" autoComplete="email" spellCheck={false} required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com…" aria-invalid={!!error} aria-describedby={error ? "auth-error" : undefined} />
       </label>
       {mode !== "forgot" && (
         <label>
           Password
-          <input type="password" autoComplete={mode === "signup" ? "new-password" : "current-password"} required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={mode === "signup" ? "At least 8 characters" : "Your password"} />
+          <input type="password" name="password" autoComplete={mode === "signup" ? "new-password" : "current-password"} required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={mode === "signup" ? "At least 8 characters…" : "Your password…"} aria-invalid={!!error} aria-describedby={error ? "auth-error" : undefined} />
         </label>
       )}
-      {error && <div className="form-error" role="alert">{error}</div>}
+      {error && <div className="form-error" id="auth-error" role="alert">{error}</div>}
       <button className="btn btn-primary btn-block" disabled={busy}>
         {busy ? "One moment…" : mode === "signup" ? "Create free account" : mode === "login" ? "Log in" : "Email me a reset link"}
       </button>
@@ -60,9 +60,8 @@ export function AuthForm({ initialMode = "signup", onDone }: { initialMode?: "si
         {mode === "signup" && <>Already have an account? <button type="button" className="link" onClick={() => setMode("login")}>Log in</button></>}
         {mode === "login" && (
           <>
-            <button type="button" className="link" onClick={() => setMode("forgot")}>Forgot password?</button>
-            <span> · </span>
-            <button type="button" className="link" onClick={() => setMode("signup")}>Create an account</button>
+            <button type="button" className="link" onClick={() => setMode("forgot")}>Forgot password?</button>{" "}
+                        <button type="button" className="link" onClick={() => setMode("signup")}>Create an account</button>
           </>
         )}
         {mode === "forgot" && <button type="button" className="link" onClick={() => setMode("login")}>Back to log in</button>}

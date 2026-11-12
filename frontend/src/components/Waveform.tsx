@@ -9,7 +9,7 @@ interface Props {
   bars?: number;
 }
 
-/** Bar-style waveform drawn from precomputed peaks; the played part is tinted with the accent gradient. */
+/** Bar-style waveform drawn from precomputed peaks; the played part lights up like an LCD. */
 export function Waveform({ peaks, progress = 0, height = 48, onSeek, color, bars }: Props) {
   const ref = useRef<HTMLCanvasElement>(null);
 
@@ -28,13 +28,11 @@ export function Waveform({ peaks, progress = 0, height = 48, onSeek, color, bars
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, w, h);
       const css = getComputedStyle(canvas);
-      const idle = css.getPropertyValue("--wave-idle").trim() || "#4a4239";
+      const idle = css.getPropertyValue("--wave-idle").trim() || "#5b5e64";
+      const lit = css.getPropertyValue("--wave-on").trim() || "#ffb52e";
       const n = Math.max(8, Math.min(bars ?? Math.floor(w / 3), peaks?.length || 64));
       const step = w / n;
       const bw = Math.max(1, step * 0.62);
-      const grad = ctx.createLinearGradient(0, 0, w, 0);
-      grad.addColorStop(0, "#ffc233");
-      grad.addColorStop(1, "#ff5a36");
       const max = peaks?.length ? Math.max(0.05, ...peaks) : 1;
       for (let i = 0; i < n; i++) {
         let v = 0.12;
@@ -44,7 +42,7 @@ export function Waveform({ peaks, progress = 0, height = 48, onSeek, color, bars
           for (let j = a; j < b; j++) v = Math.max(v, peaks[j] / max);
         }
         const bh = Math.max(2, v * (h - 2));
-        ctx.fillStyle = (i + 0.5) / n <= progress ? grad : color ?? idle;
+        ctx.fillStyle = (i + 0.5) / n <= progress ? lit : color ?? idle;
         ctx.beginPath();
         ctx.roundRect(i * step + (step - bw) / 2, (h - bh) / 2, bw, bh, bw / 2);
         ctx.fill();
@@ -60,6 +58,7 @@ export function Waveform({ peaks, progress = 0, height = 48, onSeek, color, bars
     <canvas
       ref={ref}
       className={`waveform${onSeek ? " seekable" : ""}`}
+      aria-hidden="true"
       style={{ height }}
       onClick={(e) => {
         if (!onSeek) return;

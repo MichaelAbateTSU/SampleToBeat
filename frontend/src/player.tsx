@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Icon } from "./components/Icon";
+import { clock as fmt, LcdText } from "./components/Lcd";
 import { Waveform } from "./components/Waveform";
 
 export interface PlayerTrack {
@@ -32,7 +33,6 @@ export function usePlayer(): Player {
   return p;
 }
 
-const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const audio = useRef<HTMLAudioElement | null>(null);
@@ -132,11 +132,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             <div className="playerbar-title">{track.title}</div>
             {track.subtitle && <div className="playerbar-sub">{track.subtitle}</div>}
           </div>
-          <span className="mono playerbar-time">{fmt(time)}</span>
+          <span className="lcd playerbar-time" aria-label="Elapsed"><LcdText>{fmt(time)}</LcdText></span>
           <div className="playerbar-wave">
             <Waveform peaks={track.peaks} progress={total ? time / total : 0} onSeek={(f) => seek(f * total)} height={36} />
           </div>
-          <span className="mono playerbar-time">{fmt(total)}</span>
+          <span className="lcd lcd-dim playerbar-time total" aria-label="Length"><LcdText>{fmt(total)}</LcdText></span>
         </div>
       )}
     </Ctx.Provider>

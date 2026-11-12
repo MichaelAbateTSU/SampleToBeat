@@ -3,7 +3,7 @@ import type { PlanId } from "../api";
 import { useSession } from "../session";
 import { Icon } from "./Icon";
 import { Modal } from "./Modal";
-import { planPerks, useCheckout } from "./Pricing";
+import { money, planPerks, useCheckout } from "./Pricing";
 
 export function UpgradeModal({ prompt, onClose }: { prompt: { message: string; planNeeded: PlanId }; onClose: () => void }) {
   const { plans } = useSession();
@@ -20,7 +20,7 @@ export function UpgradeModal({ prompt, onClose }: { prompt: { message: string; p
         ))}
       </ul>
       <button className="btn btn-primary btn-block" disabled={busy} onClick={() => start(prompt.planNeeded, "monthly")}>
-        {busy ? "Opening checkout…" : `Get ${plan.label} — $${plan.price_monthly}/mo`}
+        {busy ? "Opening checkout…" : `Get ${plan.label} for ${money(plan.price_monthly)} a month`}
       </button>
       <button className="btn btn-ghost btn-block" onClick={() => { onClose(); nav("/pricing"); }}>Compare all plans</button>
     </Modal>

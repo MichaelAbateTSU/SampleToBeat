@@ -4,6 +4,9 @@ import { api, type Plan, type PlanId } from "../api";
 import { useSession } from "../session";
 import { Icon } from "./Icon";
 
+const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+export const money = (n: number) => (Number.isInteger(n) ? usd.format(n).replace(/\.00$/, "") : usd.format(n));
+
 export function planPerks(p: Plan): string[] {
   const best = p.formats.includes("wav32f") ? "WAV up to 32-bit float" : p.formats.includes("wav24") ? "WAV 16/24-bit + MP3" : "MP3 downloads";
   return [
@@ -44,9 +47,9 @@ export function Pricing({ compact }: { compact?: boolean }) {
   return (
     <div className="pricing">
       {!compact && (
-        <div className="seg" role="tablist" aria-label="Billing interval">
-          <button role="tab" aria-selected={interval === "monthly"} className={interval === "monthly" ? "on" : ""} onClick={() => setInterval("monthly")}>Monthly</button>
-          <button role="tab" aria-selected={interval === "yearly"} className={interval === "yearly" ? "on" : ""} onClick={() => setInterval("yearly")}>Yearly <span className="save">2 months free</span></button>
+        <div className="seg" role="radiogroup" aria-label="Billing interval">
+          <button role="radio" aria-checked={interval === "monthly"} className={interval === "monthly" ? "on" : ""} onClick={() => setInterval("monthly")}>Monthly</button>
+          <button role="radio" aria-checked={interval === "yearly"} className={interval === "yearly" ? "on" : ""} onClick={() => setInterval("yearly")}>Yearly <span className="save">2 months free</span></button>
         </div>
       )}
       <div className="plans">
@@ -56,12 +59,12 @@ export function Pricing({ compact }: { compact?: boolean }) {
           const isCurrent = registered && current === id;
           return (
             <div key={id} className={`plan${id === "pro" ? " plan-featured" : ""}`}>
-              {id === "pro" && <div className="plan-flag">Most popular</div>}
+              {id === "pro" && <div className="plan-flag">Most producers pick this</div>}
               <h3>{p.label}</h3>
               <p className="plan-tag">{p.tagline}</p>
               <div className="plan-price">
-                <span className="amount">{price === 0 ? "$0" : `$${price.toFixed(2)}`}</span>
-                <span className="per">{price === 0 ? "forever" : interval === "yearly" ? "/mo, billed yearly" : "/month"}</span>
+                <span className="amount">{money(price)}</span>
+                <span className="per">{price === 0 ? "forever" : interval === "yearly" ? "a month, billed yearly" : "a month"}</span>
               </div>
               {id === "free" ? (
                 <button className="btn btn-secondary btn-block" onClick={() => nav("/app/new")}>{isCurrent ? "Make a beat" : "Start free"}</button>
@@ -81,7 +84,7 @@ export function Pricing({ compact }: { compact?: boolean }) {
           );
         })}
       </div>
-      {plans.billing === "off" && <p className="fineprint center">Paid plans open soon — checkout isn't switched on for this site yet.</p>}
+      {plans.billing === "off" && <p className="fineprint">Paid plans open soon. Checkout isn't switched on for this site yet.</p>}
     </div>
   );
 }

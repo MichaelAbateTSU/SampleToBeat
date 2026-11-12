@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, ApiError, sampleAudio, TERMINAL, variationAudio, watchJob, type Arrangement, type GenerateSettings, type Job, type Project, type Sample, type Variation } from "../api";
 import { STRATEGY_NAME } from "../brand";
 import { ExportPanel } from "../components/ExportPanel";
 import { Icon } from "../components/Icon";
+import { LcdText } from "../components/Lcd";
+import { ConfirmDialog } from "../components/Modal";
 import { Progress } from "../components/Progress";
 import { Studio } from "../components/Studio";
 import { Waveform } from "../components/Waveform";
@@ -12,6 +14,7 @@ import { useSession } from "../session";
 import { StyleControls } from "./Create";
 
 type Tab = "mix" | "export" | "sample" | "more";
+const TABS: Tab[] = ["mix", "export", "sample", "more"];
 
 export function ProjectPage() {
   const { id = "" } = useParams();
@@ -28,7 +31,10 @@ export function ProjectPage() {
   const [dirty, setDirty] = useState(false);
   const [applying, setApplying] = useState(false);
   const [mix, setMix] = useState<{ url: string; peaks: number[]; duration: number; lufs: number | null } | null>(null);
-  const [tab, setTab] = useState<Tab>("mix");
+  const [params, setParams] = useSearchParams();
+  const tab: Tab = TABS.includes(params.get("tab") as Tab) ? (params.get("tab") as Tab) : "mix";
+  const setTab = (t: Tab) => setParams(t === "mix" ? {} : { tab: t }, { replace: true });
+  const [removing, setRemoving] = useState<Variation | null>(null);
   const [more, setMore] = useState<Partial<GenerateSettings>>({});
   const [naming, setNaming] = useState<string | null>(null);
   const watcher = useRef<{ stop: () => void } | null>(null);
@@ -85,6 +91,13 @@ export function ProjectPage() {
     };
   }, [id, load, follow]);
 
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();  // unsaved mix changes
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
   const change = (next: Arrangement) => {
     setArr(next);
     setDirty(true);
@@ -120,7 +133,7 @@ export function ProjectPage() {
       </div>
     );
   }
-  if (!project) return <div className="loading">Loading…</div>;
+  if (!project) return <div aria-busy="true" aria-label="Loading beat"><div className="skeleton" /><div className="skeleton tall" /></div>;
 
   const src = project.sources[0];
   const building = job && (job.job_type === "beat" || !variations.length);
@@ -133,20 +146,29 @@ export function ProjectPage() {
   return (
     <div className="project">
       <header className="project-head">
-        <div>
+        <div style={{ minWidth: 0 }}>
           {naming !== null ? (
             <form onSubmit={async (e) => { e.preventDefault(); const p = await guard(() => api.renameProject(project.id, naming.trim() || project.name)); if (p) setProject({ ...project, name: p.name }); setNaming(null); }}>
-              <input className="title-input" autoFocus value={naming} maxLength={80} onChange={(e) => setNaming(e.target.value)} onBlur={(e) => e.currentTarget.form?.requestSubmit()} aria-label="Beat name" />
+              <input className="title-input" name="beat-name" autoComplete="off" autoFocus value={naming} maxLength={80} onChange={(e) => setNaming(e.target.value)} onBlur={(e) => e.currentTarget.form?.requestSubmit()} aria-label="Beat name" />
             </form>
           ) : (
-            <h1 className="editable" title="Rename" onClick={() => setNaming(project.name)}>{project.name}</h1>
+            <h1><button className="title-edit" aria-label={`Rename ${project.name}`} onClick={() => setNaming(project.name)}>{project.name}</button></h1>
           )}
-          <div className="chips">
-            {src && <span className="chip"><Icon name="music" size={13} /> {src.original_filename}</span>}
-            {src?.analysis && <span className="chip mono">{src.analysis.one_shot ? "One-shot" : `${Math.round(src.analysis.bpm * 10) / 10} BPM`}</span>}
-            {src?.analysis && !src.analysis.one_shot && <span className="chip mono">{src.analysis.key}</span>}
-          </div>
+          {src && <p className="muted" style={{ margin: 0 }}>Made from {src.original_filename}</p>}
         </div>
+        {src?.analysis && (
+          <dl className="readouts" aria-label="What ChopLab heard in your sample">
+            {src.analysis.one_shot ? (
+              <div className="readout"><dt>Sample</dt><dd>One-shot</dd></div>
+            ) : (
+              <>
+                <div className="readout"><dt>Sample tempo</dt><dd><LcdText>{String(Math.round(src.analysis.bpm * 10) / 10)}</LcdText></dd></div>
+                <div className="readout"><dt>Key</dt><dd>{src.analysis.key}</dd></div>
+              </>
+            )}
+            {current && <div className="readout"><dt>Beat tempo</dt><dd>{arr?.bpm ?? current.bpm}</dd></div>}
+          </dl>
+        )}
       </header>
 
       {building && job && <Progress job={job} onCancel={() => api.cancelJob(job.id).catch(() => undefined)} />}
@@ -163,17 +185,17 @@ export function ProjectPage() {
         <section>
           <div className="section-row">
             <h2>Your flips</h2>
-            <span className="muted">Pick the one you like — it opens in the studio below.</span>
+            <span className="muted">Pick the one you like. It opens in the studio below.</span>
           </div>
-          <div className="variations">
+          <ul className="variations">
             {variations.map((v) => {
               const pid = `var:${v.id}`;
               const on = player.isPlaying(pid);
               const selected = v.id === project.variation_id;
               return (
-                <article key={v.id} className={`variation${selected ? " selected" : ""}`}>
+                <li key={v.id} className={`variation pad${selected ? " selected" : ""}`}>
                   <div className="variation-top">
-                    <button className="play-btn" aria-label={on ? "Pause" : `Play ${STRATEGY_NAME[v.strategy]}`} onClick={() => player.toggle({ id: pid, url: variationAudio(v.id), title: `${project.name} — ${STRATEGY_NAME[v.strategy] ?? v.strategy}`, subtitle: `${v.bpm} BPM · ${v.key ?? ""}`, peaks: v.peaks, duration: v.duration })}>
+                    <button className="play-btn" aria-label={on ? "Pause" : `Play ${STRATEGY_NAME[v.strategy]}`} onClick={() => player.toggle({ id: pid, url: variationAudio(v.id), title: `${project.name}: ${STRATEGY_NAME[v.strategy] ?? v.strategy}`, subtitle: [`${v.bpm} BPM`, v.key].filter(Boolean).join(", "), peaks: v.peaks, duration: v.duration })}>
                       <Icon name={on ? "pause" : "play"} />
                     </button>
                     <div>
@@ -181,32 +203,33 @@ export function ProjectPage() {
                       <p className="muted">{v.meta.strategy_detail.split(": ")[1] ?? ""}</p>
                     </div>
                   </div>
-                  <Waveform peaks={v.peaks} height={44} progress={player.track?.id === pid && player.duration ? player.time / player.duration : 0} onSeek={player.track?.id === pid ? (f) => player.seek(f * player.duration) : undefined} />
-                  <div className="chips">
-                    <span className="chip mono">{v.bpm} BPM</span>
-                    {v.key && <span className="chip mono">{v.key}</span>}
-                    <span className="chip mono">{v.bars} bars</span>
-                    {v.meta.pitch !== 0 && <span className="chip mono">{v.meta.pitch > 0 ? "+" : ""}{v.meta.pitch} st</span>}
+                  <div className="variation-wave">
+                    <Waveform peaks={v.peaks} height={40} progress={player.track?.id === pid && player.duration ? player.time / player.duration : 0} onSeek={player.track?.id === pid ? (f) => player.seek(f * player.duration) : undefined} />
+                  </div>
+                  <div className="lcd">
+                    <span>{v.bpm} BPM</span>
+                    {v.key && <span>{v.key}</span>}
+                    <span className="lcd-dim">{v.bars} bars</span>
                   </div>
                   <div className="variation-actions">
                     {selected ? (
-                      <span className="chip chip-accent"><Icon name="check" size={13} /> In the studio</span>
+                      <span className="in-studio">In the studio</span>
                     ) : (
-                      <button className="btn btn-secondary btn-sm" onClick={async () => { const p = await guard(() => api.openInStudio(v.id)); if (p) { await load(); setTab("mix"); } }}>Use this one</button>
+                      <button className="btn btn-sm" onClick={async () => { const p = await guard(() => api.openInStudio(v.id)); if (p) { await load(); setTab("mix"); } }}>Use this one</button>
                     )}
                     <button className="btn btn-ghost btn-sm" disabled={!!job} title="Make a new take in the same style" onClick={async () => { const j = await guard(() => api.regenerate(v.id)); if (j) follow(j); }}>
                       <Icon name="refresh" size={15} /> Reroll
                     </button>
                     {!selected && (
-                      <button className="btn btn-ghost btn-sm btn-icon" aria-label="Delete this flip" onClick={async () => { await guard(() => api.deleteVariation(v.id)); setVariations((vs) => vs.filter((x) => x.id !== v.id)); }}>
+                      <button className="btn btn-ghost btn-sm btn-icon" aria-label={`Delete the ${STRATEGY_NAME[v.strategy] ?? v.strategy} flip`} onClick={() => setRemoving(v)}>
                         <Icon name="trash" size={15} />
                       </button>
                     )}
                   </div>
-                </article>
+                </li>
               );
             })}
-          </div>
+          </ul>
           {job && !building && <Progress job={job} compact />}
         </section>
       )}
@@ -235,12 +258,12 @@ export function ProjectPage() {
 
           {tab === "sample" && src && (
             <div className="sample-tab">
-              <div className="facts">
-                <div><span className="muted">File</span><strong>{src.original_filename}</strong></div>
-                <div><span className="muted">Length</span><strong className="mono">{(src.duration_seconds ?? 0).toFixed(1)} s</strong></div>
-                <div><span className="muted">Read as</span><strong>{src.analysis?.one_shot ? "One-shot — played as a melody" : src.analysis?.loop_locked ? "Tight loop — exact tempo" : "Recording — tempo tracked"}</strong></div>
-                {!src.analysis?.one_shot && <div><span className="muted">Tempo / key</span><strong className="mono">{src.analysis?.bpm} BPM · {src.analysis?.key}</strong></div>}
-              </div>
+              <dl className="readouts">
+                <div className="readout"><dt>Length</dt><dd><LcdText>{`${(src.duration_seconds ?? 0).toFixed(1)} s`}</LcdText></dd></div>
+                <div className="readout"><dt>Read as</dt><dd>{src.analysis?.one_shot ? "One-shot, played as a melody" : src.analysis?.loop_locked ? "Tight loop, exact tempo" : "Recording, tempo tracked"}</dd></div>
+                {!src.analysis?.one_shot && <div className="readout"><dt>Tempo</dt><dd><LcdText>{`${src.analysis?.bpm} BPM`}</LcdText></dd></div>}
+                {!src.analysis?.one_shot && <div className="readout"><dt>Key</dt><dd>{src.analysis?.key}</dd></div>}
+              </dl>
               <h4>Chops and loops found in your sample</h4>
               <p className="muted">Build a new set of flips around a different part.</p>
               <ul className="samples">
@@ -252,11 +275,11 @@ export function ProjectPage() {
                       <button className="play-btn sm" aria-label={`Play ${s.name}`} onClick={() => player.toggle({ id: sid, url: sampleAudio(s.id), title: s.name, subtitle: src.original_filename, peaks: s.peaks, duration: s.duration })}><Icon name={on ? "pause" : "play"} size={15} /></button>
                       <div className="sample-info">
                         <strong>{s.name}</strong>
-                        <span className="muted">{s.explanation.slice(0, 2).join(" · ")}</span>
+                        <span className="muted">{s.explanation.slice(0, 2).join(", ")}</span>
                       </div>
-                      <Waveform peaks={s.peaks} height={28} bars={60} />
+                      <div className="wave-well"><Waveform peaks={s.peaks} height={26} bars={60} /></div>
                       {current.meta.main_sample === s.id ? <span className="chip chip-accent">In use</span> : (
-                        <button className="btn btn-secondary btn-sm" disabled={!!job} onClick={() => startGeneration({ sample_mode: "manual", sample_ids: [s.id] })}>Flip this</button>
+                        <button className="btn btn-sm" disabled={!!job} onClick={() => startGeneration({ sample_mode: "manual", sample_ids: [s.id] })}>Flip this</button>
                       )}
                     </li>
                   );
@@ -268,10 +291,23 @@ export function ProjectPage() {
           {tab === "more" && caps && (
             <div className="more-tab">
               <StyleControls value={more} onChange={setMore} />
-              <button className="btn btn-primary" disabled={!!job} onClick={() => startGeneration({ ...more, sample_mode: "auto", sample_ids: [] })}><Icon name="spark" /> Make 4 new flips</button>
+              <button className="btn btn-primary" disabled={!!job} onClick={() => startGeneration({ ...more, sample_mode: "auto", sample_ids: [] })}>Make 4 new flips</button>
             </div>
           )}
         </section>
+      )}
+      {removing && (
+        <ConfirmDialog
+          title="Delete this flip?"
+          body={`The ${STRATEGY_NAME[removing.strategy] ?? removing.strategy} flip will be removed from this beat. This can't be undone.`}
+          confirmLabel="Delete flip"
+          onClose={() => setRemoving(null)}
+          onConfirm={async () => {
+            const id = removing.id;
+            await guard(() => api.deleteVariation(id));
+            setVariations((vs) => vs.filter((x) => x.id !== id));
+          }}
+        />
       )}
     </div>
   );

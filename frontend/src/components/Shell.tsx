@@ -19,6 +19,7 @@ function AccountLinks() {
 export function SiteShell() {
   return (
     <div className="site">
+      <a className="skip" href="#main">Skip to content</a>
       <header className="nav">
         <div className="nav-inner">
           <Logo />
@@ -31,7 +32,7 @@ export function SiteShell() {
           <div className="nav-actions"><AccountLinks /></div>
         </div>
       </header>
-      <main><Outlet /></main>
+      <main id="main"><Outlet /></main>
       <footer className="footer">
         <div className="footer-inner">
           <div>
@@ -45,7 +46,7 @@ export function SiteShell() {
             <a href={`mailto:${SUPPORT_EMAIL}`}>Contact</a>
           </nav>
         </div>
-        <div className="footer-inner fineprint">© {new Date().getFullYear()} {BRAND}. You're responsible for the rights to any sample you upload.</div>
+        <div className="footer-inner"><p className="fineprint">© {new Date().getFullYear()} <span translate="no">{BRAND}</span>. You're responsible for the rights to any sample you upload.</p></div>
       </footer>
     </div>
   );
@@ -58,6 +59,7 @@ export function AppShell() {
   const registered = !!me?.user && !me.user.guest;
   return (
     <div className="app">
+      <a className="skip" href="#main">Skip to content</a>
       <header className="nav nav-app">
         <div className="nav-inner">
           <Logo to="/app" />
@@ -67,8 +69,8 @@ export function AppShell() {
           </nav>
           <div className="nav-actions">
             {u && !me?.self_hosted && (
-              <Link to="/app/account" className="usage-pill" title="Generations left">
-                <Icon name="spark" size={14} /> {u.generations_left} left
+              <Link to="/app/account" className="usage-pill" aria-label={`${u.generations_left} generations left. Open account`}>
+                {u.generations_left} left
               </Link>
             )}
             {!registered && !me?.self_hosted && <button className="btn btn-ghost btn-sm" onClick={() => askSignup(undefined, "login")}>Log in</button>}
@@ -76,7 +78,7 @@ export function AppShell() {
           </div>
         </div>
       </header>
-      <main className="app-main"><Outlet /></main>
+      <main id="main" className="app-main"><Outlet /></main>
     </div>
   );
 }

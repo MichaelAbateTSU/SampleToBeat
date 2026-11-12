@@ -1,7 +1,6 @@
 import { type Arrangement, type Track } from "../api";
 import { usePlayer } from "../player";
 import { useSession } from "../session";
-import { Icon } from "./Icon";
 import { Slider } from "./Slider";
 
 const PATTERN_NAME: Record<string, string> = {
@@ -40,7 +39,7 @@ export function Studio({ arr, onChange, playerId }: Props) {
 
   return (
     <div className="studio">
-      <div className="timeline" style={{ "--bars": arr.bars } as React.CSSProperties}>
+      <div className="well timeline" style={{ "--bars": arr.bars } as React.CSSProperties}>
         <div className="tl-row tl-ruler">
           <div className="tl-head">Sections</div>
           <div className="tl-lane" onClick={(e) => {
@@ -50,7 +49,7 @@ export function Studio({ arr, onChange, playerId }: Props) {
           }}>
             {arr.sections.map((s, i) => (
               <div key={i} className={`tl-section sec-${s.name.toLowerCase()}`} style={{ left: `${(s.start_bar / arr.bars) * 100}%`, width: `${(s.bars / arr.bars) * 100}%` }}>
-                <span>{s.name}</span><span className="mono tl-bars">{s.bars}</span>
+                <span>{s.name}</span><span className="tl-bars">{s.bars}</span>
               </div>
             ))}
           </div>
@@ -77,7 +76,11 @@ export function Studio({ arr, onChange, playerId }: Props) {
             </div>
           );
         })}
-        {head !== null && <div className="tl-playhead" style={{ left: `calc(var(--tl-head) + (100% - var(--tl-head)) * ${head})` }} />}
+        {head !== null && (
+          <div style={{ position: "absolute", top: 0, bottom: 0, left: "var(--tl-head)", right: 0, pointerEvents: "none", transform: `translateX(${head * 100}%)` }}>
+            <div className="tl-playhead" />
+          </div>
+        )}
       </div>
 
       <div className="studio-controls">
@@ -107,7 +110,7 @@ export function Studio({ arr, onChange, playerId }: Props) {
           <Slider label="Kick ducking" min={0} max={0.9} value={Number(bass.duck ?? 0.45)} onChange={(duck) => onChange({ ...arr, bass: { ...arr.bass, duck } })} format={(v) => `${Math.round(v * 100)}%`} />
         </div>
       </div>
-      <p className="fineprint"><Icon name="wave" size={14} /> M mutes a track, S solos it. Click the section bar to jump while your mix is playing.</p>
+      <p className="fineprint">M mutes a track and S solos it. Click the section bar to jump while your mix is playing.</p>
     </div>
   );
 }

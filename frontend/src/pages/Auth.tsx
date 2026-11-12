@@ -50,7 +50,7 @@ export function ResetPage() {
           <form className="auth-form" onSubmit={submit}>
             <label>
               New password
-              <input type="password" autoComplete="new-password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 8 characters" />
+              <input type="password" name="password" autoComplete="new-password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 8 characters…" />
             </label>
             {error && <div className="form-error" role="alert">{error}</div>}
             <button className="btn btn-primary btn-block" disabled={busy}>{busy ? "Saving…" : "Save and log in"}</button>

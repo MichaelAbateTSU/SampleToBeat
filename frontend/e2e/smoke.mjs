@@ -28,15 +28,20 @@ try {
   await page.goto(BASE);
   await page.getByRole("heading", { name: /Drop a sample/ }).waitFor();
   expect(await page.locator(".plan").count() === 3, "three plans on the landing page");
-  expect(await page.locator(".demo-card").count() === 3, "three demo players");
+  expect(await page.locator(".pad-btn").count() === 5, "four flip pads and the source sample");
+  await page.locator(".pad-btn").first().click();
+  await page.locator(".pad-btn.on").waitFor();
+  await page.waitForFunction(() => /0:0[1-9]/.test(document.querySelector(".machine-lcd .time")?.textContent ?? ""), null, { timeout: 20_000 });
+  await shot("01-landing-playing");
+  await page.locator(".pad-btn").first().click();
   await shot("01-landing");
   await shot("01-landing-full", { fullPage: true });
-  step("landing renders with pricing and demos");
+  step("landing renders; a hero pad plays a demo flip");
 
   // guest -> demo loop -> create
   await page.getByRole("button", { name: /Try the demo loop/ }).click();
   await page.waitForURL(/\/app\/new/);
-  await page.getByText("Demo loop —").waitFor();
+  await page.getByText("Demo loop:").waitFor();
   await page.getByRole("button", { name: /Trap/ }).click();
   await shot("02-create");
   await page.getByRole("button", { name: /Make my beat/ }).click();
@@ -93,6 +98,16 @@ try {
   await shot("10-library");
   await page.locator(".beat-main").first().click();
   await page.locator(".timeline").waitFor();
+  // keyboard: the skip link is the first stop, and dialogs trap focus and close on Escape
+  await page.reload();
+  await page.locator(".timeline").waitFor();
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => document.activeElement?.textContent) === "Skip to content", "skip link is first in tab order");
+  await page.locator(".variation .btn-icon").first().click();
+  await page.getByRole("dialog", { name: "Delete this flip?" }).waitFor();
+  expect(await page.evaluate(() => document.activeElement?.textContent) === "Keep it", "confirm dialog focuses the safe choice");
+  await page.keyboard.press("Escape");
+  expect(await page.locator(".variation").count() === 4, "escape cancels the delete");
   await page.getByRole("button", { name: "Mute Hi-hats" }).click();
   await page.getByLabel("Swing").fill("58");
   await page.getByRole("button", { name: /Apply & listen/ }).click();
@@ -108,7 +123,7 @@ try {
   await page.locator(".toggle-row", { hasText: "MIDI" }).click();
   await page.getByRole("button", { name: /Export beat/ }).click();
   await page.locator(".files .file").nth(3).waitFor({ timeout: 120_000 });
-  const names = await page.locator(".files .file .mono").allTextContents();
+  const names = await page.locator(".files .file small").allTextContents();
   expect(names.some((n) => n.endsWith(".wav")) && names.some((n) => n.endsWith("_stems.zip")) && names.some((n) => n.endsWith(".mid")) && names.some((n) => n.endsWith("LICENSE.txt")), `pro export files: ${names}`);
   await shot("12-export-pro");
   step(`pro export: ${names.join(", ")}`);
